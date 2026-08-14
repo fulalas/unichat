@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:gravity="center_horizontal"
+        android:padding="24dp">
+
+        <!-- protocol switch -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp">
+
+            <Button
+                android:id="@+id/tabWhatsApp"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/whatsapp"
+                android:textStyle="bold"
+                android:textColor="@color/accent" />
+
+            <Button
+                android:id="@+id/tabTelegram"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:text="@string/telegram"
+                android:textColor="@color/text_secondary" />
+        </LinearLayout>
+
+        <!-- WhatsApp: QR / pairing code -->
+        <LinearLayout
+            android:id="@+id/waPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center_horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/login_title"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold"
+                android:layout_marginTop="16dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/login_hint"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp"
+                android:layout_marginTop="12dp" />
+
+            <FrameLayout
+                android:layout_width="264dp"
+                android:layout_height="264dp"
+                android:layout_marginTop="24dp">
+
+                <ImageView
+                    android:id="@+id/qrImage"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#FFFFFF"
+                    android:padding="8dp"
+                    android:visibility="invisible"
+                    android:contentDescription="@string/login_title" />
+
+                <ProgressBar
+                    android:id="@+id/qrProgress"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:layout_gravity="center" />
+            </FrameLayout>
+
+            <TextView
+                android:id="@+id/pairCodeHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/pair_code_hint"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp"
+                android:layout_marginTop="24dp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/pairCode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/accent"
+                android:textSize="34sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.25"
+                android:layout_marginTop="12dp"
+                android:visibility="gone" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/or_pair_with_number"
+                android:textColor="@color/text_secondary"
+                android:layout_marginTop="28dp" />
+
+            <EditText
+                android:id="@+id/phoneInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/phone_hint"
+                android:inputType="phone"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_secondary"
+                android:backgroundTint="@color/text_secondary"
+                android:layout_marginTop="8dp"
+                android:importantForAutofill="no" />
+
+            <Button
+                android:id="@+id/pairButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/get_pair_code"
+                android:textColor="@color/bg"
+                android:backgroundTint="@color/accent"
+                android:layout_marginTop="12dp" />
+        </LinearLayout>
+
+        <!-- Telegram: phone -> code -> optional 2FA password -->
+        <LinearLayout
+            android:id="@+id/tgPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center_horizontal"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/tg_login_title"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold"
+                android:layout_marginTop="16dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/tg_login_hint"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp"
+                android:layout_marginTop="12dp" />
+
+            <EditText
+                android:id="@+id/tgPhoneInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/tg_phone_hint"
+                android:inputType="phone"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_secondary"
+                android:backgroundTint="@color/text_secondary"
+                android:layout_marginTop="24dp"
+                android:importantForAutofill="no" />
+
+            <Button
+                android:id="@+id/tgSendCodeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/tg_send_code"
+                android:textColor="@color/bg"
+                android:backgroundTint="@color/accent"
+                android:layout_marginTop="12dp" />
+
+            <EditText
+                android:id="@+id/tgCodeInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/tg_code_hint"
+                android:inputType="number"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_secondary"
+                android:backgroundTint="@color/text_secondary"
+                android:layout_marginTop="24dp"
+                android:visibility="gone"
+                android:importantForAutofill="no" />
+
+            <Button
+                android:id="@+id/tgVerifyButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/tg_verify_code"
+                android:textColor="@color/bg"
+                android:backgroundTint="@color/accent"
+                android:layout_marginTop="12dp"
+                android:visibility="gone" />
+
+            <EditText
+                android:id="@+id/tgPasswordInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/tg_password_hint"
+                android:inputType="textPassword"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_secondary"
+                android:backgroundTint="@color/text_secondary"
+                android:layout_marginTop="24dp"
+                android:visibility="gone"
+                android:importantForAutofill="no" />
+
+            <Button
+                android:id="@+id/tgPasswordButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/tg_submit_password"
+                android:textColor="@color/bg"
+                android:backgroundTint="@color/accent"
+                android:layout_marginTop="12dp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/login_waiting"
+            android:textColor="@color/text_secondary"
+            android:layout_marginTop="20dp" />
+
+        <!-- shown once at least one account is linked: leave when YOU are done,
+             instead of being yanked to the chat list mid-flow -->
+        <Button
+            android:id="@+id/continueButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/open_chats"
+            android:textColor="@color/bg"
+            android:backgroundTint="@color/accent"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone" />
+    </LinearLayout>
+</ScrollView>

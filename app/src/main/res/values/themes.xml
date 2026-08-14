@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.UniChat" parent="Theme.AppCompat.DayNight">
+        <item name="colorPrimary">@color/surface</item>
+        <item name="colorPrimaryDark">@color/bg</item>
+        <item name="colorAccent">@color/accent</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <!-- API 29..34 only. From API 35 (our targetSdk) Android enforces
+             edge-to-edge and ignores both of these; BaseActivity pads for the
+             system-bar insets instead, and the bars draw over the window
+             background above. Kept because minSdk is 29, where they still
+             apply — they are NOT what colours the bars on a current device. -->
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:windowLightStatusBar">@bool/light_status_bar</item>
+        <item name="android:windowLightNavigationBar">@bool/light_status_bar</item>
+        <!-- per-protocol chat colors: blue (Telegram) is the default -->
+        <item name="chatAccent">@color/accent</item>
+        <item name="chatBubbleOut">@color/bubble_out</item>
+        <item name="chatQuoteFlash">@color/quote_flash</item>
+        <item name="chatMsgSelected">@color/msg_selected</item>
+    </style>
+
+    <!-- Applied by ChatActivity on top of the base theme for WhatsApp chats:
+         swaps the chat colors (and widget accent) to the WhatsApp green set. -->
+    <style name="ThemeOverlay.UniChat.Wa" parent="">
+        <item name="colorAccent">@color/accent_wa</item>
+        <item name="chatAccent">@color/accent_wa</item>
+        <item name="chatBubbleOut">@color/bubble_out_wa</item>
+        <item name="chatQuoteFlash">@color/quote_flash_wa</item>
+        <item name="chatMsgSelected">@color/msg_selected_wa</item>
+    </style>
+</resources>

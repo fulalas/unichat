@@ -1,0 +1,67 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'org.unichat.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "org.unichat.app"
+        minSdk 29
+        targetSdk 35
+        versionCode 18
+        versionName "0.6.1"
+        ndk {
+            // arm64 only: the three-ABI APK carried ~50 MB of native libraries no
+            // real device could ever load. Must stay in step with build.sh's
+            // gomobile -target list and build-tdlib.sh's default ABI list.
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    signingConfigs {
+        // Fixed key stored in the repo so every build (on any machine) can
+        // update the installed app in place without re-pairing WhatsApp.
+        release {
+            storeFile file('../keystore/unichat.keystore')
+            storePassword 'wmchat'
+            keyAlias 'wmchat'
+            keyPassword 'wmchat'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Store native libs (the large Go bridge .so) compressed in the APK
+            // instead of AGP's default uncompressed packaging. Shrinks the APK;
+            // libs are extracted at install time (fine for minSdk 29).
+            useLegacyPackaging = true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation files('libs/wmbridge.aar')
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.recyclerview:recyclerview:1.3.2'
+    implementation 'com.google.zxing:core:3.5.3'
+}

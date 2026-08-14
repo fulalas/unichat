@@ -1,0 +1,22 @@
+# Local build toolchain (JDK, Android SDK, Go, Gradle)
+/toolchain/
+
+# Gradle caches and build outputs
+.gradle/
+build/
+app/build/
+
+# Generated Go bridge (built by build.sh)
+app/libs/wmbridge.aar
+app/libs/wmbridge-sources.jar
+
+# whatsmeow sources fetched by build.sh (pinned, not vendored)
+gobridge/ext/whatsmeow/
+
+# Final APK dropped in the repo root by build.sh
+/unichat-*.apk
+
+# Machine-specific SDK location
+local.properties
+tdjson/ext/
+app/src/main/jniLibs/

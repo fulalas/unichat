@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical">
+
+    <!-- reachable to screen readers on purpose: ChatActivity gives the avatar
+         its own click action (open the full-size photo) -->
+    <ImageView
+        android:id="@+id/toolbarAvatar"
+        android:layout_width="38dp"
+        android:layout_height="38dp"
+        android:contentDescription="@string/avatar_desc" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:layout_marginStart="12dp"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/toolbarTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="@color/text_primary"
+            android:textSize="17sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end" />
+
+        <TextView
+            android:id="@+id/toolbarSubtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="@color/text_secondary"
+            android:textSize="12sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <ImageButton
+        android:id="@+id/toolbarSearch"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/ic_search"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/search" />
+
+    <ImageButton
+        android:id="@+id/toolbarMenu"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/ic_more_vert"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/chat_menu" />
+</LinearLayout>

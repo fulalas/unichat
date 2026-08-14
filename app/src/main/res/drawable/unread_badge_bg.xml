@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Unread-count pill. Not badge_bg (an oval): the badge has to hold the "99+"
+     overflow string as well as a single digit, so it is a rounded rectangle
+     whose radius equals half its height — a perfect circle while it is square,
+     stretching into a pill once the text needs more width. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/unread_badge" />
+    <corners android:radius="10dp" />
+</shape>

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light theme -->
+    <color name="bg">#FFFFFF</color>
+    <color name="surface">#F0F2F5</color>
+    <color name="surface_light">#E4E8EB</color>
+    <color name="bubble_in">#F5F6F6</color>
+    <color name="bubble_out">#D2E7FA</color>
+    <color name="accent">#2481CC</color>
+    <color name="text_primary">#111B21</color>
+    <color name="text_secondary">#667781</color>
+    <color name="divider">#E0E0E0</color>
+    <color name="unread_badge">#2AABEE</color>
+    <!-- jump-to-quote row flash (semi-transparent accent blue) -->
+    <color name="quote_flash">#4D2481CC</color>
+    <!-- multi-select highlight on a selected message row -->
+    <color name="msg_selected">#332481CC</color>
+
+    <!-- WhatsApp chat-screen palette (green), applied via ThemeOverlay.UniChat.Wa -->
+    <color name="accent_wa">#008069</color>
+    <color name="bubble_out_wa">#D9FDD3</color>
+    <color name="quote_flash_wa">#4D008069</color>
+    <color name="msg_selected_wa">#33008069</color>
+</resources>

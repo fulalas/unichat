@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="wm" path="wm/" />
+    <!-- TDLib's files_directory (Tg.init); Telegram media is stored here and
+         is handed to other apps through providedFile() exactly like wm/ media -->
+    <files-path name="tg" path="tg/" />
+    <cache-path name="cache" path="." />
+</paths>
