@@ -906,6 +906,19 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
         )
     }
 
+    /** Newest stored message of a chat — where a full history walk starts. */
+    fun newestMessage(chatId: String): MessageRow? = queryFirst(
+        "SELECT id, sender_id, text, from_me, time_sent, is_read FROM messages " +
+            "WHERE chat_id=? AND time_sent>0 ORDER BY time_sent DESC, rowid DESC LIMIT 1",
+        arrayOf(chatId)
+    ) {
+        MessageRow(
+            id = it.getString(0), chatId = chatId, senderId = it.getString(1),
+            text = it.getString(2), fromMe = it.getInt(3) != 0,
+            timeSent = it.getLong(4), isRead = it.getInt(5) != 0
+        )
+    }
+
     fun messageCount(chatId: String): Int = queryFirst(
         "SELECT COUNT(*) FROM messages WHERE chat_id=?", arrayOf(chatId)
     ) { it.getInt(0) } ?: 0

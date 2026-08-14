@@ -1086,17 +1086,32 @@ object Tg {
     }
 
     // Blocking history fetch; returns stored count, -1 on error. Executor only.
-    private fun fetchHistory(chatId: String, fromMsgId: Long, limit: Int): Int {
+    private fun fetchHistory(chatId: String, fromMsgId: Long, limit: Int): Int =
+        fetchHistoryPage(chatId, fromMsgId, limit).first
+
+    /**
+     * Stores one page and reports (count, oldest id in it). The oldest id is
+     * what a full walk anchors its next page on: anchoring on the oldest row in
+     * the DB instead only ever extends the history backwards, so a hole between
+     * two already-synced stretches could never be filled.
+     */
+    private fun fetchHistoryPage(chatId: String, fromMsgId: Long, limit: Int): Pair<Int, Long> {
         val res = request(
             JSONObject().put("@type", "getChatHistory")
                 .put("chat_id", chatIdOf(chatId))
                 .put("from_message_id", fromMsgId)
                 .put("offset", 0).put("limit", limit).put("only_local", false),
             timeoutMs = 30_000,
-        ) ?: return -1
-        val arr = res.optJSONArray("messages") ?: return -1
-        for (i in 0 until arr.length()) storeMessage(arr.getJSONObject(i), isHistory = true)
-        return arr.length()
+        ) ?: return Pair(-1, 0L)
+        val arr = res.optJSONArray("messages") ?: return Pair(-1, 0L)
+        var oldest = 0L
+        for (i in 0 until arr.length()) {
+            val m = arr.getJSONObject(i)
+            storeMessage(m, isHistory = true)
+            val id = m.optLong("id")
+            if (id > 0 && (oldest == 0L || id < oldest)) oldest = id
+        }
+        return Pair(arr.length(), oldest)
     }
 
     fun requestInitialHistory(chatId: String) {
@@ -1175,20 +1190,26 @@ object Tg {
         return 100 * r / (r + 1)
     }
 
+    /**
+     * Walks the chat's whole history from the newest message backwards, storing
+     * every page. Deliberately restarts from the top rather than resuming from
+     * the oldest row held: only a full walk closes gaps left in the middle by
+     * partial syncs, which is the point of asking for all messages.
+     */
     fun syncAllHistory(chatId: String): Boolean {
         if (syncAllChat != null && syncAllChat != chatId) return false
         if (syncAllChat == chatId) return true
         syncAllChat = chatId
         syncAllRounds = 0
+        historyExhausted.remove(chatId)
         Bridge.postChatSyncProgress(chatId, 0)
-        pager.execute { syncAllStep(chatId) }
+        pager.execute { syncAllStep(chatId, 0L) } // 0 = start at the newest
         return true
     }
 
-    private fun syncAllStep(chatId: String) {
+    private fun syncAllStep(chatId: String, fromId: Long) {
         if (syncAllChat != chatId) return
-        val fromId = Bridge.db.oldestMessage(chatId)?.id?.toLongOrNull() ?: 0L
-        val count = fetchHistory(chatId, fromId, 100)
+        val (count, oldest) = fetchHistoryPage(chatId, fromId, 100)
         when {
             count < 0 -> {
                 syncAllChat = null
@@ -1199,11 +1220,18 @@ object Tg {
                 syncAllChat = null
                 Bridge.postChatSyncProgress(chatId, 100)
             }
+            // no older anchor than the one we asked from: the walk cannot
+            // advance, so treat it as the end rather than looping on it
+            oldest == 0L || oldest == fromId -> {
+                historyExhausted.add(chatId)
+                syncAllChat = null
+                Bridge.postChatSyncProgress(chatId, 100)
+            }
             else -> {
                 syncAllRounds++
                 Bridge.notifyChatInternal(chatId)
                 Bridge.postChatSyncProgress(chatId, syncAllProgress(chatId))
-                pager.execute { syncAllStep(chatId) }
+                pager.execute { syncAllStep(chatId, oldest) }
             }
         }
     }

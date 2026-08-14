@@ -1009,7 +1009,16 @@ object Bridge : EventListener {
         if (cur == chatId) return true // already running
         executor.execute {
             if (chatExport != null || (syncAllChat != null && syncAllChat != chatId)) return@execute
-            if (chatId in historyExhausted) { notifySyncAll(chatId, 100); return@execute }
+            // Restart the walk at the NEWEST message instead of resuming from
+            // the oldest one held. Paging only ever moves backwards, so
+            // resuming just extends the far end and leaves any hole in the
+            // middle — a stretch the phone never delivered — permanently empty.
+            // Re-fetching what is already stored is cheap (the upsert is
+            // idempotent) and is the only thing that closes those gaps.
+            historyExhausted.remove(chatId)
+            db.newestMessage(chatId)?.let {
+                historyAnchor[chatId] = Anchor(it.id, it.timeSent, it.fromMe)
+            }
             syncAllChat = chatId
             syncAllRounds = 0
             notifySyncAll(chatId, 0)
