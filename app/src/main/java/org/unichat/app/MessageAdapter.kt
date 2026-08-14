@@ -243,7 +243,9 @@ class MessageAdapter(
      * whose clip had stopped).
      */
     private fun applyAudioState(holder: Holder, msg: MessageRow) {
-        val current = msg.filePath.isNotEmpty() && AudioPlayer.currentPath == msg.filePath
+        // by message, not by path: one Telegram file can back several rows, and
+        // matching on the path lit up every copy as "playing"
+        val current = AudioPlayer.currentMsgId == msg.id && AudioPlayer.currentChatId == msg.chatId
         // setImageResource reloads the drawable even for an unchanged id, and this
         // runs 4x/second per visible row for the whole clip
         val icon = if (current && AudioPlayer.isPlaying) R.drawable.ic_pause else R.drawable.ic_play
@@ -573,7 +575,7 @@ class MessageAdapter(
             // the stored path can be stale (a swept Telegram staging copy);
             // re-download instead of "playing" a file that is no longer there
             if (m.filePath.isNotEmpty() && java.io.File(m.filePath).exists()) {
-                AudioPlayer.playPause(m.filePath, m.chatId)
+                AudioPlayer.playPause(m.filePath, m.chatId, m.id)
             } else {
                 onNeedDownload(m, true)
             }
@@ -587,10 +589,10 @@ class MessageAdapter(
                 seekDragging = false
                 val m = holder.current ?: return
                 if (m.filePath.isEmpty()) return
-                if (AudioPlayer.currentPath == m.filePath) {
+                if (AudioPlayer.currentMsgId == m.id) {
                     AudioPlayer.seekTo(sb?.progress ?: 0)
                 } else {
-                    AudioPlayer.play(m.filePath, m.chatId, sb?.progress ?: 0)
+                    AudioPlayer.play(m.filePath, m.chatId, m.id, sb?.progress ?: 0)
                 }
             }
         })

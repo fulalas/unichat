@@ -26,6 +26,13 @@ object AudioPlayer {
         private set
     var currentChatId: String = ""
         private set
+    /**
+     * Message the current clip belongs to. The file path cannot identify it:
+     * Telegram serves one file for every copy of the same voice note, so a note
+     * forwarded twice into a chat gives several rows the SAME path.
+     */
+    var currentMsgId: String = ""
+        private set
     var earpiece: Boolean = false
         private set
 
@@ -48,8 +55,9 @@ object AudioPlayer {
 
     var onStateChanged: (() -> Unit)? = null        // chat screen UI
     var onServiceStateChanged: (() -> Unit)? = null  // service (notification + proximity)
-    var onCompleted: ((String, String) -> Unit)? = null
-    var onPlayStarted: ((String, String) -> Unit)? = null // (path, chatId) when playback begins
+    // (path, chatId, msgId)
+    var onCompleted: ((String, String, String) -> Unit)? = null
+    var onPlayStarted: ((String, String, String) -> Unit)? = null
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -62,13 +70,13 @@ object AudioPlayer {
     val durationMs: Int get() = try { player?.duration ?: 0 } catch (e: Exception) { 0 }
 
     /** Play a new file, or toggle pause/resume when already on this file. */
-    fun playPause(path: String, chatId: String) {
+    fun playPause(path: String, chatId: String, msgId: String) {
         val p = player
-        if (p != null && currentPath == path) {
+        if (p != null && currentMsgId == msgId && currentChatId == chatId) {
             if (p.isPlaying) pause() else resume()
             return
         }
-        play(path, chatId)
+        play(path, chatId, msgId)
     }
 
     /**
@@ -84,6 +92,7 @@ object AudioPlayer {
     fun play(
         path: String,
         chatId: String,
+        msgId: String,
         startMs: Int = 0,
         useEarpiece: Boolean = proximityNear,
     ) {
@@ -117,10 +126,11 @@ object AudioPlayer {
             p.setOnCompletionListener {
                 val finishedPath = currentPath
                 val finishedChat = currentChatId
+                val finishedMsg = currentMsgId
                 // keep route for a possible immediate chain to the next voice
                 stopInternal(resetRoute = false)
                 notifyState()
-                if (finishedPath != null) onCompleted?.invoke(finishedPath, finishedChat)
+                if (finishedPath != null) onCompleted?.invoke(finishedPath, finishedChat, finishedMsg)
             }
             if (startMs > 0) p.seekTo(startMs)
             requestFocus(commMode)
@@ -130,9 +140,10 @@ object AudioPlayer {
             fresh = null // ownership transferred; stopInternal releases it now
             currentPath = path
             currentChatId = chatId
+            currentMsgId = msgId
             earpiece = useEarpiece
             proximitySessionEnded = false
-            try { onPlayStarted?.invoke(path, chatId) } catch (e: Exception) {}
+            try { onPlayStarted?.invoke(path, chatId, msgId) } catch (e: Exception) {}
         } catch (e: Exception) {
             // e.g. the file was deleted or truncated: setDataSource/prepare throw
             android.util.Log.w("AudioPlayer", "play failed for $path", e)
@@ -204,7 +215,7 @@ object AudioPlayer {
         // if it no longer matches (e.g. paused at ear, resumed with phone away)
         if (earpiece != proximityNear) {
             val path = currentPath ?: return
-            play(path, currentChatId, p.currentPosition)
+            play(path, currentChatId, currentMsgId, p.currentPosition)
         } else {
             // re-requested, not assumed: a permanent loss (another app took over
             // the audio) is what paused this clip in the first place
@@ -224,7 +235,7 @@ object AudioPlayer {
         val path = currentPath ?: return
         val chatId = currentChatId
         val pos = (p.currentPosition - rewindMs).coerceAtLeast(0)
-        play(path, chatId, pos, useEarpiece = true)
+        play(path, chatId, currentMsgId, pos, useEarpiece = true)
     }
 
     fun stop() {
@@ -350,6 +361,7 @@ object AudioPlayer {
         player = null
         currentPath = null
         currentChatId = ""
+        currentMsgId = ""
         if (resetRoute) resetRoute()
     }
 

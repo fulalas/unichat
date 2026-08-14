@@ -107,6 +107,10 @@ class ChatListAdapter(
         holder.muteIcon.visibility = if (chat.muted) View.VISIBLE else View.GONE
         if (chat.unread > 0) {
             holder.unreadBadge.visibility = View.VISIBLE
+            // the pill is one shared drawable, so tint it per row rather than
+            // letting every chat wear the same accent
+            holder.unreadBadge.backgroundTintList =
+                android.content.res.ColorStateList.valueOf(context.protocolAccent(chat.id))
             // "99+" (not a bare "99", which reads as an exact count)
             holder.unreadBadge.text =
                 if (chat.unread > 99) context.getString(R.string.unread_overflow)

@@ -110,7 +110,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 18) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 19) {
 
     // for previewLabel's string resources (chats() builds chat-list previews)
     private val ctx: Context = context.applicationContext
@@ -151,6 +151,17 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 18) {
         // chatOfMessage looks a message up by id, which the (chat_id, id) primary key
         // cannot serve — it full-scanned the largest table, on the media
         // download path (every download whose first setFileState matched 0 rows).
+        // The two repair sweeps (unplayed voice notes, "[Type]" placeholders) run
+        // on every chat open and every history page, and their filters are not
+        // covered by idx_msg_time — so the common case, finding nothing, walked
+        // the chat's whole message list twice.
+        private const val CREATE_UNPLAYED_AUDIO_INDEX =
+            "CREATE INDEX IF NOT EXISTS idx_msg_unplayed_audio ON messages(chat_id, time_sent) " +
+                "WHERE msg_type='audio' AND played=0"
+        private const val CREATE_PLACEHOLDER_INDEX =
+            "CREATE INDEX IF NOT EXISTS idx_msg_placeholder ON messages(chat_id, time_sent) " +
+                "WHERE msg_type='' AND file_id=''"
+
         private const val CREATE_ID_INDEX =
             "CREATE INDEX IF NOT EXISTS idx_msg_id ON messages(id)"
     }
@@ -201,6 +212,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 18) {
         db.execSQL(CREATE_ID_INDEX)
         db.execSQL(CREATE_REACTIONS)
         db.execSQL(CREATE_DELETED_CHATS)
+        db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
+        db.execSQL(CREATE_PLACEHOLDER_INDEX)
     }
 
     /**
@@ -292,6 +305,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 18) {
         }
         if (oldVersion < 18) {
             db.execSQL(CREATE_DELETED_CHATS)
+        }
+        if (oldVersion < 19) {
+            db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
+            db.execSQL(CREATE_PLACEHOLDER_INDEX)
         }
         if (oldVersion < 17) {
             // last reaction in a chat, rendered as the chat-list preview when it
@@ -536,18 +553,44 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 18) {
         arrayOf(chatId, msgId)
     ) { Pair(it.getString(0), it.getInt(1)) } ?: Pair("", 0)
 
+    /**
+     * Voice notes in a chat still marked unplayed, newest first. Used to
+     * re-check their state against the server: the flag only ever arrives with
+     * the message, so rows stored before it was known keep a stale dot that
+     * paging can never correct — paging only ever fetches OLDER messages.
+     */
+    fun unplayedAudioIds(chatId: String, limit: Int): List<String> = queryList(
+        "SELECT id FROM messages WHERE chat_id=? AND msg_type='audio' AND played=0 " +
+            "ORDER BY time_sent DESC LIMIT ?",
+        arrayOf(chatId, limit.toString())
+    ) { it.getString(0) }
+
+    /**
+     * Messages stored as a bare "[SomeType]" placeholder — a content type this
+     * app did not understand when it first saw them. They cannot be corrected in
+     * place: upsertMessage never overwrites msg_type, and its text guard keeps
+     * the old value when the fresh one is empty (a caption-less video note).
+     * The caller re-fetches these and re-stores them from scratch.
+     */
+    fun placeholderMessageIds(chatId: String, limit: Int): List<String> = queryList(
+        "SELECT id FROM messages WHERE chat_id=? AND msg_type='' AND file_id='' " +
+            "AND text LIKE '[%]' ORDER BY time_sent DESC LIMIT ?",
+        arrayOf(chatId, limit.toString())
+    ) { it.getString(0) }
+
     fun setPlayed(chatId: String, msgId: String) {
         writableDatabase.execSQL(
             "UPDATE messages SET played=1 WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
         )
     }
 
-    // Looks up a message by its downloaded file path (for marking voice notes
-    // played when playback starts). Returns id/sender/from_me/played/type.
-    fun messageByFilePath(chatId: String, filePath: String): MessageRow? = queryFirst(
+    // One message's playback-relevant fields. Keyed by id, not by file path:
+    // Telegram serves a single file for every copy of the same voice note, so a
+    // path can belong to several rows.
+    fun audioMessage(chatId: String, msgId: String): MessageRow? = queryFirst(
         "SELECT id, sender_id, from_me, msg_type, played FROM messages " +
-            "WHERE chat_id=? AND file_path=? LIMIT 1",
-        arrayOf(chatId, filePath)
+            "WHERE chat_id=? AND id=?",
+        arrayOf(chatId, msgId)
     ) {
         MessageRow(
             id = it.getString(0), chatId = chatId, senderId = it.getString(1),
@@ -790,12 +833,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 18) {
         }
     }
 
-    // First voice message after the given (by file path) one, regardless of how
-    // many messages are loaded in the UI. Used to chain voice-note playback.
-    fun nextAudioMessage(chatId: String, afterFilePath: String): MessageRow? {
+    // First voice message after the given one, regardless of how many messages
+    // are loaded in the UI. Used to chain voice-note playback.
+    fun nextAudioMessage(chatId: String, afterMsgId: String): MessageRow? {
         val after = queryFirst(
-            "SELECT time_sent, rowid FROM messages WHERE chat_id=? AND file_path=? LIMIT 1",
-            arrayOf(chatId, afterFilePath)
+            "SELECT time_sent, rowid FROM messages WHERE chat_id=? AND id=?",
+            arrayOf(chatId, afterMsgId)
         ) { Pair(it.getLong(0), it.getLong(1)) } ?: return null
         // (time_sent, rowid) so a voice note in the same second as the current
         // one still chains, matching the display order's rowid tiebreaker.

@@ -162,8 +162,8 @@ object Bridge : EventListener {
         val dataDir = appContext.filesDir.absolutePath + "/wm"
         connId = Wmbridge.init(dataDir, this)
         if (connId >= 0) {
-            AudioPlayer.onCompleted = { path, chatId -> chainNextVoice(path, chatId) }
-            AudioPlayer.onPlayStarted = { path, chatId -> markVoicePlayed(chatId, path) }
+            AudioPlayer.onCompleted = { _, chatId, msgId -> chainNextVoice(chatId, msgId) }
+            AudioPlayer.onPlayStarted = { _, chatId, msgId -> markVoicePlayed(chatId, msgId) }
             executor.execute { cleanStaleCache(appContext) }
         }
         return connId >= 0
@@ -173,20 +173,20 @@ object Bridge : EventListener {
     @Volatile private var autoPlayKey: String? = null
 
     /** Plays the next voice message of the chat, skipping other message types. */
-    private fun chainNextVoice(finishedPath: String, chatId: String) {
+    private fun chainNextVoice(chatId: String, finishedMsgId: String) {
         if (chatId.isEmpty()) { main.post { AudioPlayer.resetRoute() }; return }
         if (connId < 0) return
         executor.execute {
             // query the next voice message directly (not limited to the last 500
             // loaded rows), and use the DB as the source of truth for its file
-            val next = db.nextAudioMessage(chatId, finishedPath)
+            val next = db.nextAudioMessage(chatId, finishedMsgId)
             if (next == null) {
                 main.post { AudioPlayer.resetRoute() }
                 return@execute
             }
             val (path, status) = db.fileState(next.chatId, next.id)
             if (status >= 2 && path.isNotEmpty()) {
-                main.post { AudioPlayer.play(path, chatId) }
+                main.post { AudioPlayer.play(path, chatId, next.id) }
             } else {
                 autoPlayKey = next.chatId + "/" + next.id
                 // downloadFile can decline (no fileId, or a failure already
@@ -200,10 +200,10 @@ object Bridge : EventListener {
 
     // Marks a received voice note as played (once) when its playback starts,
     // and sends a "played" receipt to the sender.
-    private fun markVoicePlayed(chatId: String, filePath: String) {
-        if (chatId.isEmpty() || filePath.isEmpty()) return
+    private fun markVoicePlayed(chatId: String, msgId: String) {
+        if (chatId.isEmpty() || msgId.isEmpty()) return
         executor.execute {
-            val msg = db.messageByFilePath(chatId, filePath) ?: return@execute
+            val msg = db.audioMessage(chatId, msgId) ?: return@execute
             if (msg.fromMe || msg.played || msg.msgType != "audio") return@execute
             db.setPlayed(chatId, msg.id)
             // ParseJID does NOT reject a "tg:" id (it yields an empty-user JID),
@@ -217,8 +217,9 @@ object Bridge : EventListener {
 
     /** Notification "next" button: play the voice message after the current one. */
     fun skipToNextVoice() {
-        val path = AudioPlayer.currentPath ?: return
-        chainNextVoice(path, AudioPlayer.currentChatId)
+        val msgId = AudioPlayer.currentMsgId
+        if (msgId.isEmpty()) return
+        chainNextVoice(AudioPlayer.currentChatId, msgId)
     }
 
     fun hasSession(): Boolean = connId >= 0 && Wmbridge.hasSession(connId)
@@ -1355,7 +1356,7 @@ object Bridge : EventListener {
         else userRequestedDownloads.remove(key)
         if (autoPlayKey == key) {
             autoPlayKey = null
-            if (status == 2 && filePath.isNotEmpty()) main.post { AudioPlayer.play(filePath, chatId) }
+            if (status == 2 && filePath.isNotEmpty()) main.post { AudioPlayer.play(filePath, chatId, msgId) }
         }
     }
 
@@ -1642,7 +1643,7 @@ object Bridge : EventListener {
         if (autoPlayKey == "$chatId/$msgId" || autoPlayKey == "$target/$msgId") {
             autoPlayKey = null
             if (status.toInt() == 2 && filePath.isNotEmpty()) {
-                main.post { AudioPlayer.play(filePath, target) }
+                main.post { AudioPlayer.play(filePath, target, msgId) }
             }
         }
         notifyChat(target)

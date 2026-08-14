@@ -86,6 +86,12 @@ object Tg {
     // one in-flight history request per chat
     private val historyBusy = CopyOnWriteArraySet<String>()
     private val historyExhausted = CopyOnWriteArraySet<String>()
+    // Messages already re-fetched once by the placeholder repair. A content
+    // type this build still does not map re-stores the SAME "[Type]" text, so
+    // without this it was deleted and re-inserted on every chat open and every
+    // history page — churning rowids (the order tiebreaker), rewriting its
+    // reactions, and eating the repair budget that stale voice notes need.
+    private val repairAttempted: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     fun hasSession(): Boolean = appContext?.let { Prefs.tgLinked(it) } == true
 
@@ -294,6 +300,17 @@ object Tg {
                 Bridge.notifyTgState()
             }
             "updateNewChat" -> onNewChat(obj.getJSONObject("chat"))
+            // A photo change invalidates the path we memoised for that chat —
+            // TDLib writes the new picture to a different file and deletes the
+            // old one, so without this the list kept showing the previous photo
+            // (or the initials placeholder once the file was gone).
+            "updateChatPhoto" -> {
+                val chatId = idFor(obj.getLong("chat_id"))
+                avatarPaths.remove(chatId)
+                avatarPaths.remove("$chatId/big")
+                AvatarLoader.invalidate(chatId)
+                Bridge.notifyChatsChangedInternal()
+            }
             "updateChatTitle" -> {
                 // renameChat, not upsertChat: the latter writes `archived` too,
                 // and passing a placeholder false here un-archived the chat
@@ -373,6 +390,14 @@ object Tg {
                     else -> return
                 }
                 Bridge.postChatState(chatId, idFor(uid), st)
+            }
+            // The recipient played our voice note. TDLib reports this with its
+            // own update — the content itself does not change, so no
+            // updateMessageContent follows and the unplayed dot stayed on.
+            "updateMessageContentOpened" -> {
+                val chatId = idFor(obj.getLong("chat_id"))
+                Bridge.db.setPlayed(chatId, obj.getLong("message_id").toString())
+                Bridge.notifyChatInternal(chatId)
             }
             "updateFile" -> onFile(obj.getJSONObject("file"))
             "updateMessageInteractionInfo" -> onInteractionInfo(obj)
@@ -489,6 +514,12 @@ object Tg {
                 text = content.optJSONObject("caption")?.optString("text") ?: ""
                 fileId = content.getJSONObject("video").getJSONObject("video").optInt("id").toString()
             }
+            // a round "video note" plays like any other video for us
+            "messageVideoNote" -> {
+                msgType = "video"
+                fileId = content.getJSONObject("video_note").getJSONObject("video")
+                    .optInt("id").toString()
+            }
             "messageAnimation" -> {
                 msgType = "video"
                 text = content.optJSONObject("caption")?.optString("text") ?: ""
@@ -523,6 +554,13 @@ object Tg {
                     text = sticker.optString("emoji").ifEmpty { "🩹" } + " (sticker)"
                 }
             }
+            // A message that is just emoji comes as its own content type with the
+            // plain characters in `emoji`; without this it fell through to the
+            // generic placeholder and rendered as "[AnimatedEmoji]".
+            // the placeholder fallback when `emoji` is absent, so the row stays
+            // recognisable to the repair pass instead of rendering blank
+            "messageAnimatedEmoji", "messageDice" ->
+                text = content.optString("emoji").ifEmpty { placeholderFor(content) }
             "messageLocation" -> {
                 msgType = "location"
                 val loc = content.getJSONObject("location")
@@ -531,7 +569,7 @@ object Tg {
             }
             "messageCall" -> text = "📞 Call"
             "messageChatChangeTitle" -> text = "· " + content.optString("title")
-            else -> text = "[" + content.optString("@type").removePrefix("message") + "]"
+            else -> text = placeholderFor(content)
         }
 
         var quotedId = ""
@@ -580,6 +618,10 @@ object Tg {
         Bridge.notifyChatInternal(chatId)
     }
 
+    /** Stand-in for a content type this build does not render, e.g. "[Poll]". */
+    private fun placeholderFor(content: JSONObject): String =
+        "[" + content.optString("@type").removePrefix("message") + "]"
+
     // The local file path inside a message's content, if already downloaded.
     private fun localPathOf(msg: JSONObject, content: JSONObject): String? {
         val file = fileOf(content) ?: return null
@@ -600,6 +642,7 @@ object Tg {
                 if (sizes.length() > 0) sizes.getJSONObject(sizes.length() - 1).getJSONObject("photo") else null
             }
             "messageVideo" -> content.getJSONObject("video").getJSONObject("video")
+            "messageVideoNote" -> content.getJSONObject("video_note").getJSONObject("video")
             "messageAnimation" -> content.getJSONObject("animation").getJSONObject("animation")
             "messageVoiceNote" -> content.getJSONObject("voice_note").getJSONObject("voice")
             "messageAudio" -> content.getJSONObject("audio").getJSONObject("audio")
@@ -1015,8 +1058,13 @@ object Tg {
                 if (count > 0) Bridge.notifyChatInternal(chatId)
                 onDone?.invoke(count)
             } finally {
+                // released before the re-sync below: that is another blocking
+                // round-trip, and holding the slot across it made a scroll
+                // arriving in the window fail historyBusy.add and be dropped,
+                // leaving the user stuck at the top edge with no new page
                 historyBusy.remove(chatId)
             }
+            syncPlayedState(chatId)
         }
     }
 
@@ -1046,10 +1094,58 @@ object Tg {
                 ) {
                     Bridge.notifyChatInternal(chatId)
                 }
+                syncPlayedState(chatId)
             } finally {
                 historyBusy.remove(chatId)
             }
         }
+    }
+
+    /**
+     * Re-checks voice notes this chat still shows as unplayed. A message
+     * carries is_listened only when it is fetched, and paging only ever reaches
+     * BACKWARD past what is already stored, so a note stored before its
+     * recipient listened would keep its dot for good. Bounded to one
+     * getMessages call (TDLib caps it at 100) and run whenever the chat is
+     * opened or another page is pulled in, so it converges as you scroll.
+     */
+    private fun syncPlayedState(chatId: String) {
+        // Two repairs share one round-trip (TDLib caps getMessages at 100):
+        // voice notes whose listened flag we may have missed, and messages
+        // stored as a "[SomeType]" placeholder by an older build that did not
+        // understand their content type yet.
+        val stale = Bridge.db.placeholderMessageIds(chatId, 40)
+            .filter { repairAttempted.add("$chatId/$it") }
+        val ids = LinkedHashSet(Bridge.db.unplayedAudioIds(chatId, 60)) + stale
+        if (ids.isEmpty()) return
+        val wanted = JSONArray()
+        for (id in ids) id.toLongOrNull()?.let { wanted.put(it) }
+        if (wanted.length() == 0) return
+        val res = request(
+            JSONObject().put("@type", "getMessages")
+                .put("chat_id", chatIdOf(chatId)).put("message_ids", wanted)
+        ) ?: return
+        val msgs = res.optJSONArray("messages") ?: return
+        var changed = false
+        for (i in 0 until msgs.length()) {
+            // a message the server no longer has comes back as a null entry
+            val m = msgs.optJSONObject(i) ?: continue
+            val msgId = m.getLong("id").toString()
+            val content = m.optJSONObject("content") ?: continue
+            if (content.optString("@type") == "messageVoiceNote" &&
+                content.optBoolean("is_listened")
+            ) {
+                Bridge.db.setPlayed(chatId, msgId)
+                changed = true
+            }
+            if (msgId in stale) {
+                // dropped and re-stored, since the row's type is what is wrong
+                Bridge.db.deleteMessage(chatId, msgId)
+                storeMessage(m, isHistory = true)
+                changed = true
+            }
+        }
+        if (changed) Bridge.notifyChatInternal(chatId)
     }
 
     // sync-all: page until the start of the chat is reached
@@ -1248,13 +1344,21 @@ object Tg {
     fun setAbout(text: String): Boolean =
         request(JSONObject().put("@type", "setBio").put("bio", text)) != null
 
-    fun setProfilePicture(jpegPath: String): Boolean = request(
+    fun setProfilePicture(jpegPath: String): Boolean {
+        val ok = request(
         JSONObject().put("@type", "setProfilePhoto")
             .put(
                 "photo",
                 JSONObject().put("@type", "inputChatPhotoStatic").put("photo", inputLocalFile(jpegPath))
             )
-    ) != null
+        ) != null
+        if (ok) {
+            val self = selfId()
+            avatarPaths.remove(self)
+            avatarPaths.remove("$self/big")
+        }
+        return ok
+    }
 
     // --- privacy ------------------------------------------------------------------------------
 
