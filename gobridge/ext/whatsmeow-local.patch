@@ -1,0 +1,108 @@
+Base-Commit: 0dcf1f50f4b1f6060f8e7d2bbd0272766021fe67
+Base-Branch:
+diff --git a/group.go b/group.go
+index 2df8631..f967f3a 100644
+--- a/group.go
++++ b/group.go
+@@ -328,11 +328,20 @@ func (cli *Client) SetGroupPhoto(ctx context.Context, jid types.JID, avatar []by
+ 			Content: avatar,
+ 		}}
+ 	}
++	// Our own profile picture goes through this same IQ, but with no target at
++	// all: the server never answers a w:profile:picture set that names our own
++	// JID as the target, so leaving it in place makes the call sit there until
++	// it times out. Other clients special-case it the same way.
++	target := jid
++	ownPN, ownLID := cli.getOwnID(), cli.getOwnLID()
++	if (!ownPN.IsEmpty() && jid.User == ownPN.User) || (!ownLID.IsEmpty() && jid.User == ownLID.User) {
++		target = types.EmptyJID
++	}
+ 	resp, err := cli.sendIQ(ctx, infoQuery{
+ 		Namespace: "w:profile:picture",
+ 		Type:      iqSet,
+ 		To:        types.ServerJID,
+-		Target:    jid,
++		Target:    target,
+ 		Content:   content,
+ 	})
+ 	if errors.Is(err, ErrIQNotAcceptable) {
+@@ -345,6 +354,12 @@ func (cli *Client) SetGroupPhoto(ctx context.Context, jid types.JID, avatar []by
+ 	}
+ 	pictureID, ok := resp.GetChildByTag("picture").Attrs["id"].(string)
+ 	if !ok {
++		// The server accepted the picture (sendIQ already rejected an error
++		// response), so treat a reply without an ID as success for our own
++		// profile, where the ID is not echoed back the way it is for groups.
++		if target.IsEmpty() {
++			return "", nil
++		}
+ 		return "", fmt.Errorf("didn't find picture ID in response")
+ 	}
+ 	return pictureID, nil
+diff --git a/socket/framesocket.go b/socket/framesocket.go
+index d222e12..7ca166e 100644
+--- a/socket/framesocket.go
++++ b/socket/framesocket.go
+@@ -77,7 +77,7 @@ func (fs *FrameSocket) Close(code websocket.StatusCode) {
+ 	if code > 0 {
+ 		err := conn.Close(code, "")
+ 		if err != nil {
+-			fs.log.Warnf("Error sending close to websocket: %v", err)
++			fs.log.Debugf("Error sending close to websocket: %v", err)
+ 		}
+ 	} else {
+ 		err := conn.CloseNow()
+diff --git a/user.go b/user.go
+index 9d846ea..2823f10 100644
+--- a/user.go
++++ b/user.go
+@@ -168,7 +168,48 @@ func (cli *Client) SetStatusMessage(ctx context.Context, status types.SetStatusI
+ 		"input": &status,
+ 	})
+ 	// TODO check output result?
+-	return err
++	if err == nil {
++		return nil
++	}
++	// The mex mutation above is rejected outright for some accounts (the server
++	// answers the GraphQL request with 400 Bad Request), which would leave no
++	// way to set an About at all. Only the plain-text case can be retried in
++	// another shape, so anything richer keeps the original error.
++	if status.Emoji != nil || status.Duration.Duration != 0 || status.Text == nil {
++		return err
++	}
++	cli.Log.Warnf("Setting status via mex failed (%v), trying fallbacks", err)
++	// Two other shapes of the same mutation: without the duration field at all,
++	// and with the 24h duration WhatsApp Web was seen sending (whatsmeow#1219,
++	// whose author captured it before the merged version defaulted it to zero).
++	for _, input := range []map[string]any{
++		{"text": *status.Text},
++		{"text": *status.Text, "ephemeral_duration_sec": 86400},
++	} {
++		_, mexErr := cli.sendMexIQ(ctx, mutationUpdateTextStatus, map[string]any{"input": input})
++		if mexErr == nil {
++			cli.Log.Warnf("Status mex fallback %+v succeeded", input)
++			return nil
++		}
++		cli.Log.Warnf("Status mex fallback %+v failed: %v", input, mexErr)
++	}
++	// Last resort: the IQ this call used before the switch to mex. Upstream
++	// switched away because the server started accepting it without applying
++	// the change, so a success here is not proof the About really changed.
++	if _, iqErr := cli.sendIQ(ctx, infoQuery{
++		Namespace: "status",
++		Type:      iqSet,
++		To:        types.ServerJID,
++		Content: []waBinary.Node{{
++			Tag:     "status",
++			Content: *status.Text,
++		}},
++	}); iqErr != nil {
++		cli.Log.Warnf("Legacy status IQ fallback failed: %v", iqErr)
++		return err
++	}
++	cli.Log.Warnf("Legacy status IQ fallback succeeded")
++	return nil
+ }
+ 
+ // IsOnWhatsApp checks if the given phone numbers are registered on WhatsApp.
