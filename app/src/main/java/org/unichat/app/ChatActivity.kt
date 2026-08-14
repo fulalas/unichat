@@ -112,6 +112,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // anchor the bridge pages back from); seekFetching guards the one bridge call.
     private var seekQuotedId: String? = null
     private var seekOrigin: MessageRow? = null
+    // A message the image viewer asked us to jump to, applied on the next list
+    // commit so the reload that follows onStart cannot scroll it away again.
+    private var pendingJumpId: String? = null
+    // the running seek came from the image viewer, so its landing is centred
+    private var seekCenter = false
     private var seekFetching = false
     private val seekTimeout = Runnable { if (seekQuotedId != null) failSeek() }
 
@@ -201,6 +206,22 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
+    // The viewer can page far back through the chat's images, so the message it
+    // returns is often nowhere near where the user was: seek it like a tapped
+    // quote rather than assuming it is in the loaded window.
+    private val openImage = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val target = result.data?.getStringExtra("jumpTo") ?: return@registerForActivityResult
+        // Deliberately NOT scrolled here. This callback runs after onStart,
+        // which has already started a reload, and that reload's commit restores
+        // the saved position — undoing any jump made now. It is parked instead
+        // and applied once the list has settled.
+        pendingJumpId = target
+        // ...unless nothing is coming: a search left open skips the reload
+        if (searchActive) consumePendingJump()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         chatId = intent.getStringExtra("chatId") ?: run { finish(); return }
@@ -282,7 +303,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 val intent = Intent(this, ImageViewActivity::class.java)
                 intent.putExtra("path", msg.filePath)
                 intent.putExtra("chatId", chatId)
-                startActivity(intent)
+                // for result: the viewer's "Go to message" answers with the id
+                // of whichever image was on screen when it was closed
+                openImage.launch(intent)
             },
             onDocumentClick = { msg -> openDocument(msg) },
             onVideoOpen = { msg -> openVideo(msg) },
@@ -585,6 +608,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                         }
                     }
                     updateScrollFab()
+                    // after the restore above, so the jump is what the user is
+                    // left looking at
+                    consumePendingJump()
                     // a jump-to-quote seek advances as each (local widen / remote
                     // page) reload commits: jump when the target is now loaded,
                     // else fetch the next page
@@ -657,7 +683,14 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // a far, media-heavy range crawls for seconds and drifts the landing. The
     // green flash marks where it landed; holdScrollToMessage keeps it there while
     // the window settles.
-    private fun scrollToMessage(msgId: String, toastIfMissing: Boolean = true): Boolean {
+    /**
+     * [center] parks the message in the middle of the screen instead of merely
+     * bringing it into view. A tall photo lands half cut off otherwise, which is
+     * the wrong place to leave someone who asked to go to that picture.
+     */
+    private fun scrollToMessage(
+        msgId: String, toastIfMissing: Boolean = true, center: Boolean = false,
+    ): Boolean {
         if (msgId.isEmpty()) return false
         val index = adapter.indexOfMessage(msgId)
         return if (index >= 0) {
@@ -665,7 +698,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             // RecyclerView reuse the holder in place instead of cross-fading)
             adapter.flashMsgId = msgId
             adapter.notifyItemChanged(index, Unit)
-            holdScrollToMessage(msgId, index)
+            holdScrollToMessage(msgId, index, center)
             true
         } else {
             if (toastIfMissing) {
@@ -684,8 +717,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // off-screen right after the jump. Re-pins each layout pass until it's stable
     // (or the window elapses). Yields immediately if the user starts scrolling
     // (see cancelHold in the scroll listener).
-    private fun holdScrollToMessage(msgId: String, index: Int) {
-        messageList.scrollToPosition(index)
+    private fun holdScrollToMessage(msgId: String, index: Int, center: Boolean = false) {
+        if (center) lm.scrollToPositionWithOffset(index, 0) else messageList.scrollToPosition(index)
         cancelHold() // drop any previous hold so they can't fight over the target
         val start = SystemClock.uptimeMillis()
         // Track the index rather than re-deriving it: indexOfMessage is a linear
@@ -707,8 +740,28 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 // full window (a self-sustaining layout loop).
                 val first = lm.findFirstVisibleItemPosition()
                 val last = lm.findLastVisibleItemPosition()
-                if (targetIndex in first..last) { cancelHold(); return }
-                messageList.scrollToPosition(targetIndex)
+                if (targetIndex in first..last) {
+                    if (!center) { cancelHold(); return }
+                    // Centring needs the row's real height, which only exists
+                    // once it is laid out — so it is applied here, and re-applied
+                    // while the height keeps changing (an image decoding into a
+                    // taller bubble moves the target under it).
+                    val view = lm.findViewByPosition(targetIndex)
+                    if (view == null) { lm.scrollToPositionWithOffset(targetIndex, 0); return }
+                    val visible = messageList.height -
+                        messageList.paddingTop - messageList.paddingBottom
+                    // negative for a row taller than the screen: that shows its
+                    // middle, which is what "centred" means for a big photo
+                    val wanted = (visible - view.height) / 2
+                    if (kotlin.math.abs(view.top - messageList.paddingTop - wanted) <= 4) {
+                        cancelHold()
+                        return
+                    }
+                    lm.scrollToPositionWithOffset(targetIndex, wanted)
+                    return
+                }
+                if (center) lm.scrollToPositionWithOffset(targetIndex, 0)
+                else messageList.scrollToPosition(targetIndex)
             }
         }
         holdListener = listener
@@ -785,11 +838,32 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         else failSeek()
     }
 
+    /**
+     * Jumps to the message the image viewer returned. Loaded messages scroll
+     * straight there; anything further back is driven in by the same seek a
+     * tapped quote uses, which widens the window and pages history until it
+     * lands (and re-enters through the commit above as each page arrives).
+     */
+    private fun consumePendingJump() {
+        val target = pendingJumpId ?: return
+        pendingJumpId = null
+        if (scrollToMessage(target, toastIfMissing = false, center = true)) return
+        if (seekQuotedId == target) return // already being sought
+        if (seekQuotedId != null) clearSeek()
+        seekQuotedId = target
+        seekOrigin = null
+        seekCenter = true
+        seekFetching = false
+        updateSubtitle()
+        driveSeek()
+    }
+
     private fun completeSeek() {
         val target = seekQuotedId ?: return
         val origin = seekOrigin?.id
+        val center = seekCenter
         clearSeek()
-        if (scrollToMessage(target, toastIfMissing = false) &&
+        if (scrollToMessage(target, toastIfMissing = false, center = center) &&
             origin != null && quoteJumpReturns.lastOrNull() != origin
         ) {
             quoteJumpReturns.addLast(origin)
@@ -804,6 +878,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun clearSeek() {
         seekQuotedId = null
         seekOrigin = null
+        seekCenter = false
         seekFetching = false
         main.removeCallbacks(seekTimeout)
         Bridge.cancelSeek() // stop the bridge paging history for an abandoned seek

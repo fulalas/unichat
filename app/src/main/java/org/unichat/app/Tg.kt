@@ -716,20 +716,30 @@ object Tg {
      * that happens the current id is read back from the message and stored, so
      * the stale reference is repaired rather than retried forever.
      */
-    private fun startDownload(msg: MessageRow, fid: Int) {
-        if (issueDownload(msg, fid)) return
+    /**
+     * Resolves the message's CURRENT file and downloads that.
+     *
+     * The stored id is never used to fetch. A TDLib file id is an index into the
+     * session that issued it, and TDLib hands the same small integers out again
+     * to unrelated files in later runs — so a stored id can now name a totally
+     * different photo, which downloaded happily and was written onto this
+     * message as if it belonged to it. That is how one file ended up rendering
+     * in four messages across four different chats. Asking the message which
+     * file it has is the only answer that cannot be stale.
+     */
+    private fun startDownload(msg: MessageRow, storedFid: Int) {
         val mid = msg.id.toLongOrNull() ?: return failDownload(msg)
         val fresh = request(
             JSONObject().put("@type", "getMessage")
                 .put("chat_id", chatIdOf(msg.chatId)).put("message_id", mid)
         ) ?: return failDownload(msg)
-        val newId = fresh.optJSONObject("content")?.let { fileOf(it) }?.optInt("id")
-        if (newId == null || newId == fid) {
-            Log.w(TAG, "no usable file for ${msg.chatId}/${msg.id} (was $fid)")
+        val fid = fresh.optJSONObject("content")?.let { fileOf(it) }?.optInt("id")
+        if (fid == null || fid == 0) {
+            Log.w(TAG, "no file for ${msg.chatId}/${msg.id}")
             return failDownload(msg)
         }
-        Bridge.db.setFileId(msg.chatId, msg.id, newId.toString())
-        if (!issueDownload(msg, newId)) failDownload(msg)
+        if (fid != storedFid) Bridge.db.setFileId(msg.chatId, msg.id, fid.toString())
+        if (!issueDownload(msg, fid)) failDownload(msg)
     }
 
     /**
@@ -739,9 +749,16 @@ object Tg {
      * left the bubble on its spinner for good.
      */
     private fun issueDownload(msg: MessageRow, fid: Int): Boolean {
-        fileTargets.computeIfAbsent(fid) { ConcurrentHashMap.newKeySet() }
-            .add(Pair(msg.chatId, msg.id))
-        val res = request(downloadRequest(fid)) ?: return false
+        val target = Pair(msg.chatId, msg.id)
+        fileTargets.computeIfAbsent(fid) { ConcurrentHashMap.newKeySet() }.add(target)
+        val res = request(downloadRequest(fid))
+        if (res == null) {
+            // Registration is not left behind on failure: these ids get reused,
+            // so a dangling target would receive whatever unrelated file lands
+            // on that id next.
+            fileTargets[fid]?.remove(target)
+            return false
+        }
         val local = res.optJSONObject("local")
         val path = local?.optString("path").orEmpty()
         if (local?.optBoolean("is_downloading_completed") == true && path.isNotEmpty()) {

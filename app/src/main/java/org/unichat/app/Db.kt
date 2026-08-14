@@ -110,7 +110,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 19) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
 
     // for previewLabel's string resources (chats() builds chat-list previews)
     private val ctx: Context = context.applicationContext
@@ -305,6 +305,16 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 19) {
         }
         if (oldVersion < 18) {
             db.execSQL(CREATE_DELETED_CHATS)
+        }
+        if (oldVersion < 20) {
+            // Telegram media could be pointing at the wrong file entirely: a
+            // stale file id was trusted to fetch with, and TDLib reuses those
+            // ids across sessions. Which rows are wrong is not knowable, so
+            // every association is dropped and re-derived from the message.
+            db.execSQL(
+                "UPDATE messages SET file_path='', file_status=0 " +
+                    "WHERE chat_id LIKE 'tg:%' AND file_path!=''"
+            )
         }
         if (oldVersion < 19) {
             db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
@@ -805,6 +815,25 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 19) {
             senderName = it.getString(13), played = it.getInt(14) != 0,
             forwarded = it.getInt(15) != 0, quotedType = it.getString(16),
             reactions = it.getString(17) ?: ""
+        )
+    }
+
+    /**
+     * Every image in a chat, oldest first — the album the fullscreen viewer
+     * pages through. Ordered like the message list (rowid breaks a same-second
+     * tie) so swiping matches the order the bubbles appear in.
+     */
+    fun chatImages(chatId: String): List<MessageRow> = queryList(
+        "SELECT id, sender_id, from_me, time_sent, file_id, file_path, file_status " +
+            "FROM messages WHERE chat_id=? AND msg_type='image' " +
+            "ORDER BY time_sent ASC, rowid ASC",
+        arrayOf(chatId)
+    ) {
+        MessageRow(
+            id = it.getString(0), chatId = chatId, senderId = it.getString(1),
+            text = "", fromMe = it.getInt(2) != 0, timeSent = it.getLong(3),
+            isRead = true, msgType = "image", fileId = it.getString(4),
+            filePath = it.getString(5), fileStatus = it.getInt(6),
         )
     }
 

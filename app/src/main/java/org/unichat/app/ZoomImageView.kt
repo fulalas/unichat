@@ -30,6 +30,9 @@ class ZoomImageView @JvmOverloads constructor(
     private var tx = 0f
     private var ty = 0f
     private var anim: Runnable? = null
+    // width the image currently occupies, kept from the last apply() so the
+    // pager can ask whether this view still has somewhere to pan
+    private var contentWidth = 0f
     // reused across apply() calls: it runs per pan MotionEvent and per frame of
     // the double-tap zoom, and ImageView.setImageMatrix copies what it is given
     private val matrix = Matrix()
@@ -133,6 +136,24 @@ class ZoomImageView @JvmOverloads constructor(
         postOnAnimation(tick)
     }
 
+    /**
+     * ViewPager2 asks this before claiming a horizontal drag. A zoomed-in image
+     * always answers yes, in BOTH directions: the drag belongs to the picture
+     * until the user zooms back out, so reaching an edge must not hand the
+     * gesture to the pager. Handing it over at the edge meant a zoomed photo
+     * would page one way but not the other, which reads as a broken swipe.
+     */
+    override fun canScrollHorizontally(direction: Int): Boolean = zoom > 1f
+
+    /** Back to fit-to-screen, for a recycled page bound to another image. */
+    fun reset() {
+        anim = null
+        zoom = 1f
+        tx = 0f
+        ty = 0f
+        apply()
+    }
+
     // Rebuilds the image matrix from zoom/tx/ty, clamping the translation so
     // the image stays centered while smaller than the view and never leaves
     // gaps at the edges once zoomed in.
@@ -146,6 +167,7 @@ class ZoomImageView @JvmOverloads constructor(
         val scale = minOf(vw / dw, vh / dh) * zoom
         val cw = dw * scale
         val ch = dh * scale
+        contentWidth = cw
         tx = if (cw <= vw) (vw - cw) / 2f else tx.coerceIn(vw - cw, 0f)
         ty = if (ch <= vh) (vh - ch) / 2f else ty.coerceIn(vh - ch, 0f)
         matrix.setScale(scale, scale)

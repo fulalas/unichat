@@ -86,6 +86,7 @@
     <string name="download">Download</string>
     <!-- unread badge cap: "99+", never a bare 99 (which reads as exact) -->
     <string name="unread_overflow">99+</string>
+    <string name="go_to_message">Go to message</string>
     <string name="forwarded">↪ Forwarded</string>
     <string name="download_failed">Download failed</string>
     <string name="react">React</string>
