@@ -292,7 +292,13 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
      */
     override fun onChatState(chatId: String, state: String) {
         if (!started || query.isNotEmpty()) return
-        if (allChats.none { it.id == chatId }) return
+        // A chat nobody has loaded yet (its first message is arriving with the
+        // typing) is not in `allChats`, so there is no row to re-stamp — read
+        // the list instead of dropping the event.
+        if (allChats.none { it.id == chatId }) {
+            reloadFromEvent()
+            return
+        }
         submitChats(allChats)
     }
 
