@@ -45,7 +45,16 @@ data class MessageRow(
     val played: Boolean = false,
     val forwarded: Boolean = false,
     val reactions: String = "", // comma-separated emojis, one per reacting user
+    // Coordinates of a "location" row. Their own fields because they are not a
+    // media reference: they used to ride in fileId as "lat,lng", so that field
+    // meant two unrelated things and every consumer had to know which.
+    val latitude: Double = 0.0,
+    val longitude: Double = 0.0,
 )
+
+/** "lat,lng" as maps apps and the exporter expect it, "" for a non-location. */
+fun MessageRow.coordinates(): String =
+    if (msgType == "location") "%.6f,%.6f".format(java.util.Locale.US, latitude, longitude) else ""
 
 // Sender identity of a single stored message (see Db.messageSender).
 data class SenderInfo(val senderId: String, val fromMe: Boolean, val senderName: String)
@@ -71,6 +80,7 @@ fun previewLabel(
     }
     return when (msgType) {
         "image" -> labeled("📷", R.string.photo_label)
+        "sticker" -> labeled("🩹", R.string.sticker_label)
         "video" -> labeled("🎥", R.string.video_label)
         "location" -> {
             val base = labeled("📍", R.string.location_label)
@@ -81,17 +91,46 @@ fun previewLabel(
             val base = if (emoji) "🎤 $label" else label
             if (detail.isEmpty()) base else "$base ($detail)"
         }
-        "document" -> if (emoji) "📎 $text" else text
-        // view-once media: its keys are never shared with a companion device, so
-        // there is nothing to render but a label. Owned here (not spelled out in
-        // the Go bridge) so it is translatable like every other type label.
-        "viewonce" -> {
-            val label = ctx.getString(R.string.view_once_label)
-            if (emoji) "🔒 $label" else label
+        "document" -> labeled("📎", R.string.document_label)
+        // Kinds with nothing to render but a label. Owned here (not spelled out
+        // in the Go bridge) so they are translatable like every other type
+        // label — they used to arrive as English prose in the message body.
+        in LABEL_ONLY_TYPES -> {
+            val (icon, labelRes) = LABEL_ONLY_TYPES.getValue(msgType)
+            val label = ctx.getString(labelRes)
+            if (emoji) "$icon $label" else label
         }
         else -> text
     }
 }
+
+/**
+ * Content kinds drawn as a picture in the bubble and openable in the fullscreen
+ * viewer. A sticker is one, but it is NOT a photo: it keeps its intrinsic size
+ * and carries no caption or timestamp overlay, which is why it has a kind of its
+ * own instead of being an "image" identified by a prefix on its download token.
+ */
+val PICTURE_TYPES = setOf("image", "sticker")
+
+/**
+ * Message kinds this client can only put a name to: it cannot render, download,
+ * forward or share them. Each maps to its icon and its localized label.
+ *
+ * View-once media is here because its keys never reach a companion device; the
+ * rest are protocol features this client does not implement. They are stored
+ * and shown as a labelled row rather than dropped, so a conversation has no
+ * invisible holes in it.
+ */
+val LABEL_ONLY_TYPES: Map<String, Pair<String, Int>> = mapOf(
+    "viewonce" to ("🔒" to R.string.view_once_label),
+    "contact" to ("👤" to R.string.contact_label),
+    "poll" to ("📊" to R.string.poll_label),
+    "pollvote" to ("🗳" to R.string.poll_vote_label),
+    "event" to ("📅" to R.string.event_label),
+    "groupinvite" to ("👥" to R.string.group_invite_label),
+    "livelocation" to ("📍" to R.string.live_location_label),
+    "call" to ("📞" to R.string.call_label),
+)
 
 /**
  * Chat-list line for a message that has been reacted to, or null when it has no
@@ -112,7 +151,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
 
     // for previewLabel's string resources (chats() builds chat-list previews)
     private val ctx: Context = context.applicationContext
@@ -207,6 +246,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
                 "sender_name TEXT NOT NULL DEFAULT ''," +
                 "played INTEGER NOT NULL DEFAULT 0," +
                 "forwarded INTEGER NOT NULL DEFAULT 0," +
+                // only meaningful for msg_type 'location'
+                "latitude REAL NOT NULL DEFAULT 0, longitude REAL NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(chat_id, id))"
         )
         db.execSQL(CREATE_TIME_INDEX)
@@ -307,6 +348,29 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
         }
         if (oldVersion < 18) {
             db.execSQL(CREATE_DELETED_CHATS)
+        }
+        if (oldVersion < 22) {
+            // Location coordinates moved out of file_id, which was carrying
+            // either a media reference or a "lat,lng" pair depending on the
+            // message type, into columns of their own.
+            db.execSQL("ALTER TABLE messages ADD COLUMN latitude REAL NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE messages ADD COLUMN longitude REAL NOT NULL DEFAULT 0")
+            db.execSQL(
+                "UPDATE messages SET " +
+                    "latitude=CAST(substr(file_id, 1, instr(file_id, ',')-1) AS REAL)," +
+                    "longitude=CAST(substr(file_id, instr(file_id, ',')+1) AS REAL)," +
+                    "file_id='' " +
+                    "WHERE msg_type='location' AND instr(file_id, ',')>0"
+            )
+        }
+        if (oldVersion < 21) {
+            // Stickers became a content kind of their own instead of an "image"
+            // recognised by sniffing the "stk:" prefix off the download token.
+            // WhatsApp rows carry that prefix and can be re-typed; Telegram ones
+            // were stored with a bare numeric file id and are indistinguishable
+            // from photos in hindsight, so old Telegram stickers keep rendering
+            // as images until they are re-fetched.
+            db.execSQL("UPDATE messages SET msg_type='sticker' WHERE msg_type='image' AND file_id LIKE 'stk:%'")
         }
         if (oldVersion < 20) {
             // Telegram media could be pointing at the wrong file entirely: a
@@ -451,8 +515,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
     fun upsertMessage(m: MessageRow) {
         if (suppressed(m.chatId, m.timeSent)) return
         writableDatabase.execSQL(
-            "INSERT INTO messages(chat_id, id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, edited, quoted_id, quoted_text, quoted_type, sender_name, forwarded) " +
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
+            "INSERT INTO messages(chat_id, id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, edited, quoted_id, quoted_text, quoted_type, sender_name, forwarded, latitude, longitude) " +
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
                 "ON CONFLICT(chat_id, id) DO UPDATE SET " +
                 // Guarded like every other field below. It used to be an
                 // unconditional text=excluded.text, so a history-sync
@@ -472,11 +536,16 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
                 // the upload's download reference; edits re-deliver with
                 // time_sent 0 / empty file_id, which must not clobber
                 "time_sent=CASE WHEN excluded.time_sent>0 THEN excluded.time_sent ELSE time_sent END," +
-                "file_id=CASE WHEN excluded.file_id!='' THEN excluded.file_id ELSE file_id END",
+                "file_id=CASE WHEN excluded.file_id!='' THEN excluded.file_id ELSE file_id END," +
+                // same guard as file_id: an edit or history re-delivery of a
+                // location carries no coordinates and must not zero the stored ones
+                "latitude=CASE WHEN excluded.latitude!=0 THEN excluded.latitude ELSE latitude END," +
+                "longitude=CASE WHEN excluded.longitude!=0 THEN excluded.longitude ELSE longitude END",
             arrayOf(
                 m.chatId, m.id, m.senderId, m.text, if (m.fromMe) 1 else 0, m.timeSent,
                 if (m.isRead) 1 else 0, m.msgType, m.fileId, if (m.edited) 1 else 0,
-                m.quotedId, m.quotedText, m.quotedType, m.senderName, if (m.forwarded) 1 else 0
+                m.quotedId, m.quotedText, m.quotedType, m.senderName, if (m.forwarded) 1 else 0,
+                m.latitude, m.longitude
             )
         )
     }
@@ -804,9 +873,48 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
         }
     }
 
+    // The full bubble-rendering shape, shared by the window query and the
+    // single-row refresh so the two can't drift apart. `src` is whatever the
+    // caller selects from (a windowed subquery, or the table itself).
+    private fun messageColumns(src: String) =
+        "SELECT id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, " +
+            "file_status, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
+            "latitude, longitude," +
+            "(SELECT GROUP_CONCAT(emoji) FROM reactions r " +
+            "WHERE r.chat_id=$src.chat_id AND r.msg_id=$src.id) AS reactions "
+
+    private fun fullMessage(chatId: String, it: Cursor) = MessageRow(
+        id = it.getString(0), chatId = chatId, senderId = it.getString(1),
+        text = it.getString(2), fromMe = it.getInt(3) != 0,
+        timeSent = it.getLong(4), isRead = it.getInt(5) != 0,
+        msgType = it.getString(6), fileId = it.getString(7),
+        filePath = it.getString(8), fileStatus = it.getInt(9),
+        edited = it.getInt(10) != 0,
+        quotedId = it.getString(11), quotedText = it.getString(12),
+        senderName = it.getString(13), played = it.getInt(14) != 0,
+        forwarded = it.getInt(15) != 0, quotedType = it.getString(16),
+        latitude = it.getDouble(17), longitude = it.getDouble(18),
+        reactions = it.getString(19) ?: ""
+    )
+
+    /**
+     * Re-reads specific messages of a chat. The open chat uses this when an
+     * event names the rows it touched (a read receipt, a reaction, a finished
+     * download) instead of re-querying its whole loaded window — which is up to
+     * 5000 rows, each with a correlated reactions subquery, and used to run
+     * several times a second during a burst of receipts.
+     */
+    fun messagesByIds(chatId: String, ids: Collection<String>): List<MessageRow> {
+        if (ids.isEmpty()) return emptyList()
+        val holes = ids.joinToString(",") { "?" }
+        return queryList(
+            messageColumns("messages") + "FROM messages WHERE chat_id=? AND id IN ($holes)",
+            (listOf(chatId) + ids).toTypedArray()
+        ) { fullMessage(chatId, it) }
+    }
+
     fun messages(chatId: String, limit: Int = 500): List<MessageRow> = queryList(
-        "SELECT id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, file_status, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
-            "(SELECT GROUP_CONCAT(emoji) FROM reactions r WHERE r.chat_id=m.chat_id AND r.msg_id=m.id) AS reactions FROM " +
+        messageColumns("m") + "FROM " +
             // whatsapp timestamps are second-resolution, so time_sent alone
             // can't order messages sent within the same second. rowid is the
             // insertion counter (== arrival order for live messages; the
@@ -815,36 +923,25 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
             "(SELECT rowid AS rid, * FROM messages WHERE chat_id=? ORDER BY time_sent DESC, rowid DESC LIMIT ?) m " +
             "ORDER BY time_sent ASC, rid ASC",
         arrayOf(chatId, limit.toString())
-    ) {
-        MessageRow(
-            id = it.getString(0), chatId = chatId, senderId = it.getString(1),
-            text = it.getString(2), fromMe = it.getInt(3) != 0,
-            timeSent = it.getLong(4), isRead = it.getInt(5) != 0,
-            msgType = it.getString(6), fileId = it.getString(7),
-            filePath = it.getString(8), fileStatus = it.getInt(9),
-            edited = it.getInt(10) != 0,
-            quotedId = it.getString(11), quotedText = it.getString(12),
-            senderName = it.getString(13), played = it.getInt(14) != 0,
-            forwarded = it.getInt(15) != 0, quotedType = it.getString(16),
-            reactions = it.getString(17) ?: ""
-        )
-    }
+    ) { fullMessage(chatId, it) }
 
     /**
      * Every image in a chat, oldest first — the album the fullscreen viewer
      * pages through. Ordered like the message list (rowid breaks a same-second
      * tie) so swiping matches the order the bubbles appear in.
      */
+    // Stickers are in the album too — they are pictures, just not photos — so
+    // the type is read back rather than assumed.
     fun chatImages(chatId: String): List<MessageRow> = queryList(
-        "SELECT id, sender_id, from_me, time_sent, file_id, file_path, file_status " +
-            "FROM messages WHERE chat_id=? AND msg_type='image' " +
+        "SELECT id, sender_id, from_me, time_sent, file_id, file_path, file_status, msg_type " +
+            "FROM messages WHERE chat_id=? AND msg_type IN ('image','sticker') " +
             "ORDER BY time_sent ASC, rowid ASC",
         arrayOf(chatId)
     ) {
         MessageRow(
             id = it.getString(0), chatId = chatId, senderId = it.getString(1),
             text = "", fromMe = it.getInt(2) != 0, timeSent = it.getLong(3),
-            isRead = true, msgType = "image", fileId = it.getString(4),
+            isRead = true, msgType = it.getString(7), fileId = it.getString(4),
             filePath = it.getString(5), fileStatus = it.getInt(6),
         )
     }

@@ -45,7 +45,8 @@ type EventListener interface {
 	OnStateChanged(state string) // connecting, connected, disconnected, logged_out, outdated
 	OnQrCode(code string)
 	OnPairCode(code string)
-	OnPairError(message string)
+	// a code from pairErrorCode, not prose: the app owns the wording
+	OnPairError(code string)
 	// isSaved is true only for address-book contacts (a name saved on the
 	// phone), not for chat partners known merely by their WhatsApp push name.
 	OnContact(id string, name string, phone string, isSelf bool, isGroup bool, isSaved bool)
@@ -54,7 +55,7 @@ type EventListener interface {
 	// after a sync-complete when the LID→phone mapping is warm. The app uses it to
 	// reconcile any chat mistakenly keyed by a contact's LID (see ResolveChatId).
 	OnContactsSynced()
-	// msgType is "" for plain text or "image"; fileId is an opaque token for
+	// msgType is "" for plain text, else a content kind; fileId is an opaque token for
 	// DownloadFile when msgType is a media type. isHistory is true for messages
 	// delivered by a history sync (backfill) rather than arriving live.
 	// isEdited is true when this delivery is an edit of an existing message.
@@ -64,7 +65,10 @@ type EventListener interface {
 	// rather than by a fixed English word chosen here.
 	// senderName is the sender's WhatsApp push name (public name), used as a
 	// fallback for group participants not in the address book.
-	OnMessage(chatId string, msgId string, senderId string, text string, fromMe bool, timeSent int64, isRead bool, msgType string, fileId string, isHistory bool, isEdited bool, quotedId string, quotedText string, quotedType string, senderName string, isForwarded bool)
+	// latitude/longitude are meaningful only for msgType "location"; they used
+	// to be smuggled through fileId as "lat,lng", so that one field meant either
+	// a media reference or a pair of coordinates depending on the type.
+	OnMessage(chatId string, msgId string, senderId string, text string, fromMe bool, timeSent int64, isRead bool, msgType string, fileId string, latitude float64, longitude float64, isHistory bool, isEdited bool, quotedId string, quotedText string, quotedType string, senderName string, isForwarded bool)
 	// OnMessageDeleted fires when a message is revoked (by anyone).
 	OnMessageDeleted(chatId string, msgId string)
 	// OnReaction fires when someone reacts to a message; an empty emoji
@@ -646,7 +650,7 @@ func sendPairCode(c *conn, phoneNumber string, round int) bool {
 			c.pairSentRound = 0
 		}
 		mx.Unlock()
-		c.listener.OnPairError(pairErrorMessage(err))
+		c.listener.OnPairError(pairErrorCode(err))
 		return false
 	}
 	c.listener.OnPairCode(pairCode)
@@ -669,11 +673,11 @@ func RequestPairCode(connId int, phoneNumber string) bool {
 	// basic validation first for clear error messages; reuse pairErrorMessage's
 	// wording so each user-facing string exists exactly once
 	if len(phoneNumber) <= 6 {
-		c.listener.OnPairError(pairErrorMessage(whatsmeow.ErrPhoneNumberTooShort))
+		c.listener.OnPairError(pairErrorCode(whatsmeow.ErrPhoneNumberTooShort))
 		return false
 	}
 	if strings.HasPrefix(phoneNumber, "0") {
-		c.listener.OnPairError(pairErrorMessage(whatsmeow.ErrPhoneNumberIsNotInternational))
+		c.listener.OnPairError(pairErrorCode(whatsmeow.ErrPhoneNumberIsNotInternational))
 		return false
 	}
 
@@ -694,7 +698,7 @@ func RequestPairCode(connId int, phoneNumber string) bool {
 		}
 	}
 	if !c.getClient().IsConnected() {
-		c.listener.OnPairError("Not connected to WhatsApp, check your internet connection")
+		c.listener.OnPairError("notconnected")
 		return false
 	}
 
@@ -706,16 +710,22 @@ func RequestPairCode(connId int, phoneNumber string) bool {
 	return sendPairCode(c, phone, round)
 }
 
-func pairErrorMessage(err error) string {
+// pairErrorCode maps a pairing failure to a STABLE code the app renders from
+// strings.xml, not to English prose. OnPairError's text is shown to the user
+// verbatim (LoginActivity puts it in the status line and a toast), so building
+// it here made the one screen a user sees before choosing a language the only
+// untranslatable one. "other:" carries the library's own detail for the cases
+// that have no code of their own.
+func pairErrorCode(err error) string {
 	switch {
 	case errors.Is(err, whatsmeow.ErrPhoneNumberTooShort):
-		return "Phone number is too short"
+		return "short"
 	case errors.Is(err, whatsmeow.ErrPhoneNumberIsNotInternational):
-		return "Use international format with country code (no leading zero)"
+		return "international"
 	case errors.Is(err, whatsmeow.ErrNotConnected):
-		return "Not connected to WhatsApp, try again"
+		return "notconnected"
 	default:
-		return "Pairing failed: " + err.Error()
+		return "other:" + err.Error()
 	}
 }
 
@@ -967,7 +977,7 @@ func EditMessage(connId int, chatId string, msgId string, newText string, origTi
 	// it", and the app's upsert raises is_read monotonically — passing true made
 	// editing your own unread message permanently show the read double-tick, with
 	// no later receipt able to correct it. false cannot downgrade a real receipt.
-	c.listener.OnMessage(chatId, msgId, senderId, newText, true, 0, false, "", "", false, true, "", "", "", "", false)
+	c.listener.OnMessage(chatId, msgId, senderId, newText, true, 0, false, "", "", 0, 0, false, true, "", "", "", "", false)
 	return true
 }
 
@@ -1042,7 +1052,7 @@ func echoLocalMedia(c *conn, chatJid types.JID, msgID string, text string, msgTy
 	c.listener.OnMessage(chatId, msgID, senderId, text, true, time.Now().Unix(), c.isSelfChat(chatId),
 		// the local echo carries the quote's body but not its type; the server's
 		// own delivery of this message reconciles the row and fills it in
-		msgType, "", false, false, quotedId, quotedText, "", "", false)
+		msgType, "", 0, 0, false, false, quotedId, quotedText, "", "", false)
 	if localPath != "" {
 		c.listener.OnFileDownloaded(chatId, msgID, localPath, 2)
 	}
@@ -2731,7 +2741,8 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 		emitTime = 0
 	}
 	c.listener.OnMessage(chatId, messageInfo.ID, senderId, content.text, fromMe, emitTime,
-		isRead, content.msgType, content.fileId, isHistory, isEdited, content.quotedId, content.quotedText,
+		isRead, content.msgType, content.fileId, content.latitude, content.longitude,
+		isHistory, isEdited, content.quotedId, content.quotedText,
 		content.quotedType, messageInfo.PushName, content.forwarded)
 }
 
@@ -2755,12 +2766,12 @@ func handleUndecryptableMessage(c *conn, evt *events.UndecryptableMessage) {
 	timeSent := evt.Info.Timestamp
 	isRead := c.messageIsRead(chatId, evt.Info.IsFromMe, timeSent, false, false)
 	c.listener.OnMessage(chatId, evt.Info.ID, senderId, "", evt.Info.IsFromMe, timeSent.Unix(),
-		isRead, viewOnceType, "", false, false, "", "", "", evt.Info.PushName, false)
+		isRead, viewOnceType, "", 0, 0, false, false, "", "", "", evt.Info.PushName, false)
 }
 
 type msgContent struct {
 	text       string
-	msgType    string // "" = plain text, "image" = downloadable image
+	msgType    string // "" = plain text, else the app's content kind ("image", "sticker", …)
 	fileId     string
 	quotedId   string
 	quotedText string
@@ -2769,6 +2780,9 @@ type msgContent struct {
 	// fixed English word here
 	quotedType string
 	forwarded  bool
+	// only set for msgType "location"
+	latitude  float64
+	longitude float64
 }
 
 // extractQuote returns the replied-to message id, a short text preview, and the
@@ -2876,54 +2890,58 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 		return m, true
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
-		name := doc.GetFileName()
-		if name == "" {
-			name = "file"
-		}
+		// an empty name stays empty: previewLabel supplies the localized
+		// fallback, the way it does for every other bodyless media kind
 		m := fromContext(doc.GetContextInfo())
-		m.text, m.msgType, m.fileId = name, "document", encodeFileId("doc", doc)
+		m.text, m.msgType, m.fileId = doc.GetFileName(), "document", encodeFileId("doc", doc)
 		return m, true
 	}
 	if stk := msg.GetStickerMessage(); stk != nil {
-		// render stickers as ordinary images: the WebP downloads and decodes
-		// through the same image path (BitmapFactory handles static WebP; an
-		// animated sticker shows its first frame)
+		// A kind of its own, not "image": the app sizes a sticker to its
+		// intrinsic bounds and skips the caption/timestamp overlay a photo
+		// gets. That difference used to be recovered by sniffing the "stk:"
+		// prefix off fileId — a Go-internal token format — which also meant a
+		// Telegram sticker (its fileId is a plain number) could never be
+		// recognised as one.
 		m := fromContext(stk.GetContextInfo())
-		m.msgType, m.fileId = "image", encodeFileId("stk", stk)
+		m.msgType, m.fileId = "sticker", encodeFileId("stk", stk)
 		return m, true
 	}
 	if msg.GetContactMessage() != nil {
-		return msgContent{text: "[Contact card]"}, true
+		return msgContent{msgType: "contact"}, true
 	}
 	if loc := msg.GetLocationMessage(); loc != nil {
-		// coordinates travel in the (otherwise unused) fileId token so the UI
-		// can open them in a maps app via a geo: URI
 		m := fromContext(loc.GetContextInfo())
 		m.text, m.msgType = loc.GetName(), "location"
-		m.fileId = fmt.Sprintf("%.6f,%.6f", loc.GetDegreesLatitude(), loc.GetDegreesLongitude())
+		m.latitude, m.longitude = loc.GetDegreesLatitude(), loc.GetDegreesLongitude()
 		return m, true
 	}
 	if msg.GetPollCreationMessage() != nil || msg.GetPollCreationMessageV2() != nil ||
 		msg.GetPollCreationMessageV3() != nil {
-		return msgContent{text: "[Poll]"}, true
+		return msgContent{msgType: "poll"}, true
 	}
-	// Placeholders rather than ok=false for the message kinds this client can't
-	// render: dropping them left an invisible hole in the conversation (the chat
-	// didn't even move up the list, and a reply quoting one showed a blank
-	// quote), which reads as lost messages.
+	// A labelled TYPE rather than ok=false for the message kinds this client
+	// can't render: dropping them left an invisible hole in the conversation
+	// (the chat didn't even move up the list, and a reply quoting one showed a
+	// blank quote), which reads as lost messages. The label itself is the app's
+	// to write — these used to carry English prose ("[Poll]") as their body,
+	// which then appeared verbatim mid-conversation whatever the language, and
+	// which the exporter and previewLabel both had to special-case around.
+	// previewLabel (Db.kt) owns the type -> wording mapping, as it already did
+	// for quoted-message labels and view-once media.
 	if live := msg.GetLiveLocationMessage(); live != nil {
 		m := fromContext(live.GetContextInfo())
-		m.text = "[Live location]"
+		m.msgType = "livelocation"
 		return m, true
 	}
 	if msg.GetPollUpdateMessage() != nil {
-		return msgContent{text: "[Poll vote]"}, true
+		return msgContent{msgType: "pollvote"}, true
 	}
 	if msg.GetEventMessage() != nil {
-		return msgContent{text: "[Event]"}, true
+		return msgContent{msgType: "event"}, true
 	}
 	if msg.GetGroupInviteMessage() != nil {
-		return msgContent{text: "[Group invite]"}, true
+		return msgContent{msgType: "groupinvite"}, true
 	}
 	if msg.GetViewOnceMessage() != nil || msg.GetViewOnceMessageV2() != nil ||
 		msg.GetViewOnceMessageV2Extension() != nil {

@@ -24,7 +24,13 @@ object Bridge : EventListener {
         // contact-name cache keyed off that was invalidated constantly and never
         // survived to be used.
         fun onContactsChanged() {}
-        fun onMessagesChanged(chatId: String) {}
+        /**
+         * A chat's messages changed. [rowIds] names the rows whose content
+         * changed when that is all that happened (ticks, reactions, downloads);
+         * null means the window may have gained, lost or reordered rows and has
+         * to be re-read in full.
+         */
+        fun onMessagesChanged(chatId: String, rowIds: Set<String>? = null) {}
         // a chat's rows were folded into another id (LID→phone heal); a screen
         // showing fromId must retarget to toId or it goes blank (its rows moved)
         fun onChatMerged(fromId: String, toId: String) {}
@@ -128,7 +134,15 @@ object Bridge : EventListener {
         notifyUi { it.onPresence(userId, isOnline(userId), lastSeenOf(userId)) }
     }
 
-    private val changedChats = HashSet<String>()
+    /**
+     * Chats touched since the last notification, each mapped to the message ids
+     * whose CONTENT changed — or to null once anything structural landed (a new
+     * message, a delete, a fetched page), meaning the whole loaded window has to
+     * be re-read. A read receipt, a reaction or a finished download names its
+     * one row, so the open chat can refresh that row instead of re-querying and
+     * re-diffing up to 5000 of them several times a second.
+     */
+    private val changedChats = HashMap<String, MutableSet<String>?>()
     private var chatsChanged = false
     private var contactsChanged = false
     private var notifyPending = false
@@ -209,8 +223,7 @@ object Bridge : EventListener {
             // ParseJID does NOT reject a "tg:" id (it yields an empty-user JID),
             // so an unguarded call here sent a receipt for a chat that does not
             // exist on WhatsApp; Telegram has its own "listened" call.
-            if (isTg(chatId)) Tg.markVoicePlayed(chatId, msg.id)
-            else Wmbridge.markVoicePlayed(connId, chatId, msg.senderId, msg.id)
+            proto(chatId).markVoicePlayed(msg)
             notifyChat(chatId)
         }
     }
@@ -229,6 +242,290 @@ object Bridge : EventListener {
 
     /** True when [chatId] belongs to the Telegram side. */
     private fun isTg(chatId: String) = Tg.isTgId(chatId)
+
+    // --- the two transports -------------------------------------------------
+
+    /**
+     * What a chat's service can do. The public API above/below is
+     * protocol-agnostic: it resolves the transport from the chat id once and
+     * states the surrounding policy — which executor the call runs on, what a
+     * failure toasts, what gets written to the shared Db — exactly once.
+     *
+     * This used to be ~35 hand-written `if (isTg(chatId))` branches spread
+     * through the file. Nothing then forced the two arms of an operation to
+     * agree, and several had quietly diverged; adding a capability meant
+     * remembering to add a branch as well as two implementations. Now the
+     * compiler requires both.
+     *
+     * Implementations are nested so they can reach Bridge's connection and
+     * history state without any of it becoming visible to the rest of the app.
+     *
+     * Threading: `send*`, `edit`, `delete*`, `react`, `setMuted` and
+     * `avatarPath` BLOCK and are called on whichever executor the public
+     * wrapper chose. The `history*`, `seek`, `syncAll` and `export` calls START
+     * work and report through UiListener; they must not block the caller.
+     */
+    private interface Protocol {
+        fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean
+        fun sendImage(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean
+        fun sendVideo(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean
+        fun sendAudio(
+            chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
+        ): Boolean
+        fun sendDocument(
+            chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
+        ): Boolean
+        fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean
+
+        fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean
+        /** How long after sending a message stays editable, in seconds. */
+        val editWindowSeconds: Long
+        /** How long after sending a message can still be revoked for everyone. */
+        val revokeWindowSeconds: Long
+
+        fun deleteForEveryone(chatId: String, msgId: String)
+        /** Anything the service itself must be told; the local row is deleted by
+         *  the caller either way. */
+        fun deleteForMe(chatId: String, msgId: String)
+        fun react(msg: MessageRow, emoji: String)
+
+        fun setMuted(chatId: String, muted: Boolean)
+        fun markChatRead(chatId: String)
+        fun markVoicePlayed(msg: MessageRow)
+        /** The chat came to / left the foreground. */
+        fun openChat(chatId: String) {}
+        fun closeChat(chatId: String) {}
+        /** WhatsApp only learns a contact's presence when asked; Telegram pushes it. */
+        fun subscribePresence(userId: String) {}
+
+        fun requestInitialHistory(chatId: String)
+        fun requestHistoryPage(chatId: String)
+        fun isHistoryExhausted(chatId: String): Boolean
+        fun seekMessage(chatId: String, target: String, from: MessageRow, maxPages: Int)
+        fun syncAllHistory(chatId: String): Boolean
+        fun syncAllProgress(chatId: String): Int
+        fun exportChat(chatId: String, uri: android.net.Uri): Boolean
+        fun exportProgress(chatId: String): Int
+
+        /** Dispatches the transfer; false when nothing was started (so no
+         *  completion callback will follow and the caller must release its claim). */
+        fun startDownload(msg: MessageRow): Boolean
+        fun avatarPath(chatId: String, big: Boolean, cachedOnly: Boolean): String
+
+        /** Whether a finished send may delete its cacheDir staging input. */
+        val consumesStagingInput: Boolean
+    }
+
+    private fun proto(chatId: String): Protocol = if (isTg(chatId)) TgTransport else WaTransport
+
+    /** WhatsApp, over the gomobile bridge. */
+    private object WaTransport : Protocol {
+        override fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean {
+            if (quoted == null) return Wmbridge.sendTextMessage(connId, chatId, text).isNotEmpty()
+            return Wmbridge.sendTextReply(
+                connId, chatId, text, quoted.id, quotedPreview(quoted), quoted.senderId
+            ).isNotEmpty()
+        }
+
+        override fun sendImage(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean {
+            val (qid, qtext, qsender) = quoteArgs(quoted)
+            return Wmbridge.sendImageMessage(connId, chatId, path, caption, qid, qtext, qsender).isNotEmpty()
+        }
+
+        override fun sendVideo(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean {
+            val (qid, qtext, qsender) = quoteArgs(quoted)
+            return Wmbridge.sendVideoMessage(connId, chatId, path, caption, qid, qtext, qsender).isNotEmpty()
+        }
+
+        override fun sendAudio(
+            chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
+        ): Boolean {
+            val (qid, qtext, qsender) = quoteArgs(quoted)
+            return Wmbridge.sendAudioMessage(
+                connId, chatId, path, seconds.toLong(), qid, qtext, qsender, waveform
+            ).isNotEmpty()
+        }
+
+        override fun sendDocument(
+            chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
+        ): Boolean {
+            val (qid, qtext, qsender) = quoteArgs(quoted)
+            return Wmbridge.sendDocumentMessage(
+                connId, chatId, path, name, mime, qid, qtext, qsender
+            ).isNotEmpty()
+        }
+
+        override fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
+            Wmbridge.sendLocation(connId, chatId, latitude, longitude).isNotEmpty()
+
+        override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean =
+            Wmbridge.editMessage(connId, chatId, msgId, newText, origTimeSent)
+
+        override val editWindowSeconds: Long get() = waEditWindowSeconds
+        // whatsmeow exposes no constant for the revoke window (only the edit
+        // one), so WhatsApp's 60 hours is fixed here.
+        override val revokeWindowSeconds: Long = 60L * 60 * 60
+
+        override fun deleteForEveryone(chatId: String, msgId: String) {
+            if (!Wmbridge.deleteMessageForEveryone(connId, chatId, msgId)) Log.w(TAG, "revoke failed")
+        }
+
+        // nothing to tell the server: the message stays on the phone and the
+        // other linked devices, this client just forgets it
+        override fun deleteForMe(chatId: String, msgId: String) {}
+
+        override fun react(msg: MessageRow, emoji: String) {
+            if (!Wmbridge.sendReaction(connId, msg.chatId, msg.id, msg.senderId, msg.fromMe, emoji)) {
+                Log.w(TAG, "reaction failed for chat ${msg.chatId}")
+            }
+        }
+
+        // the optimistic local write, its reconcile shield and the offline
+        // rollback are involved enough to stay in one named place
+        override fun setMuted(chatId: String, muted: Boolean) = setMutedWa(chatId, muted)
+
+        override fun markChatRead(chatId: String) = markChatReadWa(chatId)
+
+        override fun markVoicePlayed(msg: MessageRow) {
+            Wmbridge.markVoicePlayed(connId, msg.chatId, msg.senderId, msg.id)
+        }
+
+        override fun subscribePresence(userId: String) {
+            executor.execute { Wmbridge.subscribePresence(connId, userId) }
+        }
+
+        override fun requestInitialHistory(chatId: String) {
+            executor.execute {
+                if (db.messageCount(chatId) < INITIAL_HISTORY_MIN) requestHistoryPageWa(chatId)
+            }
+        }
+
+        override fun requestHistoryPage(chatId: String) {
+            executor.execute { requestHistoryPageWa(chatId) }
+        }
+
+        override fun isHistoryExhausted(chatId: String): Boolean = chatId in historyExhausted
+
+        override fun seekMessage(chatId: String, target: String, from: MessageRow, maxPages: Int) =
+            seekMessageWa(chatId, target, from.id, from.timeSent, from.fromMe, maxPages)
+
+        override fun syncAllHistory(chatId: String): Boolean = syncAllHistoryWa(chatId)
+
+        override fun syncAllProgress(chatId: String): Int =
+            if (syncAllChat != chatId) -1 else asymptoticProgress(syncAllRounds)
+
+        override fun exportChat(chatId: String, uri: android.net.Uri): Boolean =
+            exportChatWa(chatId, uri)
+
+        override fun exportProgress(chatId: String): Int =
+            chatExport?.takeIf { it.chatId == chatId }?.collected?.size ?: -1
+
+        override fun startDownload(msg: MessageRow): Boolean {
+            mediaExecutor.execute {
+                // The claim used to be released as soon as the request had been
+                // HANDED to Go, not when the transfer finished, so every later
+                // bind of the same bubble re-entered, re-queried fileState and
+                // re-issued the download. It is now released by onFileDownloaded
+                // — which also covers the media-retry path, where the bridge
+                // returns immediately and the answer arrives up to 60s later.
+                var dispatched = false
+                try {
+                    val (path, status) = db.fileState(msg.chatId, msg.id)
+                    // a downloaded row whose file vanished from disk re-downloads
+                    if (status >= 2 && path.isNotEmpty() && java.io.File(path).exists()) return@execute
+                    db.setFileState(msg.chatId, msg.id, "", 1)
+                    Wmbridge.downloadFile(connId, msg.chatId, msg.id, msg.fileId, msg.fromMe, msg.senderId)
+                    dispatched = true
+                } finally {
+                    // nothing was sent, so no callback will ever free it
+                    if (!dispatched) downloading.remove(msg.chatId + "/" + msg.id)
+                }
+            }
+            return true
+        }
+
+        override fun avatarPath(chatId: String, big: Boolean, cachedOnly: Boolean): String = when {
+            connId < 0 -> ""
+            cachedOnly -> Wmbridge.getCachedAvatarPath(connId, chatId)
+            big -> Wmbridge.getAvatarFullPath(connId, chatId)
+            else -> Wmbridge.getAvatarPath(connId, chatId)
+        }
+
+        // the bridge keeps its own permanent media copy, so the staging input is
+        // disposable the moment the (blocking) send returns
+        override val consumesStagingInput: Boolean = true
+    }
+
+    /** Telegram, over TDLib. Every call here is already blocking in [Tg]. */
+    private object TgTransport : Protocol {
+        override fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean =
+            Tg.sendText(chatId, text, quoted?.id ?: "")
+
+        override fun sendImage(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean =
+            Tg.sendImage(chatId, path, caption, quoted?.id ?: "")
+
+        override fun sendVideo(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean =
+            Tg.sendVideo(chatId, path, caption, quoted?.id ?: "")
+
+        override fun sendAudio(
+            chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
+        ): Boolean = Tg.sendAudio(chatId, path, seconds, quoted?.id ?: "", waveform)
+
+        override fun sendDocument(
+            chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
+        ): Boolean = Tg.sendDocument(chatId, path, name, quoted?.id ?: "")
+
+        override fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
+            Tg.sendLocation(chatId, latitude, longitude)
+
+        override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean =
+            Tg.editMessageText(chatId, msgId, newText)
+
+        // Telegram allows editing, and deleting for everyone, for 48 hours
+        override val editWindowSeconds: Long = 48L * 60 * 60
+        override val revokeWindowSeconds: Long = 48L * 60 * 60
+
+        override fun deleteForEveryone(chatId: String, msgId: String) =
+            Tg.deleteMessages(chatId, listOf(msgId), revoke = true)
+
+        // deleted server-side for this account too, or the message would simply
+        // come back with the next history fetch
+        override fun deleteForMe(chatId: String, msgId: String) =
+            Tg.deleteMessages(chatId, listOf(msgId), revoke = false)
+
+        override fun react(msg: MessageRow, emoji: String) {
+            Tg.sendReaction(msg.chatId, msg.id, emoji)
+        }
+
+        override fun setMuted(chatId: String, muted: Boolean) = Tg.setMuted(chatId, muted)
+        override fun markChatRead(chatId: String) = Tg.markChatRead(chatId)
+        override fun markVoicePlayed(msg: MessageRow) = Tg.markVoicePlayed(msg.chatId, msg.id)
+        override fun openChat(chatId: String) = Tg.openChat(chatId)
+        override fun closeChat(chatId: String) = Tg.closeChat(chatId)
+
+        override fun requestInitialHistory(chatId: String) = Tg.requestInitialHistory(chatId)
+        override fun requestHistoryPage(chatId: String) = Tg.requestHistoryPage(chatId)
+        override fun isHistoryExhausted(chatId: String): Boolean = Tg.isHistoryExhausted(chatId)
+
+        override fun seekMessage(chatId: String, target: String, from: MessageRow, maxPages: Int) =
+            Tg.seekMessage(chatId, target, from.id, maxPages)
+
+        override fun syncAllHistory(chatId: String): Boolean = Tg.syncAllHistory(chatId)
+        override fun syncAllProgress(chatId: String): Int = Tg.syncAllProgress(chatId)
+        override fun exportChat(chatId: String, uri: android.net.Uri): Boolean =
+            Tg.exportChat(chatId, uri)
+        override fun exportProgress(chatId: String): Int = Tg.exportProgress(chatId)
+
+        override fun startDownload(msg: MessageRow): Boolean = Tg.downloadFile(msg)
+
+        override fun avatarPath(chatId: String, big: Boolean, cachedOnly: Boolean): String =
+            Tg.avatarPath(chatId, big = big, cachedOnly = cachedOnly)
+
+        // TDLib may still be uploading from the staging path (the send request
+        // returns before the transfer finishes) and the stored row plays back
+        // from it until the daily sweep, so it must survive the send.
+        override val consumesStagingInput: Boolean = false
+    }
 
     // Memoised own JID. selfId() is asked once per chat-list row bind (every row
     // has to know whether it is your own chat), and each miss was a blocking
@@ -258,47 +555,22 @@ object Bridge : EventListener {
     }.start()
 
     fun sendText(chatId: String, text: String) = executor.execute {
-        if (isTg(chatId)) {
-            if (!Tg.sendText(chatId, text)) onSendFailed("text", chatId)
-            return@execute
-        }
-        val msgId = Wmbridge.sendTextMessage(connId, chatId, text)
-        if (msgId.isEmpty()) onSendFailed("text", chatId)
+        if (!proto(chatId).sendText(chatId, text, quoted = null)) onSendFailed("text", chatId)
     }
 
     fun sendReply(chatId: String, text: String, quoted: MessageRow) = executor.execute {
-        if (isTg(chatId)) {
-            if (!Tg.sendText(chatId, text, quoted.id)) Log.w(TAG, "reply failed for chat $chatId")
-            return@execute
-        }
-        val preview = quotedPreview(quoted)
-        val msgId = Wmbridge.sendTextReply(connId, chatId, text, quoted.id, preview, quoted.senderId)
-        if (msgId.isEmpty()) Log.w(TAG, "reply failed for chat $chatId")
+        if (!proto(chatId).sendText(chatId, text, quoted)) Log.w(TAG, "reply failed for chat $chatId")
     }
 
-    /** Protocol limit for how long a message stays editable, in seconds. */
-    val editWindowSeconds: Long by lazy { Wmbridge.editWindowSeconds() }
+    /** WhatsApp's edit window, as whatsmeow reports it. */
+    private val waEditWindowSeconds: Long by lazy { Wmbridge.editWindowSeconds() }
 
-    // Telegram allows editing for 48 hours
-    private const val TG_EDIT_WINDOW_SECONDS = 48L * 60 * 60
-
-    fun canEdit(msg: MessageRow): Boolean {
-        val window = if (isTg(msg.chatId)) TG_EDIT_WINDOW_SECONDS else editWindowSeconds
-        return System.currentTimeMillis() / 1000 - msg.timeSent < window
-    }
-
-    // WhatsApp allows "delete for everyone" for 60 hours (2 days 12 hours) after
-    // a message was sent; past that the option is gone. whatsmeow exposes no
-    // constant for this (only the edit window), so it's fixed here.
-    private const val REVOKE_WINDOW_SECONDS = 60L * 60 * 60
+    fun canEdit(msg: MessageRow): Boolean =
+        System.currentTimeMillis() / 1000 - msg.timeSent < proto(msg.chatId).editWindowSeconds
 
     /** Whether [msg] is still within the "delete for everyone" window (and ours). */
-    fun canDeleteForEveryone(msg: MessageRow): Boolean {
-        if (isTg(msg.chatId)) {
-            return msg.fromMe && System.currentTimeMillis() / 1000 - msg.timeSent < TG_EDIT_WINDOW_SECONDS
-        }
-        return msg.fromMe && System.currentTimeMillis() / 1000 - msg.timeSent < REVOKE_WINDOW_SECONDS
-    }
+    fun canDeleteForEveryone(msg: MessageRow): Boolean = msg.fromMe &&
+        System.currentTimeMillis() / 1000 - msg.timeSent < proto(msg.chatId).revokeWindowSeconds
 
     // Shows a short toast from any thread (no-op before init).
     internal fun toastUi(resId: Int) {
@@ -319,8 +591,7 @@ object Bridge : EventListener {
 
     fun editMessage(chatId: String, msgId: String, newText: String, origTimeSent: Long) =
         executor.execute {
-            val ok = if (isTg(chatId)) Tg.editMessageText(chatId, msgId, newText)
-            else Wmbridge.editMessage(connId, chatId, msgId, newText, origTimeSent)
+            val ok = proto(chatId).edit(chatId, msgId, newText, origTimeSent)
             if (!ok) {
                 Log.w(TAG, "edit failed")
                 toastUi(R.string.edit_failed)
@@ -328,28 +599,16 @@ object Bridge : EventListener {
         }
 
     fun deleteForEveryone(chatId: String, msgId: String) = executor.execute {
-        if (isTg(chatId)) {
-            Tg.deleteMessages(chatId, listOf(msgId), revoke = true)
-            return@execute
-        }
-        if (!Wmbridge.deleteMessageForEveryone(connId, chatId, msgId)) Log.w(TAG, "revoke failed")
+        proto(chatId).deleteForEveryone(chatId, msgId)
     }
 
     /** Reacts to a message; an empty emoji removes the previous reaction. */
     fun sendReaction(msg: MessageRow, emoji: String) = executor.execute {
-        if (isTg(msg.chatId)) {
-            Tg.sendReaction(msg.chatId, msg.id, emoji)
-            return@execute
-        }
-        if (!Wmbridge.sendReaction(connId, msg.chatId, msg.id, msg.senderId, msg.fromMe, emoji)) {
-            Log.w(TAG, "reaction failed for chat ${msg.chatId}")
-        }
+        proto(msg.chatId).react(msg, emoji)
     }
 
     fun deleteForMe(chatId: String, msgId: String) = executor.execute {
-        // Telegram deletes server-side for this account, or the message would
-        // simply come back with the next history fetch
-        if (isTg(chatId)) Tg.deleteMessages(chatId, listOf(msgId), revoke = false)
+        proto(chatId).deleteForMe(chatId, msgId)
         db.deleteMessage(chatId, msgId)
         notifyChat(chatId)
     }
@@ -390,10 +649,10 @@ object Bridge : EventListener {
     // linked devices agree. The optimistic local write shows instantly; the
     // app-state round-trip confirms via onMute.
     fun setMuted(chatId: String, muted: Boolean) = executor.execute {
-        if (isTg(chatId)) {
-            Tg.setMuted(chatId, muted)
-            return@execute
-        }
+        proto(chatId).setMuted(chatId, muted)
+    }
+
+    private fun setMutedWa(chatId: String, muted: Boolean) {
         // UPDATE-only: a chat we hold no row for (e.g. a contact-only search
         // result) can't carry the flag locally, so don't claim an unconfirmed
         // local write for it — reconcile has nothing to protect and would
@@ -461,46 +720,32 @@ object Bridge : EventListener {
     private fun quoteArgs(q: MessageRow?): Triple<String, String, String> =
         Triple(q?.id ?: "", q?.let { quotedPreview(it) } ?: "", q?.senderId ?: "")
 
-    fun sendImage(chatId: String, filePath: String, caption: String, quoted: MessageRow? = null) =
+    /**
+     * Every media send: upload off the shared executor, report a failure once,
+     * then release the staging input if this service is done with it. The four
+     * kinds below differ only in which Protocol call they make and what a
+     * failure is called, so the scaffold is stated once.
+     */
+    private fun sendMedia(kind: String, chatId: String, filePath: String, send: (Protocol) -> Boolean) =
         mediaExecutor.execute {
-            val ok = if (isTg(chatId)) {
-                Tg.sendImage(chatId, filePath, caption, quoted?.id ?: "")
-            } else {
-                val (qid, qtext, qsender) = quoteArgs(quoted)
-                Wmbridge.sendImageMessage(connId, chatId, filePath, caption, qid, qtext, qsender)
-                    .isNotEmpty()
-            }
-            if (!ok) onSendFailed("image", chatId)
-            discardCacheInput(chatId, filePath)
+            val p = proto(chatId)
+            if (!send(p)) onSendFailed(kind, chatId)
+            // Only ever inside cacheDir — forwards re-send straight from the
+            // permanent media dir, which must survive.
+            if (p.consumesStagingInput && isStagingPath(filePath)) java.io.File(filePath).delete()
         }
 
+    fun sendImage(chatId: String, filePath: String, caption: String, quoted: MessageRow? = null) =
+        sendMedia("image", chatId, filePath) { it.sendImage(chatId, filePath, caption, quoted) }
+
     fun sendVideo(chatId: String, filePath: String, caption: String, quoted: MessageRow? = null) =
-        mediaExecutor.execute {
-            val ok = if (isTg(chatId)) {
-                Tg.sendVideo(chatId, filePath, caption, quoted?.id ?: "")
-            } else {
-                val (qid, qtext, qsender) = quoteArgs(quoted)
-                Wmbridge.sendVideoMessage(connId, chatId, filePath, caption, qid, qtext, qsender)
-                    .isNotEmpty()
-            }
-            if (!ok) onSendFailed("video", chatId)
-            discardCacheInput(chatId, filePath)
-        }
+        sendMedia("video", chatId, filePath) { it.sendVideo(chatId, filePath, caption, quoted) }
 
     fun sendAudio(
         chatId: String, filePath: String, durationSeconds: Int,
         quoted: MessageRow? = null, waveform: ByteArray = ByteArray(0),
-    ) = mediaExecutor.execute {
-        val ok = if (isTg(chatId)) {
-            Tg.sendAudio(chatId, filePath, durationSeconds, quoted?.id ?: "", waveform)
-        } else {
-            val (qid, qtext, qsender) = quoteArgs(quoted)
-            Wmbridge.sendAudioMessage(
-                connId, chatId, filePath, durationSeconds.toLong(), qid, qtext, qsender, waveform
-            ).isNotEmpty()
-        }
-        if (!ok) onSendFailed("audio", chatId)
-        discardCacheInput(chatId, filePath)
+    ) = sendMedia("audio", chatId, filePath) {
+        it.sendAudio(chatId, filePath, durationSeconds, quoted, waveform)
     }
 
     /**
@@ -521,17 +766,8 @@ object Bridge : EventListener {
 
     fun sendDocument(
         chatId: String, filePath: String, fileName: String, mimeType: String, quoted: MessageRow? = null,
-    ) = mediaExecutor.execute {
-        val ok = if (isTg(chatId)) {
-            Tg.sendDocument(chatId, filePath, fileName, quoted?.id ?: "")
-        } else {
-            val (qid, qtext, qsender) = quoteArgs(quoted)
-            Wmbridge.sendDocumentMessage(
-                connId, chatId, filePath, fileName, mimeType, qid, qtext, qsender
-            ).isNotEmpty()
-        }
-        if (!ok) onSendFailed("document", chatId)
-        discardCacheInput(chatId, filePath)
+    ) = sendMedia("document", chatId, filePath) {
+        it.sendDocument(chatId, filePath, fileName, mimeType, quoted)
     }
 
     // A failed media send is otherwise invisible outside logcat (the share
@@ -539,20 +775,6 @@ object Bridge : EventListener {
     private fun onSendFailed(kind: String, chatId: String) {
         Log.w(TAG, "$kind send failed for chat $chatId")
         toastUi(R.string.send_failed)
-    }
-
-    // Attachments and recordings are staged in cacheDir before sending, and
-    // the Go bridge keeps its own permanent media copy; the staging copy is
-    // disposable once the (blocking) send returns. Only ever deletes inside
-    // cacheDir — forwards re-send straight from the permanent media dir.
-    private fun discardCacheInput(chatId: String, filePath: String) {
-        // Telegram sends keep their staging copy: TDLib may still be uploading
-        // from the path (the send request returns before the transfer finishes)
-        // and the stored message row plays back from it until the daily staging
-        // sweep. WhatsApp keeps its own permanent media copy, so its staging
-        // input is disposable the moment the (blocking) send returns.
-        if (isTg(chatId)) return
-        if (isStagingPath(filePath)) java.io.File(filePath).delete()
     }
 
     /**
@@ -584,9 +806,9 @@ object Bridge : EventListener {
     }
 
     fun sendLocation(chatId: String, latitude: Double, longitude: Double) = executor.execute {
-        val ok = if (isTg(chatId)) Tg.sendLocation(chatId, latitude, longitude)
-        else Wmbridge.sendLocation(connId, chatId, latitude, longitude).isNotEmpty()
-        if (!ok) Log.w(TAG, "location send failed for chat $chatId")
+        if (!proto(chatId).sendLocation(chatId, latitude, longitude)) {
+            Log.w(TAG, "location send failed for chat $chatId")
+        }
     }
 
     // A dedicated single thread for forwarding a batch: each message (media
@@ -617,46 +839,26 @@ object Bridge : EventListener {
     // strictly ordered. Forwards re-send from the permanent media dir, so
     // nothing is staged in cacheDir to clean up here.
     private fun forwardOneBlocking(target: String, m: MessageRow): Boolean {
-        // cross-protocol forwards work because every send below re-uploads the
-        // local file; a Telegram target takes the same paths a WhatsApp one does
-        if (isTg(target)) {
-            val ok = when (m.msgType) {
-                "image" -> Tg.sendImage(target, m.filePath, m.text)
-                "video" -> Tg.sendVideo(target, m.filePath, m.text)
-                "audio" -> Tg.sendAudio(target, m.filePath, TimeFormat.parseSeconds(m.text))
-                // the stored text IS the document's file name, as on the
-                // WhatsApp path below
-                "document" -> Tg.sendDocument(target, m.filePath, m.text)
-                "location" -> parseLatLng(m.fileId)
-                    ?.let { (lat, lng) -> Tg.sendLocation(target, lat, lng) } ?: false
-                else -> Tg.sendText(target, m.text)
-            }
-            if (!ok) onSendFailed(m.msgType.ifEmpty { "text" }, target)
-            return ok
+        // cross-protocol forwards work because every send re-uploads the local
+        // file, so a Telegram target takes the same paths a WhatsApp one does.
+        // The mapping used to be spelled out once per protocol.
+        val p = proto(target)
+        val ok = when (m.msgType) {
+            // a forwarded sticker is re-uploaded as an ordinary image
+            "image", "sticker" -> p.sendImage(target, m.filePath, m.text, null)
+            "video" -> p.sendVideo(target, m.filePath, m.text, null)
+            "audio" ->
+                p.sendAudio(target, m.filePath, TimeFormat.parseSeconds(m.text), null, ByteArray(0))
+            // the stored text IS the document's file name; its MIME type is
+            // recovered from the extension rather than sent empty (which the
+            // bridge downgrades to application/octet-stream, leaving the
+            // recipient a generic unopenable attachment)
+            "document" -> p.sendDocument(target, m.filePath, m.text, mimeOfPath(m.filePath), null)
+            "location" -> p.sendLocation(target, m.latitude, m.longitude)
+            else -> p.sendText(target, m.text, null)
         }
-        val msgId = when (m.msgType) {
-            "image" -> Wmbridge.sendImageMessage(connId, target, m.filePath, m.text, "", "", "")
-            "video" -> Wmbridge.sendVideoMessage(connId, target, m.filePath, m.text, "", "", "")
-            "audio" -> Wmbridge.sendAudioMessage(
-                connId, target, m.filePath, TimeFormat.parseSeconds(m.text).toLong(),
-                "", "", "", ByteArray(0)
-            )
-            // the stored text IS the document's file name; recover its MIME type
-            // from the extension instead of sending "" (which the bridge has to
-            // downgrade to application/octet-stream, so the recipient sees a
-            // generic unopenable attachment)
-            "document" -> Wmbridge.sendDocumentMessage(
-                connId, target, m.filePath, m.text, mimeOfPath(m.filePath), "", "", ""
-            )
-            "location" -> parseLatLng(m.fileId)
-                ?.let { (lat, lng) -> Wmbridge.sendLocation(connId, target, lat, lng) } ?: ""
-            else -> Wmbridge.sendTextMessage(connId, target, m.text)
-        }
-        if (msgId.isEmpty()) {
-            onSendFailed(m.msgType.ifEmpty { "text" }, target)
-            return false
-        }
-        return true
+        if (!ok) onSendFailed(m.msgType.ifEmpty { "text" }, target)
+        return ok
     }
 
     // when each contact was last subscribed: the chat list asks per visible row,
@@ -679,13 +881,11 @@ object Bridge : EventListener {
      * pushed a burst of no-ops ahead of real work.
      */
     fun subscribePresence(userId: String) {
-        // Telegram pushes status updates on its own; nothing to subscribe
-        if (isTg(userId)) return
         val now = android.os.SystemClock.elapsedRealtime()
         val last = presenceSubscribed[userId]
         if (last != null && now - last < PRESENCE_MEMO_MS) return
         presenceSubscribed[userId] = now
-        executor.execute { Wmbridge.subscribePresence(connId, userId) }
+        proto(userId).subscribePresence(userId)
     }
 
     // downloads the user explicitly asked for (tap on media); only these get
@@ -726,7 +926,7 @@ object Bridge : EventListener {
         if (msg.fileId.isEmpty()) {
             if (msg.filePath.isNotEmpty()) executor.execute {
                 if (java.io.File(msg.filePath).exists()) return@execute
-                if (db.setFileState(msg.chatId, msg.id, "", 0) > 0) notifyChat(msg.chatId)
+                if (db.setFileState(msg.chatId, msg.id, "", 0) > 0) notifyChatRow(msg.chatId, msg.id)
             }
             return false
         }
@@ -752,36 +952,12 @@ object Bridge : EventListener {
         // returning here without re-issuing anything. Only an in-flight claim
         // from THIS run may skip the request.
         if (!downloading.add(key)) return true
-        if (isTg(msg.chatId)) {
-            // Nothing was dispatched, so no completion will ever release the
-            // claim: a location row carries "lat,lng" in fileId, which is not a
-            // file id at all, and the message would then be stuck for the rest
-            // of the run with every later attempt returning here.
-            val started = Tg.downloadFile(msg)
-            if (!started) downloading.remove(key)
-            return started
-        }
-        mediaExecutor.execute {
-            // The claim used to be released here as soon as the request had been
-            // HANDED to Go, not when the transfer finished, so every later bind
-            // of the same bubble re-entered, re-queried fileState and re-issued
-            // the download. It is now released by onFileDownloaded — which also
-            // covers the media-retry path, where the bridge returns immediately
-            // and the answer arrives up to 60s later.
-            var dispatched = false
-            try {
-                val (path, status) = db.fileState(msg.chatId, msg.id)
-                // a downloaded row whose file vanished from disk re-downloads
-                if (status >= 2 && path.isNotEmpty() && java.io.File(path).exists()) return@execute
-                db.setFileState(msg.chatId, msg.id, "", 1)
-                Wmbridge.downloadFile(connId, msg.chatId, msg.id, msg.fileId, msg.fromMe, msg.senderId)
-                dispatched = true
-            } finally {
-                // nothing was sent, so no callback will ever free it
-                if (!dispatched) downloading.remove(key)
-            }
-        }
-        return true
+        // Nothing dispatched means no completion will ever release the claim,
+        // and the message would be stuck for the rest of the run with every
+        // later attempt returning here.
+        val started = proto(msg.chatId).startDownload(msg)
+        if (!started) downloading.remove(key)
+        return started
     }
 
     // Asks the primary phone for one older page of a chat (scroll-to-top
@@ -789,19 +965,12 @@ object Bridge : EventListener {
     // exhausted for this run. Shares the single in-flight slot with sync-all
     // and export, so a request made while one is busy is simply dropped (the
     // next scroll retries).
-    fun requestChatHistory(chatId: String) {
-        if (isTg(chatId)) {
-            Tg.requestHistoryPage(chatId)
-            return
-        }
-        executor.execute { requestHistoryPage(chatId) }
-    }
+    fun requestChatHistory(chatId: String) = proto(chatId).requestHistoryPage(chatId)
 
     // True once this run has paged a chat back to its start — no older history
     // remains to fetch. Lets jump-to-quote stop seeking instead of waiting for a
     // page that will never come.
-    fun isHistoryExhausted(chatId: String): Boolean =
-        if (isTg(chatId)) Tg.isHistoryExhausted(chatId) else chatId in historyExhausted
+    fun isHistoryExhausted(chatId: String): Boolean = proto(chatId).isHistoryExhausted(chatId)
 
     // --- jump-to-quote history seek -----------------------------------------
     // Fetches an unsynced quoted message by paging history BACKWARD FROM THE
@@ -824,18 +993,10 @@ object Bridge : EventListener {
      * Result via UiListener.onSeekResult on the main thread. Returns found
      * immediately if the target is already stored.
      */
-    fun seekMessage(
-        chatId: String, targetId: String,
-        fromId: String, fromTime: Long, fromFromMe: Boolean, maxPages: Int,
-    ) {
-        if (isTg(chatId)) {
-            Tg.seekMessage(chatId, targetId, fromId, maxPages)
-            return
-        }
-        seekMessageWm(chatId, targetId, fromId, fromTime, fromFromMe, maxPages)
-    }
+    fun seekMessage(chatId: String, targetId: String, from: MessageRow, maxPages: Int) =
+        proto(chatId).seekMessage(chatId, targetId, from, maxPages)
 
-    private fun seekMessageWm(
+    private fun seekMessageWa(
         chatId: String, targetId: String,
         fromId: String, fromTime: Long, fromFromMe: Boolean, maxPages: Int,
     ) = executor.execute {
@@ -875,15 +1036,7 @@ object Bridge : EventListener {
     // so repeatedly opening a well-synced chat doesn't keep waking the phone
     // and growing the DB. Scroll-to-top pagination (requestChatHistory) is
     // unguarded — that's an explicit user request for more.
-    fun requestInitialHistory(chatId: String) {
-        if (isTg(chatId)) {
-            Tg.requestInitialHistory(chatId)
-            return
-        }
-        executor.execute {
-            if (db.messageCount(chatId) < INITIAL_HISTORY_MIN) requestHistoryPage(chatId)
-        }
-    }
+    fun requestInitialHistory(chatId: String) = proto(chatId).requestInitialHistory(chatId)
 
     // --- history request: single in-flight slot ------------------------------
     // At most ONE on-demand request is outstanding at a time. The phone's
@@ -948,7 +1101,7 @@ object Bridge : EventListener {
     // sync-all). retryIfBusy keeps a self-driven sync-all trying when a stray
     // pagination request momentarily holds the slot; plain pagination does not
     // retry (the next scroll does). Executor-confined.
-    private fun requestHistoryPage(chatId: String, retryIfBusy: Boolean = false) {
+    private fun requestHistoryPageWa(chatId: String, retryIfBusy: Boolean = false) {
         if (chatId in historyExhausted) { endSyncAll(chatId, complete = true); return }
         val anchor = historyAnchor[chatId]
             ?: db.oldestMessage(chatId)?.let { Anchor(it.id, it.timeSent, it.fromMe) }
@@ -957,7 +1110,7 @@ object Bridge : EventListener {
         if (sendHistoryPage(chatId, anchor, forExport = false) == null &&
             retryIfBusy && syncAllChat == chatId
         ) {
-            main.postDelayed({ executor.execute { requestHistoryPage(chatId, true) } }, 500)
+            main.postDelayed({ executor.execute { requestHistoryPageWa(chatId, true) } }, 500)
         }
     }
 
@@ -1016,11 +1169,7 @@ object Bridge : EventListener {
      * a chat holds), so it advances asymptotically per fetched page and jumps
      * to 100 when the start is reached.
      */
-    fun syncAllProgress(chatId: String): Int {
-        if (isTg(chatId)) return Tg.syncAllProgress(chatId)
-        if (syncAllChat != chatId) return -1
-        return asymptoticProgress(syncAllRounds)
-    }
+    fun syncAllProgress(chatId: String): Int = proto(chatId).syncAllProgress(chatId)
 
     /** The percentage above, shared with the Telegram sync-all so both report
      *  the same curve (and the same -1 "not running" convention). */
@@ -1031,8 +1180,9 @@ object Bridge : EventListener {
      * whole-history op is already running (an export, or a sync-all on a
      * different chat).
      */
-    fun syncAllHistory(chatId: String): Boolean {
-        if (isTg(chatId)) return Tg.syncAllHistory(chatId)
+    fun syncAllHistory(chatId: String): Boolean = proto(chatId).syncAllHistory(chatId)
+
+    private fun syncAllHistoryWa(chatId: String): Boolean {
         if (chatExport != null) return false
         val cur = syncAllChat
         if (cur != null && cur != chatId) return false
@@ -1052,7 +1202,7 @@ object Bridge : EventListener {
             syncAllChat = chatId
             syncAllRounds = 0
             notifySyncAll(chatId, 0)
-            requestHistoryPage(chatId, retryIfBusy = true)
+            requestHistoryPageWa(chatId, retryIfBusy = true)
         }
         return true
     }
@@ -1061,7 +1211,7 @@ object Bridge : EventListener {
         if (syncAllChat != chatId) return
         syncAllRounds++
         notifySyncAll(chatId, syncAllProgress(chatId))
-        requestHistoryPage(chatId, retryIfBusy = true)
+        requestHistoryPageWa(chatId, retryIfBusy = true)
     }
 
     // complete = the chat's start was reached (100%); otherwise a failure (-1,
@@ -1102,9 +1252,7 @@ object Bridge : EventListener {
     @Volatile private var chatExport: ChatExport? = null
 
     /** Fetched-message count of a running export, -1 when none is active. */
-    fun exportProgress(chatId: String): Int =
-        if (isTg(chatId)) Tg.exportProgress(chatId)
-        else chatExport?.takeIf { it.chatId == chatId }?.collected?.size ?: -1
+    fun exportProgress(chatId: String): Int = proto(chatId).exportProgress(chatId)
 
     /**
      * Exports the chat's complete history to uri: pages older than the local
@@ -1113,8 +1261,9 @@ object Bridge : EventListener {
      * Returns false if another export, or a sync-all on a different chat, is
      * running (a sync-all on THIS chat is superseded).
      */
-    fun exportChat(chatId: String, uri: android.net.Uri): Boolean {
-        if (isTg(chatId)) return Tg.exportChat(chatId, uri)
+    fun exportChat(chatId: String, uri: android.net.Uri): Boolean = proto(chatId).exportChat(chatId, uri)
+
+    private fun exportChatWa(chatId: String, uri: android.net.Uri): Boolean {
         if (chatExport != null) return false
         val cur = syncAllChat
         if (cur != null && cur != chatId) return false
@@ -1171,6 +1320,19 @@ object Bridge : EventListener {
     // Merges the fetched history with the local store (local rows win — they
     // carry richer state) and writes the file; the UI learns the outcome via
     // the listener, so a recreated activity still gets the completion.
+    /** Hands back the write grant the activity gave the exporter. Both protocols'
+     *  exports end here: a grant left held counts against the system's per-app
+     *  limit for the life of the app. */
+    internal fun releaseExportUri(uri: android.net.Uri) {
+        val ctx = appContext ?: return
+        try {
+            ctx.contentResolver.releasePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (e: SecurityException) {
+        }
+    }
+
     private fun writeExport(ex: ChatExport, complete: Boolean) {
         val ctx = appContext ?: return
         var messages = 0
@@ -1193,14 +1355,7 @@ object Bridge : EventListener {
             Log.w(TAG, "export write failed: $e")
             false
         }
-        // done writing; drop the persistable grant the activity handed us so
-        // it doesn't accumulate against the system's per-app grant limit
-        try {
-            ctx.contentResolver.releasePersistableUriPermission(
-                ex.uri, android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-        } catch (e: SecurityException) {
-        }
+        releaseExportUri(ex.uri)
         notifyUi { it.onChatExportDone(ex.chatId, messages, complete, success) }
     }
 
@@ -1216,15 +1371,9 @@ object Bridge : EventListener {
         )
     }
 
-    fun markChatRead(chatId: String) {
-        if (isTg(chatId)) {
-            Tg.markChatRead(chatId)
-            return
-        }
-        markChatReadWm(chatId)
-    }
+    fun markChatRead(chatId: String) = proto(chatId).markChatRead(chatId)
 
-    private fun markChatReadWm(chatId: String) = executor.execute {
+    private fun markChatReadWa(chatId: String) = executor.execute {
         val latest = db.latestUnread(chatId) ?: return@execute
         db.markChatRead(chatId)
         Wmbridge.markRead(connId, chatId, latest.senderId, latest.id, latest.timeSent)
@@ -1333,8 +1482,7 @@ object Bridge : EventListener {
     }
 
     fun getAvatarPath(chatId: String): String =
-        if (isTg(chatId)) Tg.avatarPath(chatId)
-        else if (connId >= 0) Wmbridge.getAvatarPath(connId, chatId) else ""
+        proto(chatId).avatarPath(chatId, big = false, cachedOnly = false)
 
     /**
      * On-disk avatar path only — never a network fetch. Used on the notification
@@ -1344,12 +1492,10 @@ object Bridge : EventListener {
      * chat). A missing/stale picture is worth less than a prompt notification.
      */
     fun getCachedAvatarPath(chatId: String): String =
-        if (isTg(chatId)) Tg.avatarPath(chatId, cachedOnly = true)
-        else if (connId >= 0) Wmbridge.getCachedAvatarPath(connId, chatId) else ""
+        proto(chatId).avatarPath(chatId, big = false, cachedOnly = true)
 
     fun getAvatarFullPath(chatId: String): String =
-        if (isTg(chatId)) Tg.avatarPath(chatId, big = true)
-        else if (connId >= 0) Wmbridge.getAvatarFullPath(connId, chatId) else ""
+        proto(chatId).avatarPath(chatId, big = true, cachedOnly = false)
 
     // Fetches the full-resolution avatar off-thread and opens it fullscreen.
     // The fetch can block on the network for a long time, so the activity may
@@ -1452,11 +1598,11 @@ object Bridge : EventListener {
     // --- debounced UI notification -----------------------------------------
 
     private val notifyRunnable = Runnable {
-        val chats: List<String>
+        val chats: List<Pair<String, Set<String>?>>
         val chatsListChanged: Boolean
         val contactsDidChange: Boolean
         synchronized(changedChats) {
-            chats = changedChats.toList()
+            chats = changedChats.map { (id, rows) -> id to rows?.toSet() }
             chatsListChanged = chatsChanged
             contactsDidChange = contactsChanged
             changedChats.clear()
@@ -1467,7 +1613,7 @@ object Bridge : EventListener {
         for (l in listeners) {
             if (contactsDidChange) l.onContactsChanged()
             if (chatsListChanged) l.onChatsChanged()
-            for (chatId in chats) l.onMessagesChanged(chatId)
+            for ((chatId, rows) in chats) l.onMessagesChanged(chatId, rows)
         }
     }
 
@@ -1479,9 +1625,30 @@ object Bridge : EventListener {
         main.postDelayed(notifyRunnable, 150)
     }
 
+    /** The chat's loaded window may have changed shape — a message arrived, was
+     *  deleted, or a history page landed. Forces a full re-read. */
     internal fun notifyChat(chatId: String) {
         synchronized(changedChats) {
-            changedChats.add(chatId)
+            changedChats[chatId] = null
+            chatsChanged = true
+        }
+        scheduleNotify()
+    }
+
+    /**
+     * Exactly [msgId]'s stored row changed — a tick, a reaction, a played mark,
+     * a finished download. Nothing was inserted, removed or reordered, so the
+     * open chat can re-read that one row. Any [notifyChat] for the same chat in
+     * the same batch wins: it means the window itself moved.
+     */
+    internal fun notifyChatRow(chatId: String, msgId: String) {
+        synchronized(changedChats) {
+            if (changedChats.containsKey(chatId)) {
+                // null = a structural change is already queued; leave it
+                changedChats[chatId]?.add(msgId)
+            } else {
+                changedChats[chatId] = hashSetOf(msgId)
+            }
             chatsChanged = true
         }
         scheduleNotify()
@@ -1580,6 +1747,7 @@ object Bridge : EventListener {
     override fun onMessage(
         chatId: String, msgId: String, senderId: String, text: String,
         fromMe: Boolean, timeSent: Long, isRead: Boolean, msgType: String, fileId: String,
+        latitude: Double, longitude: Double,
         isHistory: Boolean, isEdited: Boolean, quotedId: String, quotedText: String,
         quotedType: String, senderName: String, isForwarded: Boolean,
     ) {
@@ -1592,7 +1760,7 @@ object Bridge : EventListener {
                 msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId,
                 edited = isEdited, quotedId = quotedId, quotedText = quotedText,
                 quotedType = quotedType, senderName = senderName,
-                forwarded = isForwarded
+                forwarded = isForwarded, latitude = latitude, longitude = longitude
             )
         )
         // an edit must not reorder the chat list; only real new messages bump it
@@ -1600,7 +1768,7 @@ object Bridge : EventListener {
         // eagerly fetch images and voice notes for LIVE messages (their media
         // URLs expire); history backfill downloads lazily when scrolled into
         // view, to avoid a download storm on initial sync
-        if (!isHistory && (msgType == "image" || msgType == "audio") && fileId.isNotEmpty()) {
+        if (!isHistory && (msgType in PICTURE_TYPES || msgType == "audio") && fileId.isNotEmpty()) {
             downloadFile(MessageRow(msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId))
         }
         // notify only for fresh, unread, incoming messages of chats not on
@@ -1650,7 +1818,7 @@ object Bridge : EventListener {
         // TDLib gates real-time traffic on this: without it a private chat's
         // typing/recording actions are dropped inside TDLib, and supergroups
         // deliver no updates at all while closed.
-        if (isTg(chatId)) Tg.openChat(chatId)
+        proto(chatId).openChat(chatId)
         // the proximity sensor is only allowed to act inside the chat that
         // owns the current voice message; tell the service to re-evaluate
         AudioPlayer.refreshServiceState()
@@ -1664,7 +1832,7 @@ object Bridge : EventListener {
         // close has to run too. Two screens on one chat (a share, or a
         // notification deep-link onto an open chat) otherwise left TDLib's
         // refcounted open unbalanced for the rest of the session.
-        if (isTg(chatId)) Tg.closeChat(chatId)
+        proto(chatId).closeChat(chatId)
         if (owner != null && activeChatOwner !== owner) return
         if (activeChatId == chatId) {
             activeChatId = ""
@@ -1699,7 +1867,7 @@ object Bridge : EventListener {
         }
         // the chat list previews a reaction on the newest message (see
         // Db.chats), so a reaction changes that list too, not just the chat
-        notifyChat(chatId)
+        notifyChatRow(chatId, msgId)
     }
 
     override fun onFileDownloaded(chatId: String, msgId: String, filePath: String, status: Long) {
@@ -1737,7 +1905,7 @@ object Bridge : EventListener {
                 main.post { AudioPlayer.play(filePath, target, msgId) }
             }
         }
-        notifyChat(target)
+        notifyChatRow(target, msgId)
     }
 
     override fun onDownloadProgress(chatId: String, msgId: String, pct: Long) {
@@ -1749,7 +1917,7 @@ object Bridge : EventListener {
     override fun onMessageRead(chatId: String, msgId: String) {
         if (wiping) return
         db.markMessageRead(chatId, msgId)
-        notifyChat(chatId)
+        notifyChatRow(chatId, msgId)
     }
 
     override fun onMessagePlayed(chatId: String, msgId: String) {
@@ -1757,7 +1925,7 @@ object Bridge : EventListener {
         // our sent voice note was played by the recipient (or a received one on
         // another device); mark it played so the UI can reflect it
         db.setPlayed(chatId, msgId)
-        notifyChat(chatId)
+        notifyChatRow(chatId, msgId)
     }
 
     override fun onChatReadSelf(chatId: String) {
@@ -1830,7 +1998,12 @@ object Bridge : EventListener {
             chatStates[chatId] = ChatStateInfo(state, names.joinToString(", "), names.size)
             for (l in listeners) l.onChatState(chatId, state)
         }
-        notifyChatsChanged()
+        // Deliberately NOT notifyChatsChanged(): typing state is not in the
+        // database, so re-running the chat-list query answers a question nothing
+        // asked. Every actor start, stop and 15s expiry used to rebuild the whole
+        // list — five subqueries and a join per row — only for the caller to
+        // stamp the state back in from `chatStates` afterwards. onChatState above
+        // is the signal; the list re-stamps the rows it already holds.
     }
 
     override fun onPresence(userId: String, isOnline: Boolean, lastSeenTime: Long) {

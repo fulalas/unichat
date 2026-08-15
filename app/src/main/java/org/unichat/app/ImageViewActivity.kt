@@ -117,8 +117,16 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
     }
 
     /** A page's download finished: rebind it so the picture replaces the spinner. */
-    override fun onMessagesChanged(chatId: String) {
+    override fun onMessagesChanged(chatId: String, rowIds: Set<String>?) {
         if (chatId != this.chatId || images.isEmpty()) return
+        // Named rows and nothing structural: the album can't have gained or lost
+        // a page, so re-read just those instead of rescanning the whole chat's
+        // images (an unbounded scan that ran on every message event while the
+        // viewer was open — download progress included).
+        if (rowIds != null) {
+            refreshPages(rowIds)
+            return
+        }
         Io.executor.execute {
             val fresh = Bridge.db.chatImages(chatId)
             runOnUiThread {
@@ -150,6 +158,28 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
                 images = fresh
                 for (m in changed) {
                     val at = fresh.indexOfFirst { it.id == m.id }
+                    if (at >= 0) pager.adapter?.notifyItemChanged(at)
+                }
+            }
+        }
+    }
+
+    /** Re-reads [ids] and rebinds only the pages whose file actually arrived. */
+    private fun refreshPages(ids: Set<String>) {
+        Io.executor.execute {
+            val fresh = Bridge.db.messagesByIds(chatId, ids).associateBy { it.id }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val landed = ArrayList<String>()
+                images = images.map { old ->
+                    val now = fresh[old.id] ?: return@map old
+                    // only a file appearing matters here; a tick or a reaction
+                    // changes nothing the viewer draws, and rebinding would
+                    // restart the decode and drop the current page's zoom
+                    if (now.filePath == old.filePath) old else { landed.add(old.id); now }
+                }
+                for (id in landed) {
+                    val at = images.indexOfFirst { it.id == id }
                     if (at >= 0) pager.adapter?.notifyItemChanged(at)
                 }
             }

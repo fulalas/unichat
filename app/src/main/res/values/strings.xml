@@ -32,6 +32,11 @@
     <string name="get_pair_code">Get pairing code</string>
     <string name="pair_requesting">Acquiring pairing code…</string>
     <string name="pair_code_hint">On your phone, open the WhatsApp notification “Enter code to link new device” and type this code:</string>
+    <!-- pairing failures; the bridge reports a code and the wording lives here -->
+    <string name="pair_phone_too_short">Phone number is too short</string>
+    <string name="pair_phone_not_international">Use international format with country code (no leading zero)</string>
+    <string name="pair_not_connected">Not connected to WhatsApp, check your internet connection</string>
+    <string name="pair_failed">Pairing failed: %1$s</string>
     <string name="state_connecting">connecting…</string>
     <string name="state_connected">connected</string>
     <string name="state_disconnected">disconnected</string>
@@ -79,9 +84,22 @@
     <string name="cancel">Cancel</string>
     <string name="message_label">Message</string>
     <string name="photo_label">Photo</string>
+    <string name="sticker_label">Sticker</string>
     <string name="video_label">Video</string>
     <!-- view-once media: its keys are never shared with a companion device -->
     <string name="view_once_label">View once (open on your phone)</string>
+    <!-- Message kinds this client shows as a label only. The bridge sends the
+         TYPE and no body, so the wording lives here and can be translated. -->
+    <string name="document_label">File</string>
+    <string name="contact_label">Contact card</string>
+    <string name="poll_label">Poll</string>
+    <string name="poll_vote_label">Poll vote</string>
+    <string name="event_label">Event</string>
+    <string name="group_invite_label">Group invite</string>
+    <string name="live_location_label">Live location</string>
+    <string name="call_label">Call</string>
+    <!-- an animated sticker has no still frame, so the row shows its emoji -->
+    <string name="sticker_with_emoji">%1$s (sticker)</string>
     <!-- accessibility label for the video bubble's download button -->
     <string name="download">Download</string>
     <!-- unread badge cap: "99+", never a bare 99 (which reads as exact) -->

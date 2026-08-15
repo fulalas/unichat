@@ -60,16 +60,6 @@ fun resolveMentions(text: String, lookup: (String) -> String?): String {
 fun resolveMentions(text: String, names: Map<String, String>): String =
     if (names.isEmpty()) text else resolveMentions(text) { names[it] }
 
-/** A location row's coordinates, which travel in the `fileId` field as
- *  "lat,lng" (it carries no file). Null when the pair is absent or malformed —
- *  callers must not send a location they could not read. */
-fun parseLatLng(fileId: String): Pair<Double, Double>? {
-    val parts = fileId.split(",")
-    val lat = parts.getOrNull(0)?.toDoubleOrNull() ?: return null
-    val lng = parts.getOrNull(1)?.toDoubleOrNull() ?: return null
-    return lat to lng
-}
-
 /**
  * "WhatsApp" / "Telegram" when [chatId] is YOUR OWN chat on that account, ""
  * otherwise. You have one self-chat per linked account, both carrying your own

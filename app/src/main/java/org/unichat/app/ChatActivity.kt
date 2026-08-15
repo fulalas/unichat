@@ -39,7 +39,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         private const val RECORD_WAKE_LOCK_MS = 30 * 60 * 1000L
         // message types backed by a file on disk, so forwarding one has to wait
         // for its download (a set, not a per-message listOf in the batch loop)
-        private val FILE_MEDIA_TYPES = setOf("image", "audio", "video", "document")
+        private val FILE_MEDIA_TYPES = PICTURE_TYPES + setOf("audio", "video", "document")
         // contextual-action-bar item ids for multi-select
         private const val M_FORWARD = 1
         private const val M_COPY = 2
@@ -261,7 +261,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         toolbarTitle.text = chatDisplayName
         toolbarAvatar.setOnClickListener { Bridge.openAvatar(this, chatId) }
         io.execute {
-            val name = (extraName ?: Bridge.db.displayName(chatId)).let {
+            // Always from the STORED name, never from the intent's: the chat
+            // list hands over a label it has already decorated, so re-decorating
+            // that produced "Rafael (Telegram) (Telegram)". The extra is only
+            // good enough to paint the toolbar before this read lands.
+            val name = Bridge.db.displayName(chatId).let {
                 // your own chat exists on both accounts under the same name
                 val proto = selfProtocol(this, chatId)
                 if (proto.isEmpty()) it else "$it ($proto)"
@@ -821,7 +825,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     // pagination could never reach.
                     val o = seekOrigin ?: return@runOnUiThread failSeek()
                     seekFetching = true
-                    Bridge.seekMessage(chatId, target, o.id, o.timeSent, o.fromMe, MAX_SEEK_PAGES)
+                    Bridge.seekMessage(chatId, target, o, MAX_SEEK_PAGES)
                     main.removeCallbacks(seekTimeout)
                     main.postDelayed(seekTimeout, SEEK_TIMEOUT_MS)
                 }
@@ -912,7 +916,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         reload()
     }
 
-    override fun onMessagesChanged(chatId: String) {
+    override fun onMessagesChanged(chatId: String, rowIds: Set<String>?) {
         if (chatId != this.chatId) return
         // while searching, the adapter holds a full-history snapshot the matches
         // index into; don't reload it out from under the search (still mark read)
@@ -929,7 +933,43 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             Bridge.markChatRead(chatId)
             return
         }
+        // The event named the rows it touched and nothing moved, so re-read only
+        // those. Ticks, reactions and download completions arrive in bursts and
+        // used to re-query, re-map and re-diff the entire loaded window — up to
+        // 5000 rows with a correlated reactions subquery each — several times a
+        // second. Scroll position, pagination and the seek machine only react to
+        // structural changes, which still take the full path below.
+        if (rowIds != null && restoredScroll && adapter.itemCount > 0) {
+            refreshRows(rowIds)
+            Bridge.markChatRead(chatId)
+            return
+        }
         reload(markRead = true)
+    }
+
+    /**
+     * Re-reads [ids] and swaps them into the list in place. Also resolves a
+     * pending "open this video when it lands" request, which a download
+     * completion would otherwise never satisfy — it is a row event, so it no
+     * longer passes through reload().
+     */
+    private fun refreshRows(ids: Set<String>) {
+        io.execute {
+            val fresh = Bridge.db.messagesByIds(chatId, ids).associateBy { it.id }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                pendingVideoOpen?.let { id ->
+                    val m = fresh[id]
+                    if (m != null && m.filePath.isNotEmpty()) {
+                        pendingVideoOpen = null
+                        openMediaFile(m)
+                    } else if (m != null && m.fileStatus == 3) {
+                        pendingVideoOpen = null // failed — Bridge already toasted
+                    }
+                }
+                adapter.refreshRows(fresh)
+            }
+        }
     }
 
     // a message change that arrived while a drag range-select was in progress
@@ -1617,8 +1657,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     /** Opens a location message's coordinates in whatever maps app is installed. */
     private fun openLocation(msg: MessageRow) {
-        if (msg.fileId.isEmpty()) return
-        val uri = Uri.parse("geo:${msg.fileId}?q=${msg.fileId}")
+        val coords = msg.coordinates()
+        if (coords.isEmpty()) return
+        val uri = Uri.parse("geo:$coords?q=$coords")
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
         } catch (e: Exception) {
@@ -1703,18 +1744,18 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         fun add(res: Int, action: () -> Unit) = actions.add(getString(res) to action)
 
-        // view-once media is a label and nothing else here: its keys are never
-        // shared with a companion device, so there is no body to forward or
-        // share and offering either would only fail
-        val viewOnce = msg.msgType == "viewonce"
+        // A label-only row (view-once media, a poll, a contact card) has no body
+        // on this device — nothing to forward or share, so offering either would
+        // only fail.
+        val labelOnly = msg.msgType in LABEL_ONLY_TYPES
 
         add(R.string.reply) { startReply(msg) }
-        if (!viewOnce) add(R.string.forward) { pickForwardTarget(msg) }
+        if (!labelOnly) add(R.string.forward) { pickForwardTarget(msg) }
         // the protocol only allows editing for a limited window after sending
         if (msg.fromMe && msg.msgType == "" && Bridge.canEdit(msg)) add(R.string.edit) { startEdit(msg) }
         add(R.string.delete) { confirmDelete(listOf(msg)) }
         if (msg.text.isNotEmpty() && msg.msgType != "audio") add(R.string.copy) { copyText(msg.text) }
-        if (msg.msgType != "" && !viewOnce) add(R.string.share) { shareMessage(msg) }
+        if (msg.msgType != "" && !labelOnly) add(R.string.share) { shareMessage(msg) }
         add(R.string.react) { showReactionPicker(msg) }
 
         showActionDialog(actions)
@@ -1850,11 +1891,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (msg.msgType == "location") {
             // nothing to download: share the raw coordinates (any maps app
             // accepts them) plus a clickable maps link
-            val link = "https://maps.google.com/?q=${msg.fileId}"
+            val coords = msg.coordinates()
+            val link = "https://maps.google.com/?q=$coords"
             intent.type = "text/plain"
             intent.putExtra(
                 Intent.EXTRA_TEXT,
-                listOf(msg.text, msg.fileId, link).filter { it.isNotEmpty() }.joinToString("\n")
+                listOf(msg.text, coords, link).filter { it.isNotEmpty() }.joinToString("\n")
             )
             startActivity(Intent.createChooser(intent, getString(R.string.share)))
             return
@@ -1871,7 +1913,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             val (uri, mime) = providedFile(File(msg.filePath), "*/*")
             intent.type = mime
             intent.putExtra(Intent.EXTRA_STREAM, uri)
-            if (msg.msgType == "image" && msg.text.isNotEmpty()) {
+            if (msg.msgType in PICTURE_TYPES && msg.text.isNotEmpty()) {
                 intent.putExtra(Intent.EXTRA_TEXT, msg.text)
             }
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -2007,8 +2049,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         var stillSending = false
         var downloading = false
         for (msg in msgs) {
-            // nothing of a view-once message exists on this device to send on
-            if (msg.msgType == "viewonce") continue
+            // nothing of a label-only message exists on this device to send on
+            if (msg.msgType in LABEL_ONLY_TYPES) continue
             val isFileMedia = msg.msgType in FILE_MEDIA_TYPES
             if (isFileMedia && isStillSending(msg)) { stillSending = true; continue }
             if (isFileMedia && msg.filePath.isEmpty()) {

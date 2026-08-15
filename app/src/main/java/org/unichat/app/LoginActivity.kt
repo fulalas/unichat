@@ -227,8 +227,22 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         if (!showingTg) statusText.text = ""
     }
 
-    override fun onPairError(message: String) {
+    /**
+     * [code] is one of the bridge's stable pairing-error codes, not prose: this
+     * text is the first thing a user reads on the first screen they see, so the
+     * wording is ours and translatable. "other:" carries whatsmeow's own detail
+     * for failures with no code of their own.
+     */
+    override fun onPairError(code: String) {
         pairButton.isEnabled = true
+        val message = when {
+            code == "short" -> getString(R.string.pair_phone_too_short)
+            code == "international" -> getString(R.string.pair_phone_not_international)
+            code == "notconnected" -> getString(R.string.pair_not_connected)
+            code.startsWith("other:") ->
+                getString(R.string.pair_failed, code.removePrefix("other:"))
+            else -> getString(R.string.pair_failed, code)
+        }
         statusText.text = message
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }

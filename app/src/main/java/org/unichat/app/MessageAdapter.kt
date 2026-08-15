@@ -24,9 +24,7 @@ import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import java.io.File
-import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 
 class MessageAdapter(
@@ -220,6 +218,18 @@ class MessageAdapter(
     }
 
     fun messagesSnapshot(): List<MessageRow> = messages
+
+    /**
+     * Swaps specific rows for freshly-read copies, keeping the current list
+     * shape and the name maps. For events that only changed a row's stored
+     * fields (a tick, a reaction, a finished download): the differ then rebinds
+     * just those rows, instead of the host re-querying its whole window.
+     */
+    fun refreshRows(fresh: Map<String, MessageRow>) {
+        if (fresh.isEmpty() || messages.isEmpty()) return
+        if (messages.none { it.id in fresh }) return
+        differ.submitList(messages.map { fresh[it.id] ?: it }) { rowsById = null }
+    }
 
     /**
      * Refreshes every visible audio row's play/pause icon and progress in place.
@@ -793,11 +803,10 @@ class MessageAdapter(
 
         val editedPrefix = if (msg.edited) ctx.getString(R.string.edited) + " " else ""
         val timeStr = editedPrefix + TimeFormat.clock(msg.timeSent)
-        // stickers travel as msgType "image"; the fileId kind tells them apart
-        val sticker = msg.msgType == "image" && msg.fileId.startsWith("stk:")
+        val sticker = msg.msgType == "sticker"
         // a captionless photo draws its timestamp over the image itself,
         // WhatsApp-style, instead of on its own line under it
-        val overlayTime = msg.msgType == "image" && !sticker && msg.text.isEmpty()
+        val overlayTime = msg.msgType == "image" && msg.text.isEmpty()
         // a sticker with nothing else in its bubble floats directly on the
         // wallpaper — no bubble background, no border — like WhatsApp
         val bareSticker = sticker && msg.text.isEmpty() &&
@@ -840,7 +849,7 @@ class MessageAdapter(
         // a holder reused in-place for a non-image row (DiffUtil change) keeps
         // any previous animation attached and hidden; stop and release it. Image
         // rows are handled by load(), which keeps or replaces the drawable.
-        if (msg.msgType != "image") ImageLoader.clearAnimating(holder.image)
+        if (msg.msgType !in PICTURE_TYPES) ImageLoader.clearAnimating(holder.image)
         holder.audioRow.visibility = View.GONE
         holder.audioMeta.visibility = View.GONE
         holder.videoRow.visibility = View.GONE
@@ -851,7 +860,7 @@ class MessageAdapter(
         // holders are recycled)
         val density = ctx.resources.displayMetrics.density
         val padH: Int; val padV: Int
-        if (msg.msgType == "image") {
+        if (msg.msgType in PICTURE_TYPES) {
             val slim = if (bareSticker) 0 else (4 * density).toInt()
             padH = slim; padV = slim
         } else {
@@ -859,7 +868,7 @@ class MessageAdapter(
         }
         holder.bubble.setPadding(padH, padV, padH, padV)
         // captions still need breathing room inside the slim image border
-        val capPad = if (msg.msgType == "image") (6 * density).toInt() else 0
+        val capPad = if (msg.msgType in PICTURE_TYPES) (6 * density).toInt() else 0
         holder.text.setPadding(capPad, if (capPad > 0) (2 * density).toInt() else 0, capPad, 0)
 
         holder.forwardedLabel.visibility = if (msg.forwarded) View.VISIBLE else View.GONE
@@ -911,7 +920,7 @@ class MessageAdapter(
         }
 
         when (msg.msgType) {
-            "image" -> {
+            in PICTURE_TYPES -> {
                 holder.imageFrame.visibility = View.VISIBLE
                 // with the time overlaid the image is the bubble's last child,
                 // so the gap that separated it from the caption/time goes away
@@ -962,9 +971,10 @@ class MessageAdapter(
                 val label = msg.text.ifEmpty { ctx.getString(R.string.location_label) }
                 holder.text.text = highlighted(ctx, "📍 $label")
             }
-            // view-once media: nothing downloadable reaches a companion device,
-            // so the bubble is just the (localized) label
-            "viewonce" -> holder.text.text = previewLabel(ctx, msg.msgType, "", emoji = true)
+            // nothing this client can render (view-once media, a poll, a
+            // contact card): the bubble is just the localized label
+            in LABEL_ONLY_TYPES -> holder.text.text =
+                previewLabel(ctx, msg.msgType, "", emoji = true)
             else -> {
                 holder.text.text = highlighted(ctx, msg.text)
                 // emoji-only messages render large and without a bubble, like
@@ -1114,32 +1124,25 @@ object ImageLoader {
     // swap apart from a recycled holder).
     private data class Tag(val path: String, val msgId: String)
 
-    // Every view waiting on a decode of a given path, with the bounds rule each
-    // one needs. inFlight alone used to drop every requester but the one that
-    // started the decode, and that decode posted its result only to the
-    // ImageView captured in its own closure — so a second visible bubble
-    // referencing the same file (a forwarded photo, the same sticker twice) sat
-    // on the placeholder until an unrelated rebind hit the populated cache.
-    // Held weakly so a destroyed view/activity is never retained here.
-    private class Waiter(val view: WeakReference<ImageView>, val sticker: Boolean)
-    private val waiting = ConcurrentHashMap<String, CopyOnWriteArrayList<Waiter>>()
+    // Every view waiting on a decode of a given path, carrying the bounds rule
+    // each one needs. The queue itself is PendingViews (BitmapCaches.kt), shared
+    // with AvatarLoader; only the "is this view still on this path" test and the
+    // painting below are ours.
+    private val waiting = PendingViews<Boolean>()
 
-    /** Queues [imageView] for [path]'s decode, replacing its own earlier entry. */
-    private fun await(path: String, imageView: ImageView, sticker: Boolean) {
-        val list = waiting.computeIfAbsent(path) { CopyOnWriteArrayList() }
-        list.removeIf { it.view.get().let { v -> v == null || v === imageView } }
-        list.add(Waiter(WeakReference(imageView), sticker))
-    }
+    /** True while [view] still shows [path] — the tag is rewritten on every bind,
+     *  so a recycled holder must not be painted with the decode it started. */
+    private fun stillOn(view: ImageView, path: String) = (view.tag as? Tag)?.path == path
 
     // Paints a finished decode into every view still bound to this path. Main
     // thread: the only place a View's tag is read, so the decode workers never
     // touch View state (View is not thread-safe).
     private fun deliverBitmap(path: String, bitmap: Bitmap) {
-        for (w in waiting.remove(path).orEmpty()) {
+        for (w in waiting.take(path)) {
             val view = w.view.get() ?: continue
-            if ((view.tag as? Tag)?.path != path) continue
+            if (!stillOn(view, path)) continue
             clearAnimating(view)
-            applyBounds(view, bitmap.width, bitmap.height, w.sticker)
+            applyBounds(view, bitmap.width, bitmap.height, w.payload)
             view.setImageBitmap(bitmap)
         }
     }
@@ -1148,11 +1151,11 @@ object ImageLoader {
     // first view still bound to this path; any other waiter re-decodes, or
     // reuses this instance from animCache once it detaches.
     private fun deliverAnimated(path: String, drawable: AnimatedImageDrawable) {
-        for (w in waiting.remove(path).orEmpty()) {
+        for (w in waiting.take(path)) {
             val view = w.view.get() ?: continue
-            if ((view.tag as? Tag)?.path != path) continue
+            if (!stillOn(view, path)) continue
             clearAnimating(view)
-            applyBounds(view, drawable.intrinsicWidth, drawable.intrinsicHeight, w.sticker)
+            applyBounds(view, drawable.intrinsicWidth, drawable.intrinsicHeight, w.payload)
             view.setImageDrawable(drawable)
             drawable.start()
             // cache only after it's attached (callback now set) so a concurrent
@@ -1166,7 +1169,7 @@ object ImageLoader {
         val path = msg.filePath
         // photos scale up to the standard bubble width (see applyBounds);
         // stickers keep their intrinsic size
-        val sticker = msg.fileId.startsWith("stk:")
+        val sticker = msg.msgType == "sticker"
         val prev = imageView.tag as? Tag
         imageView.tag = Tag(path, msg.id)
         if (path.isEmpty()) {
@@ -1224,7 +1227,7 @@ object ImageLoader {
         val targetPx = if (sticker) 512 else imageView.maxWidth.coerceAtLeast(512)
         // queue this view BEFORE claiming the slot, so a decode already running
         // for this path still delivers to it
-        await(path, imageView, sticker)
+        waiting.await(path, imageView, sticker)
         if (!inFlight.add(path)) return // a decode for this file is already running; we are queued on it
         executor.execute {
             var delivering = false
@@ -1236,7 +1239,7 @@ object ImageLoader {
                 // off-screen may still be decoded, but deliverBitmap re-checks
                 // the tag on the main thread and won't paint it, and the result
                 // lands in the cache for the next bind either way.
-                if (waiting[path].isNullOrEmpty()) return@execute
+                if (waiting.peek(path).isNullOrEmpty()) return@execute
                 // another decode landed it while this one sat in the queue
                 val ready = cache.get(path)
                 if (ready != null) {
@@ -1270,7 +1273,7 @@ object ImageLoader {
             } finally {
                 inFlight.remove(path)
                 // nothing will be painted, so don't leave the queue behind
-                if (!delivering) waiting.remove(path)
+                if (!delivering) waiting.abandon(path)
             }
         }
     }

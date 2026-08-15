@@ -51,7 +51,7 @@ object ChatExporter {
         // one place instead of being re-spelled here
         val detail = when (m.msgType) {
             "audio" -> m.text
-            "location" -> m.fileId
+            "location" -> m.coordinates()
             else -> ""
         }
         val body =

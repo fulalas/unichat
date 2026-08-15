@@ -283,6 +283,19 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         submitChats(allChats)
     }
 
+    /**
+     * Someone started or stopped typing. Same treatment as presence, and for the
+     * same reason: the typing state lives in Bridge, not in the database, so the
+     * rows already in memory just need re-stamping. This used to arrive as a
+     * chats-changed event, which re-ran the whole chat-list query on every actor
+     * start, stop and 15-second expiry.
+     */
+    override fun onChatState(chatId: String, state: String) {
+        if (!started || query.isNotEmpty()) return
+        if (allChats.none { it.id == chatId }) return
+        submitChats(allChats)
+    }
+
     // a Telegram logout finished: leave for the login screen if nothing is left,
     // else offer to link it again
     override fun onTgAuth(state: String, message: String) {
@@ -299,7 +312,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     // every message event too, so onChatsChanged already covers this. Reloading
     // here as well turned one burst of N changed chats into N+1 identical
     // chats() queries (five subqueries per row) back to back on the io thread.
-    override fun onMessagesChanged(chatId: String) {}
+    override fun onMessagesChanged(chatId: String, rowIds: Set<String>?) {}
 
     override fun onSyncProgress(progress: Int) = updateSubtitle()
 

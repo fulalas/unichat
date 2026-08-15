@@ -8,10 +8,8 @@ import android.graphics.Shader
 import android.os.Handler
 import android.os.Looper
 import android.widget.ImageView
-import java.lang.ref.WeakReference
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import kotlin.math.min
 
@@ -41,26 +39,14 @@ object AvatarLoader {
     private val missedAt = ConcurrentHashMap<String, Long>()
     private val inFlight = Collections.synchronizedSet(HashSet<String>())
 
-    // EVERY ImageView still waiting on a given chat id, with the size it asked
-    // for. One record used to be kept, so when two views on screen wanted the
-    // same id (a chat-list row and the chat toolbar, or a contact appearing
-    // twice in search results) only the last requester was ever painted and the
-    // others sat on their coloured-initial placeholder until an unrelated
-    // rebind. Held weakly so a destroyed view/activity is never retained here.
-    private class Request(val view: WeakReference<ImageView>, val sizePx: Int)
-    private val requests = ConcurrentHashMap<String, CopyOnWriteArrayList<Request>>()
-
-    /** Queues [imageView] for [chatId]'s next decode, replacing its own earlier entry. */
-    private fun await(chatId: String, imageView: ImageView, sizePx: Int) {
-        val list = requests.computeIfAbsent(chatId) { CopyOnWriteArrayList() }
-        list.removeIf { it.view.get().let { v -> v == null || v === imageView } }
-        list.add(Request(WeakReference(imageView), sizePx))
-    }
+    // Every ImageView still waiting on a given chat id, carrying the size it
+    // asked for. The queue is PendingViews (BitmapCaches.kt), shared with
+    // ImageLoader; only the still-bound test and the painting below are ours.
+    private val requests = PendingViews<Int>()
 
     /** Paints a finished avatar into every view still bound to [chatId]. Main thread. */
     private fun deliver(chatId: String, bitmap: Bitmap) {
-        val pending = requests.remove(chatId) ?: return
-        for (r in pending) {
+        for (r in requests.take(chatId)) {
             val view = r.view.get() ?: continue
             if (view.tag == chatId) view.setImageBitmap(bitmap)
         }
@@ -115,7 +101,7 @@ object AvatarLoader {
         val missed = missedAt[chatId]
         if (missed != null && System.currentTimeMillis() - missed < NO_AVATAR_MS) return
 
-        await(chatId, imageView, sizePx)
+        requests.await(chatId, imageView, sizePx)
         if (!inFlight.add(chatId)) return // a fetch for this id is already running; we are queued on it
 
         // A stale cached bitmap is already on screen, so its refresh is pure
@@ -135,7 +121,7 @@ object AvatarLoader {
         var delivering = false
         var handedOff = false
         try {
-            val pending = requests[chatId]
+            val pending = requests.peek(chatId)
             // Skip only when nothing holds a live view any more and the
             // bitmap is already cached. Deliberately does NOT read
             // imageView.tag: View is not thread-safe, and this runs on a
@@ -144,7 +130,7 @@ object AvatarLoader {
             // deliver() re-checks the tag on the main thread and simply
             // won't paint it, and the decode still populates the cache.
             if (pending.isNullOrEmpty() && cache.get(chatId) != null) return
-            val px = pending?.maxOfOrNull { it.sizePx } ?: sizePx
+            val px = pending?.maxOfOrNull { it.payload } ?: sizePx
             val path =
                 if (cachedOnly) Bridge.getCachedAvatarPath(chatId) else Bridge.getAvatarPath(chatId)
             if (path.isEmpty()) {
@@ -177,7 +163,7 @@ object AvatarLoader {
             if (!handedOff) {
                 inFlight.remove(chatId)
                 // nothing will be painted, so don't leave the queue behind
-                if (!delivering) requests.remove(chatId)
+                if (!delivering) requests.abandon(chatId)
             }
         }
     }

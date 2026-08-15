@@ -503,6 +503,8 @@ object Tg {
         // file (text, emoji) get "", and location overwrites it with coordinates.
         var fileId = fileOf(content)?.optInt("id")?.toString() ?: ""
         var listened = false
+        var latitude = 0.0
+        var longitude = 0.0
         when (content.optString("@type")) {
             "messageText" -> text = content.getJSONObject("text").optString("text")
             "messagePhoto" -> {
@@ -539,12 +541,15 @@ object Tg {
             "messageSticker" -> {
                 val sticker = content.getJSONObject("sticker")
                 if (sticker.optJSONObject("format")?.optString("@type") == "stickerFormatWebp") {
-                    msgType = "image"
+                    // same content kind the WhatsApp bridge reports, so both
+                    // render as stickers rather than one of them as a photo
+                    msgType = "sticker"
                 } else {
                     // animated/video stickers have no still frame to show, so the
                     // row is text and must not claim a downloadable file
                     fileId = ""
-                    text = sticker.optString("emoji").ifEmpty { "🩹" } + " (sticker)"
+                    val emoji = sticker.optString("emoji").ifEmpty { "🩹" }
+                    text = appContext?.getString(R.string.sticker_with_emoji, emoji) ?: emoji
                 }
             }
             // A message that is just emoji comes as its own content type with the
@@ -557,10 +562,15 @@ object Tg {
             "messageLocation" -> {
                 msgType = "location"
                 val loc = content.getJSONObject("location")
-                fileId = "${loc.optDouble("latitude")},${loc.optDouble("longitude")}"
-                text = "%.5f, %.5f".format(loc.optDouble("latitude"), loc.optDouble("longitude"))
+                latitude = loc.optDouble("latitude")
+                longitude = loc.optDouble("longitude")
             }
-            "messageCall" -> text = "📞 Call"
+            // Kinds this client only labels. Mapped onto the SAME msg_types the
+            // WhatsApp bridge emits, so previewLabel renders one translated
+            // wording for both services instead of each inventing its own.
+            "messageCall" -> msgType = "call"
+            "messageContact" -> msgType = "contact"
+            "messagePoll" -> msgType = "poll"
             "messageChatChangeTitle" -> text = "· " + content.optString("title")
             else -> text = placeholderFor(content)
         }
@@ -584,6 +594,7 @@ object Tg {
             MessageRow(
                 msgId.toString(), chatId, senderId, text, fromMe, timeSent, isRead,
                 msgType = msgType, fileId = fileId,
+                latitude = latitude, longitude = longitude,
                 edited = msg.optLong("edit_date") > 0, quotedId = quotedId,
                 senderName = senderName,
                 forwarded = msg.optJSONObject("forward_info") != null,
@@ -601,7 +612,7 @@ object Tg {
         Bridge.db.bumpChat(chatId, timeSent)
         if (notify && !fromMe && !isRead) {
             // eager-fetch images and voice notes for live messages, like WhatsApp
-            if ((msgType == "image" || msgType == "audio") && fileId.isNotEmpty() && filePath.isEmpty()) {
+            if ((msgType in PICTURE_TYPES || msgType == "audio") && fileId.isNotEmpty() && filePath.isEmpty()) {
                 downloadFile(MessageRow(msgId.toString(), chatId, senderId, text, fromMe, timeSent, isRead, msgType = msgType, fileId = fileId))
             }
             if (chatId != Bridge.activeChatId && !Bridge.db.isMuted(chatId)) {
@@ -650,7 +661,7 @@ object Tg {
         val chatId = idFor(obj.getLong("chat_id"))
         val msgId = obj.getLong("message_id").toString()
         applyReactions(chatId, msgId, obj.optJSONObject("interaction_info"), preview = true)
-        Bridge.notifyChat(chatId)
+        Bridge.notifyChatRow(chatId, msgId)
     }
 
     /**
@@ -765,7 +776,7 @@ object Tg {
                 return false
             }
             Bridge.db.setFileState(msg.chatId, msg.id, done, 2)
-            Bridge.notifyChat(msg.chatId)
+            Bridge.notifyChatRow(msg.chatId, msg.id)
             Bridge.onTgFileDone(msg.chatId, msg.id, done, 2)
         }
         return true
@@ -793,7 +804,7 @@ object Tg {
 
     private fun failDownload(msg: MessageRow) {
         Bridge.db.setFileState(msg.chatId, msg.id, "", 3)
-        Bridge.notifyChat(msg.chatId)
+        Bridge.notifyChatRow(msg.chatId, msg.id)
         Bridge.onTgFileDone(msg.chatId, msg.id, "", 3)
     }
 
@@ -810,7 +821,7 @@ object Tg {
                 val ok = usable(path)
                 for ((chatId, msgId) in targets) {
                     Bridge.db.setFileState(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
-                    Bridge.notifyChat(chatId)
+                    Bridge.notifyChatRow(chatId, msgId)
                     Bridge.onTgFileDone(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
                 }
             }
@@ -832,7 +843,7 @@ object Tg {
                 fileTargets.remove(fid)
                 for ((chatId, msgId) in targets) {
                     Bridge.db.setFileState(chatId, msgId, "", 3)
-                    Bridge.notifyChat(chatId)
+                    Bridge.notifyChatRow(chatId, msgId)
                     Bridge.onTgFileDone(chatId, msgId, "", 3)
                 }
             }
@@ -1260,6 +1271,10 @@ object Tg {
     // --- export -----------------------------------------------------------------------
 
     @Volatile private var exportChatId: String? = null
+    // Messages this export has ADDED to the local store, which is what the
+    // WhatsApp side reports too. It used to be a running sum of page sizes: a
+    // page that re-delivered messages already stored counted them again, so the
+    // number shown could exceed the chat's real length.
     @Volatile private var exportCount = 0
 
     fun exportProgress(chatId: String): Int = if (exportChatId == chatId) exportCount else -1
@@ -1279,12 +1294,15 @@ object Tg {
             // for the rest of the process and left the UI waiting on a
             // completion event that never came.
             try {
+                val before = Bridge.db.messageCount(chatId)
                 while (true) {
                     val fromId = Bridge.db.oldestMessage(chatId)?.id?.toLongOrNull() ?: 0L
                     val count = fetchHistory(chatId, fromId, 100)
                     if (count < 0) { complete = false; break }
                     if (count == 0) { historyExhausted.add(chatId); break }
-                    exportCount += count
+                    // measured against the store, not summed per page: pages
+                    // overlap and re-deliver, and the store dedups by id
+                    exportCount = Bridge.db.messageCount(chatId) - before
                     Bridge.postChatExportProgress(chatId, exportCount)
                 }
                 val ctx = appContext
@@ -1299,6 +1317,10 @@ object Tg {
                 complete = false
             } finally {
                 exportChatId = null
+                // hand back the persistable grant the activity gave us, as the
+                // WhatsApp export does — they otherwise accumulate against the
+                // system's per-app limit
+                Bridge.releaseExportUri(uri)
                 Bridge.postChatExportDone(chatId, messages, complete, success)
             }
         }
