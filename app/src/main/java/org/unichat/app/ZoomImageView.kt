@@ -85,8 +85,25 @@ class ZoomImageView @JvmOverloads constructor(
     )
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Claim the gesture from the pager this view sits in. Two reasons, both
+        // of which look like "pinch is broken": a pinch IS horizontal movement,
+        // so at fit-to-screen the pager would intercept the second finger and
+        // turn a zoom into a page swipe; and once zoomed in, every drag belongs
+        // to the image, so paging must not start at all.
+        val pinching = event.pointerCount > 1 || scaleDetector.isInProgress
+        if (pinching || zoom > 1f) parent?.requestDisallowInterceptTouchEvent(true)
+
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
+
+        // Released only once the image is back to fit-to-screen — checked after
+        // the detectors have run, so a pinch that ends at 1x hands paging back
+        // immediately rather than one gesture later.
+        if (event.actionMasked == MotionEvent.ACTION_UP ||
+            event.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            if (zoom <= 1f) parent?.requestDisallowInterceptTouchEvent(false)
+        }
         return true
     }
 
