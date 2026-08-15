@@ -32,7 +32,7 @@ class PrivacyActivity : BaseActivity() {
         proto = intent.getStringExtra("proto") ?: ProtoPicker.WA
         // this screen belongs to one account, so it wears that
         // protocol's accent; must precede any view inflation
-        if (!isTg) theme.applyStyle(R.style.ThemeOverlay_UniChat_Wa, true)
+        applyProtocolTheme(isTg)
         setContentView(R.layout.activity_privacy)
         supportActionBar?.apply {
             title = getString(R.string.privacy) + " — " + ProtoPicker.label(this@PrivacyActivity, proto)
@@ -64,20 +64,8 @@ class PrivacyActivity : BaseActivity() {
         load()
     }
 
-    override fun onSupportNavigateUp(): Boolean {
-        finish()
-        return true
-    }
-
     private fun load() {
-        if (isTg) {
-            Tg.io.execute {
-                val map = Tg.fetchPrivacySettings()
-                runOnUiThread { onLoaded(map) }
-            }
-            return
-        }
-        Bridge.fetchPrivacySettings { map -> onLoaded(map) }
+        Bridge.fetchPrivacySettings(proto) { map -> onLoaded(map) }
     }
 
     private fun onLoaded(map: Map<String, String>?) {
@@ -150,14 +138,7 @@ class PrivacyActivity : BaseActivity() {
             onDone?.invoke()
             return
         }
-        if (isTg) {
-            Tg.io.execute {
-                val ok = Tg.setPrivacySetting(name, value)
-                runOnUiThread { onApplied(name, value, ok, onDone) }
-            }
-            return
-        }
-        Bridge.setPrivacySetting(name, value) { ok -> onApplied(name, value, ok, onDone) }
+        Bridge.setPrivacySetting(proto, name, value) { ok -> onApplied(name, value, ok, onDone) }
     }
 
     private fun onApplied(name: String, value: String, ok: Boolean, onDone: (() -> Unit)?) {

@@ -194,7 +194,12 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     // always empty, and identical rows keep the diff a no-op.
     private fun withChatStates(chats: List<ChatRow>): List<ChatRow> = chats.map {
         val state = Bridge.chatState(it.id) ?: ""
-        if (state == it.transientState) it else it.copy(transientState = state)
+        // presence rides along with the typing state: both are live values the
+        // DB knows nothing about, and both must reach the differ as row data or
+        // the row never rebinds when they change
+        val online = !it.isGroup && Bridge.isOnline(it.id)
+        if (state == it.transientState && online == it.online) it
+        else it.copy(transientState = state, online = online)
     }
 
     // Submits the list and, if it was scrolled to the very top, keeps it pinned
@@ -263,6 +268,20 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     override fun onChatsChanged() = reloadFromEvent()
 
     override fun onTgStateChanged() = updateSubtitle()
+
+    /**
+     * Someone came online or went away. Re-stamps the rows from the list already
+     * in memory rather than re-reading the DB: presence is chatty, and nothing
+     * stored has changed — only the value withChatStates copies in.
+     */
+    override fun onPresence(userId: String, isOnline: Boolean, lastSeen: Long) {
+        if (!started || query.isNotEmpty()) return
+        // every visible row subscribes as the list scrolls, so these arrive for
+        // contacts this list may not even show — and each one costs a full
+        // rebuild plus a diff pass
+        if (allChats.none { it.id == userId }) return
+        submitChats(allChats)
+    }
 
     // a Telegram logout finished: leave for the login screen if nothing is left,
     // else offer to link it again

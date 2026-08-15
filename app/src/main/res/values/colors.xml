@@ -21,4 +21,6 @@
     <color name="bubble_out_wa">#D9FDD3</color>
     <color name="quote_flash_wa">#4D008069</color>
     <color name="msg_selected_wa">#33008069</color>
+    <!-- presence dot: one colour for both protocols, it means "online" -->
+    <color name="online_dot">#25D366</color>
 </resources>

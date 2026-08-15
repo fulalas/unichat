@@ -333,7 +333,13 @@ class MessageAdapter(
      * automatic retry per failure.
      */
     private fun maybeAutoDownload(msg: MessageRow) {
-        if (msg.filePath.isEmpty() && (msg.fileStatus == 0 || msg.fileStatus == 3)) {
+        // A stored path outlives its file: our own Telegram sends reference the
+        // cacheDir staging copy, which the daily sweep deletes after a day. The
+        // row went on claiming "downloaded", so nothing here ever re-fetched it
+        // and the bubble stayed blank for good. A vanished file is not a
+        // download — Bridge drops the dead reference and fetches it again.
+        val gone = msg.filePath.isNotEmpty() && !File(msg.filePath).exists()
+        if (gone || (msg.filePath.isEmpty() && (msg.fileStatus == 0 || msg.fileStatus == 3))) {
             onNeedDownload(msg, false)
         }
     }
@@ -441,7 +447,8 @@ class MessageAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
         val view = LayoutInflater.from(parent.context).inflate(R.layout.item_message, parent, false)
         val holder = Holder(view)
-        applyWidthCaps(holder)
+        // no applyWidthCaps here: a bind always follows a create and applies
+        // them itself, and nothing reads the caps in between
         // round the image to follow the bubble curve (images get a slim
         // border, so square corners would poke past the bubble's radius)
         val radius = 7f * parent.resources.displayMetrics.density
@@ -526,7 +533,9 @@ class MessageAdapter(
         holder.image.setOnClickListener {
             if (tapWhileSelecting()) return@setOnClickListener
             val m = holder.current ?: return@setOnClickListener
-            if (m.filePath.isNotEmpty()) onImageClick(m) else onNeedDownload(m, true)
+            // a path whose file is gone opens an empty viewer: fetch instead
+            if (m.filePath.isNotEmpty() && File(m.filePath).exists()) onImageClick(m)
+            else onNeedDownload(m, true)
         }
         holder.quotePreview.setOnClickListener {
             if (tapWhileSelecting()) return@setOnClickListener
@@ -1309,6 +1318,20 @@ object ImageLoader {
         var sample = 1
         while (w / (sample * 2) >= maxDim || h / (sample * 2) >= maxDim) sample *= 2
         return sample
+    }
+
+    /**
+     * Decodes [path] on the image pool and delivers the result on the main
+     * thread. Deliberately not Io.executor, the app-wide serial worker every
+     * screen's DB reads share: a viewer-sized decode runs for hundreds of
+     * milliseconds, and queueing three of them (ViewPager2 keeps neighbours
+     * bound) stalled the chat list and the open chat behind the swipe.
+     */
+    fun decodeAsync(path: String, maxDim: Int, onDone: (Bitmap?) -> Unit) {
+        executor.execute {
+            val bitmap = decodeSampled(path, maxDim)
+            main.post { onDone(bitmap) }
+        }
     }
 
     fun decodeSampled(path: String, maxDim: Int): Bitmap? {

@@ -37,6 +37,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // upper bound on how long the screen is kept (dimly) alive for a
         // single voice note
         private const val RECORD_WAKE_LOCK_MS = 30 * 60 * 1000L
+        // message types backed by a file on disk, so forwarding one has to wait
+        // for its download (a set, not a per-message listOf in the batch loop)
+        private val FILE_MEDIA_TYPES = setOf("image", "audio", "video", "document")
         // contextual-action-bar item ids for multi-select
         private const val M_FORWARD = 1
         private const val M_COPY = 2
@@ -227,7 +230,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         chatId = intent.getStringExtra("chatId") ?: run { finish(); return }
         // WhatsApp chats swap the blue chat palette for the green one; must
         // happen before any view of this screen inflates
-        if (!Tg.isTgId(chatId)) theme.applyStyle(R.style.ThemeOverlay_UniChat_Wa, true)
+        applyProtocolTheme(Tg.isTgId(chatId))
         setContentView(R.layout.activity_chat)
 
         if (!Bridge.init(this)) { finish(); return }
@@ -389,11 +392,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // top up a sparsely-synced chat with one older page on open (skipped
         // when plenty is already local, so re-opening doesn't keep backfilling)
         Bridge.requestInitialHistory(chatId)
-    }
-
-    override fun onSupportNavigateUp(): Boolean {
-        finish()
-        return true
     }
 
     @Deprecated("Deprecated in Java")
@@ -1631,17 +1629,23 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // --- documents -------------------------------------------------------------
 
     private fun openDocument(msg: MessageRow) {
-        if (msg.filePath.isEmpty()) {
+        if (!mediaOnDisk(msg)) {
             downloadWithToast(msg)
             return
         }
         openMediaFile(msg)
     }
 
+    // Whether the row's file is really here. A stored path can outlive its file
+    // (our own Telegram sends reference the cacheDir staging copy, swept after a
+    // day), and handing that path to an external viewer opens nothing.
+    private fun mediaOnDisk(msg: MessageRow): Boolean =
+        msg.filePath.isNotEmpty() && File(msg.filePath).exists()
+
     // Video tapped outside its download icon: open now if it's here, otherwise
     // download and open automatically once the file lands (see reload()).
     private fun openVideo(msg: MessageRow) {
-        if (msg.filePath.isNotEmpty()) {
+        if (mediaOnDisk(msg)) {
             openMediaFile(msg)
             return
         }
@@ -1670,10 +1674,31 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     // --- forward -----------------------------------------------------------
 
-    // Message-action dialog. Each entry carries its own action, so dispatch is
-    // by identity rather than by comparing the tapped label against localized
-    // strings — which silently ran the wrong action for any translation that
-    // rendered two labels the same (the CAB below already dispatches by id).
+    /**
+     * A list dialog whose entries carry their own action, so dispatch is by
+     * identity rather than by comparing the tapped label against localized
+     * strings — which silently ran the wrong action for any translation that
+     * rendered two labels the same (the CAB dispatches by item id for the same
+     * reason). [titleRes]/[cancellable] cover the delete confirmation, which
+     * needs a title and a Cancel button; the message-action sheet has neither.
+     */
+    private fun showActionDialog(
+        actions: List<Pair<String, () -> Unit>>,
+        titleRes: Int? = null,
+        cancellable: Boolean = false,
+        onChosen: () -> Unit = {},
+    ) {
+        AlertDialog.Builder(this)
+            .apply { if (titleRes != null) setTitle(titleRes) }
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+                onChosen()
+            }
+            .apply { if (cancellable) setNegativeButton(android.R.string.cancel, null) }
+            .show()
+    }
+
+    // Message-action dialog.
     private fun showMessageActions(msg: MessageRow) {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         fun add(res: Int, action: () -> Unit) = actions.add(getString(res) to action)
@@ -1692,11 +1717,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (msg.msgType != "" && !viewOnce) add(R.string.share) { shareMessage(msg) }
         add(R.string.react) { showReactionPicker(msg) }
 
-        AlertDialog.Builder(this)
-            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
-                actions[which].second()
-            }
-            .show()
+        showActionDialog(actions)
     }
 
     // WhatsApp's quick-reaction set in a horizontal row; tapping one sends it,
@@ -1811,8 +1832,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // message is ours and still within WhatsApp's revoke window — the server
     // would reject the too-old ones.
     private fun confirmDelete(msgs: List<MessageRow>, onDone: () -> Unit = {}) {
-        // same reason as showMessageActions: dispatch by the action attached to
-        // the entry, never by the localized label that was tapped
         val options = ArrayList<Pair<String, () -> Unit>>()
         if (msgs.all { Bridge.canDeleteForEveryone(it) }) {
             options.add(getString(R.string.delete_for_everyone) to {
@@ -1822,14 +1841,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         options.add(getString(R.string.delete_for_me) to {
             for (m in msgs) Bridge.deleteForMe(chatId, m.id)
         })
-        AlertDialog.Builder(this)
-            .setTitle(R.string.delete_message)
-            .setItems(options.map { it.first }.toTypedArray()) { _, which ->
-                options[which].second()
-                onDone()
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+        showActionDialog(options, R.string.delete_message, cancellable = true, onChosen = onDone)
     }
 
     /** Share a message out to any other app via the system share sheet. */
@@ -1886,21 +1898,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // contacts. Shared by the single-message and multi-select forwards.
     private fun showForwardPicker(onPick: (List<String>) -> Unit) {
         io.execute {
-            val ids = ArrayList<String>()
-            val labels = ArrayList<String>()
-            // your own chat on each linked account, pinned first and named after
-            // its protocol; listed even with no history, since forwarding to
-            // yourself is always available
-            for (self in listOf(Bridge.selfId(), if (Tg.hasSession()) Tg.selfId() else "")) {
-                if (self.isEmpty() || self in ids) continue
-                ids.add(self)
-                labels.add(selfPickerLabel(this, self))
-            }
-            for (chat in Bridge.db.chats()) {
-                if (chat.id in ids) continue
-                ids.add(chat.id)
-                labels.add(chat.displayLabelWithProto(this))
-            }
+            val (labels, ids) = targetChoices()
             runOnUiThread {
                 // the chats query runs on the shared serial io thread and can be
                 // queued behind other DB work, so this screen may be gone by now;
@@ -2011,7 +2009,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         for (msg in msgs) {
             // nothing of a view-once message exists on this device to send on
             if (msg.msgType == "viewonce") continue
-            val isFileMedia = msg.msgType in listOf("image", "audio", "video", "document")
+            val isFileMedia = msg.msgType in FILE_MEDIA_TYPES
             if (isFileMedia && isStillSending(msg)) { stillSending = true; continue }
             if (isFileMedia && msg.filePath.isEmpty()) {
                 Bridge.downloadFile(msg, userInitiated = true)

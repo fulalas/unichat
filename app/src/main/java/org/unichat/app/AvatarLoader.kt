@@ -1,7 +1,6 @@
 package org.unichat.app
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -157,7 +156,12 @@ object AvatarLoader {
                 forget(chatId)
                 return
             }
-            val raw = BitmapFactory.decodeFile(path)
+            // Subsample on the way in: circleCrop scales to px (256 at most)
+            // anyway, so a full-resolution decode of an avatar the server allows
+            // up to 8 MiB allocated the whole bitmap just to throw it away.
+            // decodeSampled also catches OutOfMemoryError, which a bare decode
+            // on this pool let reach the thread's uncaught handler.
+            val raw = ImageLoader.decodeSampled(path, px)
             if (raw == null) {
                 forget(chatId)
                 return

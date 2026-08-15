@@ -44,7 +44,8 @@ class ChatListAdapter(
         val timestamp: TextView = view.findViewById(R.id.timestamp)
         val unreadBadge: TextView = view.findViewById(R.id.unreadBadge)
         val muteIcon: ImageView = view.findViewById(R.id.muteIcon)
-        val protoBadge: TextView = view.findViewById(R.id.protoBadge)
+        val avatarRing: View = view.findViewById(R.id.avatarRing)
+        val onlineDot: View = view.findViewById(R.id.onlineDot)
         // the row currently bound to this recycled holder (with its display
         // label already resolved); the once-attached listeners read it instead
         // of capturing a fresh lambda — and re-resolving the label — per click
@@ -119,14 +120,14 @@ class ChatListAdapter(
             // GONE (not INVISIBLE) so the preview line reclaims the badge's width
             holder.unreadBadge.visibility = View.GONE
         }
-        // which protocol the chat belongs to, at a glance
-        if (Tg.isTgId(chat.id)) {
-            holder.protoBadge.text = "T"
-            holder.protoBadge.setBackgroundResource(R.drawable.proto_badge_tg)
-        } else {
-            holder.protoBadge.text = "W"
-            holder.protoBadge.setBackgroundResource(R.drawable.proto_badge_wa)
-        }
-        AvatarLoader.load(chat.id, name, holder.avatar, AvatarLoader.dp(holder.avatar, 50))
+        // which protocol the chat belongs to, as a ring around the avatar
+        holder.avatarRing.backgroundTintList =
+            android.content.res.ColorStateList.valueOf(context.protocolAccent(chat.id))
+        holder.onlineDot.visibility = if (chat.online) View.VISIBLE else View.GONE
+        // WhatsApp only reports presence for contacts it has been asked about,
+        // so the ask happens per visible row (Bridge subscribes once per
+        // contact); Telegram pushes it unprompted. Groups have no presence.
+        if (!chat.isGroup) Bridge.subscribePresence(chat.id)
+        AvatarLoader.load(chat.id, name, holder.avatar, AvatarLoader.dp(holder.avatar, 44))
     }
 }

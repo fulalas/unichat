@@ -219,7 +219,7 @@ object Tg {
                 myPhone = ""
                 executor.execute {
                     Bridge.db.clearTgData()
-                    Bridge.notifyChatsChangedInternal()
+                    Bridge.notifyChatsChanged()
                 }
                 // a fresh client is needed after close
                 clientId = TdJson.createClientId()
@@ -309,20 +309,20 @@ object Tg {
                 avatarPaths.remove(chatId)
                 avatarPaths.remove("$chatId/big")
                 AvatarLoader.invalidate(chatId)
-                Bridge.notifyChatsChangedInternal()
+                Bridge.notifyChatsChanged()
             }
             "updateChatTitle" -> {
                 // renameChat, not upsertChat: the latter writes `archived` too,
                 // and passing a placeholder false here un-archived the chat
                 Bridge.db.renameChat(idFor(obj.getLong("chat_id")), obj.optString("title"))
-                Bridge.notifyChatsChangedInternal()
+                Bridge.notifyChatsChanged()
             }
             "updateChatLastMessage" -> {
-                obj.optJSONObject("last_message")?.let { storeMessage(it, isHistory = false) }
+                obj.optJSONObject("last_message")?.let { storeMessage(it) }
             }
             "updateNewMessage" -> {
                 val msg = obj.getJSONObject("message")
-                storeMessage(msg, isHistory = false, notify = true)
+                storeMessage(msg, notify = true)
             }
             "updateMessageContent" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
@@ -333,8 +333,8 @@ object Tg {
                         JSONObject().put("@type", "getMessage")
                             .put("chat_id", obj.getLong("chat_id")).put("message_id", msgId)
                     )
-                    if (fresh != null) storeMessage(fresh, isHistory = true)
-                    Bridge.notifyChatInternal(chatId)
+                    if (fresh != null) storeMessage(fresh)
+                    Bridge.notifyChat(chatId)
                 }
             }
             "updateMessageEdited" -> { /* content update arrives separately */ }
@@ -342,13 +342,13 @@ object Tg {
                 val msg = obj.getJSONObject("message")
                 val oldId = obj.getLong("old_message_id")
                 Bridge.db.deleteMessage(idFor(msg.getLong("chat_id")), oldId.toString())
-                storeMessage(msg, isHistory = false)
+                storeMessage(msg)
             }
             "updateMessageSendFailed" -> {
                 val msg = obj.getJSONObject("message")
                 Bridge.db.deleteMessage(idFor(msg.getLong("chat_id")), obj.getLong("old_message_id").toString())
-                Bridge.notifyChatInternal(idFor(msg.getLong("chat_id")))
-                Bridge.toastSendFailed()
+                Bridge.notifyChat(idFor(msg.getLong("chat_id")))
+                Bridge.toastUi(R.string.send_failed)
             }
             "updateDeleteMessages" -> {
                 // is_permanent=false events are cache drops, not real deletions
@@ -358,7 +358,7 @@ object Tg {
                     for (i in 0 until ids.length()) {
                         Bridge.db.deleteMessage(chatId, ids.getLong(i).toString())
                     }
-                    Bridge.notifyChatInternal(chatId)
+                    Bridge.notifyChat(chatId)
                 }
             }
             "updateChatReadInbox" -> {
@@ -367,14 +367,14 @@ object Tg {
                 readInbox[raw] = upTo
                 Bridge.db.markReadUpTo(idFor(raw), upTo, incoming = true)
                 appContext?.let { Notifications.cancel(it, idFor(raw)) }
-                Bridge.notifyChatInternal(idFor(raw))
+                Bridge.notifyChat(idFor(raw))
             }
             "updateChatReadOutbox" -> {
                 val raw = obj.getLong("chat_id")
                 val upTo = obj.getLong("last_read_outbox_message_id")
                 readOutbox[raw] = upTo
                 Bridge.db.markReadUpTo(idFor(raw), upTo, incoming = false)
-                Bridge.notifyChatInternal(idFor(raw))
+                Bridge.notifyChat(idFor(raw))
             }
             "updateUser" -> onUser(obj.getJSONObject("user"))
             "updateUserStatus" ->
@@ -389,7 +389,7 @@ object Tg {
                     "chatActionCancel" -> "paused"
                     else -> return
                 }
-                Bridge.postChatState(chatId, idFor(uid), st)
+                Bridge.onChatState(chatId, idFor(uid), st)
             }
             // The recipient played our voice note. TDLib reports this with its
             // own update — the content itself does not change, so no
@@ -397,7 +397,7 @@ object Tg {
             "updateMessageContentOpened" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
                 Bridge.db.setPlayed(chatId, obj.getLong("message_id").toString())
-                Bridge.notifyChatInternal(chatId)
+                Bridge.notifyChat(chatId)
             }
             "updateFile" -> onFile(obj.getJSONObject("file"))
             "updateMessageInteractionInfo" -> onInteractionInfo(obj)
@@ -405,7 +405,7 @@ object Tg {
                 val raw = obj.getLong("chat_id")
                 val muted = obj.getJSONObject("notification_settings").optInt("mute_for") > 0
                 Bridge.db.setMuted(idFor(raw), muted)
-                Bridge.notifyChatsChangedInternal()
+                Bridge.notifyChatsChanged()
             }
         }
     }
@@ -427,13 +427,13 @@ object Tg {
         Bridge.db.upsertChat(id, title, archived, last?.optLong("date") ?: 0)
         val muted = chat.optJSONObject("notification_settings")?.optInt("mute_for", 0) ?: 0
         if (muted > 0) Bridge.db.setMuted(id, true)
-        last?.let { storeMessage(it, isHistory = true) }
+        last?.let { storeMessage(it) }
         // group flag for the chat list (ids alone can't tell for basic groups)
         val type = chat.optJSONObject("type")?.optString("@type") ?: ""
         if (type == "chatTypeBasicGroup" || type == "chatTypeSupergroup") {
             Bridge.db.upsertContact(id, title, "", isSelf = false, isGroup = true, isSaved = false)
         }
-        Bridge.notifyChatsChangedInternal()
+        Bridge.notifyChatsChanged()
     }
 
     private fun onUser(user: JSONObject) {
@@ -462,7 +462,7 @@ object Tg {
         val type = status?.optString("@type") ?: return
         val online = type == "userStatusOnline"
         val exact = if (type == "userStatusOffline") status.optLong("was_online", 0) else 0
-        Bridge.postPresence(userId, online, exact)
+        Bridge.onPresence(userId, online, exact)
         Bridge.postPresenceApprox(
             userId,
             when (type) {
@@ -477,7 +477,7 @@ object Tg {
     // --- message mapping --------------------------------------------------------
 
     // Maps one TDLib message into the shared row shape and stores it.
-    private fun storeMessage(msg: JSONObject, isHistory: Boolean, notify: Boolean = false) {
+    private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
         val rawChat = msg.getLong("chat_id")
         val chatId = idFor(rawChat)
         val msgId = msg.getLong("id")
@@ -496,40 +496,33 @@ object Tg {
         val content = msg.optJSONObject("content") ?: return
         var msgType = ""
         var text = ""
-        var fileId = ""
+        // The backing file is resolved once, by the same navigation the download
+        // path uses. Each media branch used to re-walk its own content shape, so
+        // the stored reference and the fetched file could drift apart — the
+        // failure startDownload's comment below describes. Content kinds with no
+        // file (text, emoji) get "", and location overwrites it with coordinates.
+        var fileId = fileOf(content)?.optInt("id")?.toString() ?: ""
         var listened = false
         when (content.optString("@type")) {
             "messageText" -> text = content.getJSONObject("text").optString("text")
             "messagePhoto" -> {
                 msgType = "image"
                 text = content.optJSONObject("caption")?.optString("text") ?: ""
-                val sizes = content.getJSONObject("photo").getJSONArray("sizes")
-                if (sizes.length() > 0) {
-                    fileId = sizes.getJSONObject(sizes.length() - 1)
-                        .getJSONObject("photo").optInt("id").toString()
-                }
             }
             "messageVideo" -> {
                 msgType = "video"
                 text = content.optJSONObject("caption")?.optString("text") ?: ""
-                fileId = content.getJSONObject("video").getJSONObject("video").optInt("id").toString()
             }
             // a round "video note" plays like any other video for us
-            "messageVideoNote" -> {
-                msgType = "video"
-                fileId = content.getJSONObject("video_note").getJSONObject("video")
-                    .optInt("id").toString()
-            }
+            "messageVideoNote" -> msgType = "video"
             "messageAnimation" -> {
                 msgType = "video"
                 text = content.optJSONObject("caption")?.optString("text") ?: ""
-                fileId = content.getJSONObject("animation").getJSONObject("animation").optInt("id").toString()
             }
             "messageVoiceNote" -> {
                 msgType = "audio"
                 val secs = content.getJSONObject("voice_note").optInt("duration")
                 text = TimeFormat.mmss(secs)
-                fileId = content.getJSONObject("voice_note").getJSONObject("voice").optInt("id").toString()
                 // the recipient played it (or we played a received one): this is
                 // the only signal that clears the unplayed dot, and it arrives as
                 // an updateMessageContent long after the message was stored
@@ -538,19 +531,19 @@ object Tg {
             "messageAudio" -> {
                 msgType = "document"
                 text = content.getJSONObject("audio").optString("file_name").ifEmpty { "audio" }
-                fileId = content.getJSONObject("audio").getJSONObject("audio").optInt("id").toString()
             }
             "messageDocument" -> {
                 msgType = "document"
                 text = content.getJSONObject("document").optString("file_name").ifEmpty { "file" }
-                fileId = content.getJSONObject("document").getJSONObject("document").optInt("id").toString()
             }
             "messageSticker" -> {
                 val sticker = content.getJSONObject("sticker")
                 if (sticker.optJSONObject("format")?.optString("@type") == "stickerFormatWebp") {
                     msgType = "image"
-                    fileId = sticker.getJSONObject("sticker").optInt("id").toString()
                 } else {
+                    // animated/video stickers have no still frame to show, so the
+                    // row is text and must not claim a downloadable file
+                    fileId = ""
                     text = sticker.optString("emoji").ifEmpty { "🩹" } + " (sticker)"
                 }
             }
@@ -612,10 +605,10 @@ object Tg {
                 downloadFile(MessageRow(msgId.toString(), chatId, senderId, text, fromMe, timeSent, isRead, msgType = msgType, fileId = fileId))
             }
             if (chatId != Bridge.activeChatId && !Bridge.db.isMuted(chatId)) {
-                Bridge.postTgNotification(chatId, senderId, text, msgType, timeSent)
+                Bridge.postMessageNotification(chatId, senderId, text, msgType, timeSent)
             }
         }
-        Bridge.notifyChatInternal(chatId)
+        Bridge.notifyChat(chatId)
     }
 
     /** Stand-in for a content type this build does not render, e.g. "[Poll]". */
@@ -657,7 +650,7 @@ object Tg {
         val chatId = idFor(obj.getLong("chat_id"))
         val msgId = obj.getLong("message_id").toString()
         applyReactions(chatId, msgId, obj.optJSONObject("interaction_info"), preview = true)
-        Bridge.notifyChatInternal(chatId)
+        Bridge.notifyChat(chatId)
     }
 
     /**
@@ -670,31 +663,24 @@ object Tg {
     private fun applyReactions(
         chatId: String, msgId: String, info: JSONObject?, preview: Boolean,
     ) {
-        val arr = info?.optJSONObject("reactions")?.optJSONArray("reactions")
-        if (arr == null || arr.length() == 0) {
-            Bridge.db.clearReactions(chatId, msgId)
-            return
-        }
         Bridge.db.clearReactions(chatId, msgId)
-        run {
-            for (i in 0 until arr.length()) {
-                val r = arr.getJSONObject(i)
-                val emoji = r.getJSONObject("type").optString("emoji")
-                if (emoji.isEmpty()) continue
-                // One row per reaction TYPE, not per reacting user: the
-                // per-user senders aren't listed here, and expanding
-                // total_count (a server-controlled int32) meant a popular
-                // post issued tens of thousands of inserts on the single
-                // thread that dispatches every update and delivers every
-                // blocking response.
-                val count = r.optInt("total_count", 1)
-                val label = if (count > 1) "$emoji$count" else emoji
-                Bridge.db.upsertReaction(chatId, msgId, "tg:r:$emoji", label)
-            }
+        val arr = info?.optJSONObject("reactions")?.optJSONArray("reactions")
+        for (i in 0 until (arr?.length() ?: 0)) {
+            val r = arr!!.getJSONObject(i)
+            val emoji = r.getJSONObject("type").optString("emoji")
+            if (emoji.isEmpty()) continue
+            // One row per reaction TYPE, not per reacting user: the per-user
+            // senders aren't listed here, and expanding total_count (a
+            // server-controlled int32) meant a popular post issued tens of
+            // thousands of inserts on the single thread that dispatches every
+            // update and delivers every blocking response.
+            val count = r.optInt("total_count", 1)
+            val label = if (count > 1) "$emoji$count" else emoji
+            Bridge.db.upsertReaction(chatId, msgId, "tg:r:$emoji", label)
         }
         // Only the live update is a fresh event; replaying history must not
         // rewrite the chat's preview line with an old reaction.
-        if (preview) Bridge.notifyChatsChangedInternal()
+        if (preview) Bridge.notifyChatsChanged()
     }
 
     // --- downloads ---------------------------------------------------------------
@@ -710,12 +696,6 @@ object Tg {
         return true
     }
 
-    /**
-     * A file id is only meaningful to the TDLib session that issued it, so one
-     * stored in an earlier run is often answered with "File not found". When
-     * that happens the current id is read back from the message and stored, so
-     * the stale reference is repaired rather than retried forever.
-     */
     /**
      * Resolves the message's CURRENT file and downloads that.
      *
@@ -759,22 +739,61 @@ object Tg {
             fileTargets[fid]?.remove(target)
             return false
         }
-        val local = res.optJSONObject("local")
-        val path = local?.optString("path").orEmpty()
-        if (local?.optBoolean("is_downloading_completed") == true && path.isNotEmpty()) {
-            Bridge.db.setFileState(msg.chatId, msg.id, path, 2)
-            Bridge.notifyChatInternal(msg.chatId)
-            Bridge.onTgFileDone(msg.chatId, msg.id, path, 2)
+        var answer = res
+        val claimed = completedAt(answer)
+        if (claimed != null && !usable(claimed)) {
+            // TDLib still believes in a local copy that is gone, and answers
+            // every request with it instead of fetching anything. deleteFile
+            // drops that belief, so the retry really goes to the server.
+            request(JSONObject().put("@type", "deleteFile").put("file_id", fid))
+            // an update for this id may have landed while those two blocking
+            // calls ran, and any completion drops the whole entry — re-register,
+            // or the real completion would arrive with nowhere to land
+            answer = request(downloadRequest(fid)) ?: run {
+                fileTargets[fid]?.remove(target)
+                return false
+            }
+            fileTargets.computeIfAbsent(fid) { ConcurrentHashMap.newKeySet() }.add(target)
+        }
+        val done = completedAt(answer)
+        if (done != null) {
+            if (!usable(done)) {
+                // still "downloaded" onto nothing even after deleteFile: TDLib
+                // will send no update either, so returning true would leave the
+                // row spinning at status 1 for the rest of the run
+                fileTargets[fid]?.remove(target)
+                return false
+            }
+            Bridge.db.setFileState(msg.chatId, msg.id, done, 2)
+            Bridge.notifyChat(msg.chatId)
+            Bridge.onTgFileDone(msg.chatId, msg.id, done, 2)
         }
         return true
     }
+
+    /** Where TDLib says a fully downloaded file sits, or null if it isn't. */
+    private fun completedAt(res: JSONObject): String? {
+        val local = res.optJSONObject("local") ?: return null
+        if (!local.optBoolean("is_downloading_completed")) return null
+        return local.optString("path")
+    }
+
+    /**
+     * TDLib calls a file "downloaded" from its own bookkeeping, which outlives
+     * the file itself: our sends point at the cacheDir staging copy that the
+     * daily sweep deletes. Writing such a path back onto the message re-created
+     * the dead reference the caller had just cleared, and bind → download →
+     * "complete" → bind went round for good, so a path that does not resolve
+     * counts as no download at all.
+     */
+    private fun usable(path: String) = path.isNotEmpty() && java.io.File(path).exists()
 
     private fun downloadRequest(fid: Int) = JSONObject().put("@type", "downloadFile")
         .put("file_id", fid).put("priority", 16).put("synchronous", false)
 
     private fun failDownload(msg: MessageRow) {
         Bridge.db.setFileState(msg.chatId, msg.id, "", 3)
-        Bridge.notifyChatInternal(msg.chatId)
+        Bridge.notifyChat(msg.chatId)
         Bridge.onTgFileDone(msg.chatId, msg.id, "", 3)
     }
 
@@ -786,10 +805,13 @@ object Tg {
             local.optBoolean("is_downloading_completed") -> {
                 fileTargets.remove(fid)
                 val path = local.optString("path")
+                // "completed" onto a path that no longer resolves is a failure,
+                // not a download — see usable()
+                val ok = usable(path)
                 for ((chatId, msgId) in targets) {
-                    Bridge.db.setFileState(chatId, msgId, path, 2)
-                    Bridge.notifyChatInternal(chatId)
-                    Bridge.onTgFileDone(chatId, msgId, path, 2)
+                    Bridge.db.setFileState(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
+                    Bridge.notifyChat(chatId)
+                    Bridge.onTgFileDone(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
                 }
             }
             local.optBoolean("is_downloading_active") -> {
@@ -810,7 +832,7 @@ object Tg {
                 fileTargets.remove(fid)
                 for ((chatId, msgId) in targets) {
                     Bridge.db.setFileState(chatId, msgId, "", 3)
-                    Bridge.notifyChatInternal(chatId)
+                    Bridge.notifyChat(chatId)
                     Bridge.onTgFileDone(chatId, msgId, "", 3)
                 }
             }
@@ -1027,7 +1049,7 @@ object Tg {
                 .put("message_ids", JSONArray().put(mid))
                 .put("force_read", true)
         )
-        Bridge.notifyChatsChangedInternal()
+        Bridge.notifyChatsChanged()
     }
 
     fun setMuted(chatId: String, muted: Boolean) = executor.execute {
@@ -1054,7 +1076,7 @@ object Tg {
                         .put("use_default_disable_mention_notifications", true)
                 )
         )
-        Bridge.notifyChatsChangedInternal()
+        Bridge.notifyChatsChanged()
     }
 
     // --- history ---------------------------------------------------------------------
@@ -1072,7 +1094,7 @@ object Tg {
                 val fromId = Bridge.db.oldestMessage(chatId)?.id?.toLongOrNull() ?: 0L
                 val count = fetchHistory(chatId, fromId, pageSize)
                 if (count == 0) historyExhausted.add(chatId)
-                if (count > 0) Bridge.notifyChatInternal(chatId)
+                if (count > 0) Bridge.notifyChat(chatId)
                 onDone?.invoke(count)
             } finally {
                 // released before the re-sync below: that is another blocking
@@ -1107,7 +1129,7 @@ object Tg {
         var oldest = 0L
         for (i in 0 until arr.length()) {
             val m = arr.getJSONObject(i)
-            storeMessage(m, isHistory = true)
+            storeMessage(m)
             val id = m.optLong("id")
             if (id > 0 && (oldest == 0L || id < oldest)) oldest = id
         }
@@ -1124,7 +1146,7 @@ object Tg {
                 if (Bridge.db.messageCount(chatId) < 60 &&
                     fetchHistory(chatId, 0, 60) > 0
                 ) {
-                    Bridge.notifyChatInternal(chatId)
+                    Bridge.notifyChat(chatId)
                 }
                 syncPlayedState(chatId)
             } finally {
@@ -1173,11 +1195,11 @@ object Tg {
             if (msgId in stale) {
                 // dropped and re-stored, since the row's type is what is wrong
                 Bridge.db.deleteMessage(chatId, msgId)
-                storeMessage(m, isHistory = true)
+                storeMessage(m)
                 changed = true
             }
         }
-        if (changed) Bridge.notifyChatInternal(chatId)
+        if (changed) Bridge.notifyChat(chatId)
     }
 
     // sync-all: page until the start of the chat is reached
@@ -1186,8 +1208,7 @@ object Tg {
 
     fun syncAllProgress(chatId: String): Int {
         if (syncAllChat != chatId) return -1
-        val r = syncAllRounds
-        return 100 * r / (r + 1)
+        return Bridge.asymptoticProgress(syncAllRounds)
     }
 
     /**
@@ -1202,7 +1223,7 @@ object Tg {
         syncAllChat = chatId
         syncAllRounds = 0
         historyExhausted.remove(chatId)
-        Bridge.postChatSyncProgress(chatId, 0)
+        Bridge.notifySyncAll(chatId, 0)
         pager.execute { syncAllStep(chatId, 0L) } // 0 = start at the newest
         return true
     }
@@ -1213,24 +1234,24 @@ object Tg {
         when {
             count < 0 -> {
                 syncAllChat = null
-                Bridge.postChatSyncProgress(chatId, -1)
+                Bridge.notifySyncAll(chatId, -1)
             }
             count == 0 -> {
                 historyExhausted.add(chatId)
                 syncAllChat = null
-                Bridge.postChatSyncProgress(chatId, 100)
+                Bridge.notifySyncAll(chatId, 100)
             }
             // no older anchor than the one we asked from: the walk cannot
             // advance, so treat it as the end rather than looping on it
             oldest == 0L || oldest == fromId -> {
                 historyExhausted.add(chatId)
                 syncAllChat = null
-                Bridge.postChatSyncProgress(chatId, 100)
+                Bridge.notifySyncAll(chatId, 100)
             }
             else -> {
                 syncAllRounds++
-                Bridge.notifyChatInternal(chatId)
-                Bridge.postChatSyncProgress(chatId, syncAllProgress(chatId))
+                Bridge.notifyChat(chatId)
+                Bridge.notifySyncAll(chatId, syncAllProgress(chatId))
                 pager.execute { syncAllStep(chatId, oldest) }
             }
         }
@@ -1292,28 +1313,20 @@ object Tg {
             var pages = maxPages
             while (pages-- > 0) {
                 if (Bridge.db.hasMessage(chatId, targetId)) {
-                    Bridge.postSeekResult(chatId, targetId, true)
+                    Bridge.notifySeek(chatId, targetId, true)
                     return@execute
                 }
-                val res = request(
-                    JSONObject().put("@type", "getChatHistory")
-                        .put("chat_id", chatIdOf(chatId))
-                        .put("from_message_id", anchor)
-                        .put("offset", 0).put("limit", 100).put("only_local", false),
-                    timeoutMs = 30_000,
-                ) ?: break
-                val arr = res.optJSONArray("messages") ?: break
-                if (arr.length() == 0) break
-                var oldest = anchor
-                for (i in 0 until arr.length()) {
-                    val m = arr.getJSONObject(i)
-                    storeMessage(m, isHistory = true)
-                    if (m.getLong("id") < oldest || oldest == 0L) oldest = m.getLong("id")
-                }
+                // the same page fetch the history walk uses, rather than a
+                // second hand-built getChatHistory whose own oldest-id rule had
+                // already drifted from it
+                val (count, oldest) = fetchHistoryPage(chatId, anchor, 100)
+                // no page, an empty one, or one that did not reach further back:
+                // paging again would re-fetch the same messages forever
+                if (count <= 0 || oldest == 0L || oldest == anchor) break
                 anchor = oldest
-                Bridge.notifyChatInternal(chatId)
+                Bridge.notifyChat(chatId)
             }
-            Bridge.postSeekResult(chatId, targetId, Bridge.db.hasMessage(chatId, targetId))
+            Bridge.notifySeek(chatId, targetId, Bridge.db.hasMessage(chatId, targetId))
         }
     }
 
@@ -1346,7 +1359,6 @@ object Tg {
                 }
             }
         }
-        if (cachedOnly) return ""
         val fid = file.optInt("id")
         val downloaded = request(
             JSONObject().put("@type", "downloadFile")

@@ -38,29 +38,16 @@ class ShareActivity : BaseActivity() {
         val mime = intent.type ?: "*/*"
 
         io.execute {
-            // your own chats (one per account) pinned to the top; the sort is
-            // stable, so every other chat holds its recency order. The ids are
-            // resolved once: the comparator runs per comparison, and each call
-            // costs a JNI hop into the Go bridge plus a preferences read.
-            val selfIds = listOfNotNull(
-                Bridge.selfId().ifEmpty { null },
-                if (Tg.hasSession()) Tg.selfId() else null,
-            )
-            val chats = Bridge.db.chats().sortedByDescending { it.id in selfIds }
-            if (chats.isEmpty()) {
+            val (labels, ids) = targetChoices()
+            if (ids.isEmpty()) {
                 runOnUiThread { failAndFinish(R.string.no_chats) }
                 return@execute
-            }
-            val labels = chats.map {
-                if (it.id in selfIds) selfPickerLabel(this, it.id)
-                else it.displayLabelWithProto(this)
             }
             runOnUiThread {
                 // the picker is an AlertDialog: showing it once this window's
                 // token is gone (the user backed out of this invisible activity
                 // while the chat query ran) throws BadTokenException
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                val ids = chats.map { it.id }
                 showTargetPicker(R.string.share_to, labels, ids, onCancel = { finish() }) {
                     share(it, text, streams, mime)
                 }

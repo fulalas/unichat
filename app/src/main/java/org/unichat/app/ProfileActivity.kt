@@ -43,14 +43,14 @@ class ProfileActivity : BaseActivity() {
         proto = intent.getStringExtra("proto") ?: ProtoPicker.WA
         // this screen belongs to one account, so it wears that
         // protocol's accent; must precede any view inflation
-        if (!isTg) theme.applyStyle(R.style.ThemeOverlay_UniChat_Wa, true)
+        applyProtocolTheme(isTg)
         setContentView(R.layout.activity_profile)
         supportActionBar?.apply {
             title = getString(R.string.profile) + " — " + ProtoPicker.label(this@ProfileActivity, proto)
             setDisplayHomeAsUpEnabled(true)
         }
         if (!Bridge.init(this)) { finish(); return }
-        selfId = if (isTg) Tg.selfId() else Bridge.selfId()
+        selfId = Bridge.selfId(proto)
 
         avatar = findViewById(R.id.avatar)
         valueName = findViewById(R.id.valueName)
@@ -67,16 +67,11 @@ class ProfileActivity : BaseActivity() {
 
         // the profile name is our push name (shown to everyone), not the
         // locally-saved contact name
-        name = if (isTg) Tg.myName() else Bridge.myName()
+        name = Bridge.myName(proto)
         valueName.text = name
         valuePhone.text = if (isTg) Tg.myPhone() else formatPhone(selfId)
         loadAvatar()
         loadAbout()
-    }
-
-    override fun onSupportNavigateUp(): Boolean {
-        finish()
-        return true
     }
 
     // Renders "+<number>" from the phone-JID; a LID (no phone) shows nothing.
@@ -84,12 +79,16 @@ class ProfileActivity : BaseActivity() {
     private fun formatPhone(id: String): String =
         if (isPhoneId(id) && id.substringBefore('@').isNotEmpty()) phoneLabel(id) else ""
 
+    /** Pixel size of the 200dp header, the most the avatar is ever shown at.
+     *  Decoding to it instead of full resolution avoids allocating an entire
+     *  server-sized photo (up to 8 MiB of source) just to draw it small. */
+    private val avatarPx by lazy { (200 * resources.displayMetrics.density).toInt() }
+
     private fun loadAvatar() {
         io.execute {
             var path = Bridge.getAvatarFullPath(selfId)
             if (path.isEmpty()) path = Bridge.getAvatarPath(selfId)
-            val bmp = if (path.isEmpty()) null
-                else runCatching { BitmapFactory.decodeFile(path) }.getOrNull()
+            val bmp = if (path.isEmpty()) null else ImageLoader.decodeSampled(path, avatarPx)
             runOnUiThread {
                 if (isFinishing) return@runOnUiThread
                 if (bmp != null) showAvatar(bmp) else avatar.setImageResource(R.drawable.ic_person)
@@ -104,18 +103,7 @@ class ProfileActivity : BaseActivity() {
     }
 
     private fun loadAbout() {
-        if (isTg) {
-            Tg.io.execute {
-                val text = Tg.fetchMyAbout()
-                runOnUiThread {
-                    if (isFinishing) return@runOnUiThread
-                    about = text
-                    valueAbout.text = text
-                }
-            }
-            return
-        }
-        Bridge.fetchMyAbout { text ->
+        Bridge.fetchMyAbout(proto) { text ->
             if (isFinishing) return@fetchMyAbout
             about = text
             valueAbout.text = text
@@ -137,14 +125,7 @@ class ProfileActivity : BaseActivity() {
     }
 
     private fun applyName(text: String) {
-        if (isTg) {
-            Tg.io.execute {
-                val ok = Tg.setMyName(text)
-                runOnUiThread { onNameApplied(text, ok) }
-            }
-            return
-        }
-        Bridge.setMyName(text) { ok -> onNameApplied(text, ok) }
+        Bridge.setMyName(proto, text) { ok -> onNameApplied(text, ok) }
     }
 
     private fun onNameApplied(text: String, ok: Boolean) {
@@ -185,14 +166,7 @@ class ProfileActivity : BaseActivity() {
     }
 
     private fun applyAbout(text: String) {
-        if (isTg) {
-            Tg.io.execute {
-                val ok = Tg.setAbout(text)
-                runOnUiThread { onAboutApplied(text, ok) }
-            }
-            return
-        }
-        Bridge.setAbout(text) { ok -> onAboutApplied(text, ok) }
+        Bridge.setAbout(proto, text) { ok -> onAboutApplied(text, ok) }
     }
 
     private fun onAboutApplied(text: String, ok: Boolean) {
@@ -217,14 +191,7 @@ class ProfileActivity : BaseActivity() {
                 }
                 return@execute
             }
-            val applyPhoto: (((Boolean) -> Unit)) -> Unit = { cb ->
-                if (isTg) Tg.io.execute {
-                    val ok = Tg.setProfilePicture(file.absolutePath)
-                    runOnUiThread { cb(ok) }
-                }
-                else Bridge.setProfilePicture(file.absolutePath, cb)
-            }
-            applyPhoto { ok ->
+            Bridge.setProfilePicture(proto, file.absolutePath) { ok ->
                 // This callback is posted to the MAIN thread by the bridge, so
                 // decode and delete on a worker and only touch views back here.
                 if (!ok) {
@@ -232,12 +199,12 @@ class ProfileActivity : BaseActivity() {
                     if (!isFinishing) {
                         Toast.makeText(this, R.string.profile_photo_failed, Toast.LENGTH_SHORT).show()
                     }
-                    return@applyPhoto
+                    return@setProfilePicture
                 }
                 io.execute {
                     // show the just-uploaded image directly: a re-fetch can
                     // briefly still return the server's previous picture
-                    val bmp = runCatching { BitmapFactory.decodeFile(file.absolutePath) }.getOrNull()
+                    val bmp = ImageLoader.decodeSampled(file.absolutePath, avatarPx)
                     file.delete()
                     runOnUiThread {
                         if (isFinishing) return@runOnUiThread

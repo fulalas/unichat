@@ -53,9 +53,7 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         chatId = intent.getStringExtra("chatId").orEmpty()
         // the picture belongs to a chat, and its controls take that chat's
         // accent; unknown (no chat passed) keeps the app's own colours
-        if (chatId.isNotEmpty() && !Tg.isTgId(chatId)) {
-            theme.applyStyle(R.style.ThemeOverlay_UniChat_Wa, true)
-        }
+        if (chatId.isNotEmpty()) applyProtocolTheme(Tg.isTgId(chatId))
         supportActionBar?.hide()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.insetsController?.hide(WindowInsets.Type.systemBars())
@@ -220,17 +218,14 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
                 return
             }
             holder.progress.visibility = View.VISIBLE
-            Io.executor.execute {
-                val bitmap = ImageLoader.decodeSampled(path, decodeTarget)
-                runOnUiThread {
-                    if (isFinishing || isDestroyed) return@runOnUiThread
-                    // the page may have been recycled onto another image while
-                    // this decode ran
-                    if (holder.image.tag != path) return@runOnUiThread
-                    holder.progress.visibility = View.GONE
-                    if (bitmap != null) holder.image.setImageBitmap(bitmap)
-                    else if (images.isEmpty()) finish()
-                }
+            ImageLoader.decodeAsync(path, decodeTarget) { bitmap ->
+                if (isFinishing || isDestroyed) return@decodeAsync
+                // the page may have been recycled onto another image while
+                // this decode ran
+                if (holder.image.tag != path) return@decodeAsync
+                holder.progress.visibility = View.GONE
+                if (bitmap != null) holder.image.setImageBitmap(bitmap)
+                else if (images.isEmpty()) finish()
             }
         }
     }

@@ -230,7 +230,18 @@ object Bridge : EventListener {
     /** True when [chatId] belongs to the Telegram side. */
     private fun isTg(chatId: String) = Tg.isTgId(chatId)
 
-    fun selfId(): String = if (connId >= 0) Wmbridge.getSelfId(connId) else ""
+    // Memoised own JID. selfId() is asked once per chat-list row bind (every row
+    // has to know whether it is your own chat), and each miss was a blocking
+    // gomobile/JNI hop that takes the process-wide Go mutex — so a fling through
+    // the list contended with the event goroutines dozens of times a second for
+    // an answer that only changes at login and logout. Cleared by logout below.
+    @Volatile private var selfIdMemo: String = ""
+
+    fun selfId(): String {
+        selfIdMemo.let { if (it.isNotEmpty()) return it }
+        if (connId < 0) return ""
+        return Wmbridge.getSelfId(connId).also { selfIdMemo = it }
+    }
 
     fun connect() = executor.execute {
         if (state != "connected") Wmbridge.connect(connId)
@@ -290,7 +301,7 @@ object Bridge : EventListener {
     }
 
     // Shows a short toast from any thread (no-op before init).
-    private fun toastUi(resId: Int) {
+    internal fun toastUi(resId: Int) {
         val ctx = appContext ?: return
         main.post {
             android.widget.Toast.makeText(ctx, resId, android.widget.Toast.LENGTH_SHORT).show()
@@ -298,7 +309,11 @@ object Bridge : EventListener {
     }
 
     // Hops to the main thread and fans an event out to every UI listener.
+    // With no listener attached (app backgrounded, service still connected)
+    // there is nothing to deliver to, and posting anyway allocated a closure
+    // plus a Message for every event the two protocols keep producing.
     private fun notifyUi(block: (UiListener) -> Unit) {
+        if (listeners.isEmpty()) return
         main.post { for (l in listeners) block(l) }
     }
 
@@ -612,12 +627,8 @@ object Bridge : EventListener {
                 // the stored text IS the document's file name, as on the
                 // WhatsApp path below
                 "document" -> Tg.sendDocument(target, m.filePath, m.text)
-                "location" -> {
-                    val parts = m.fileId.split(",")
-                    val lat = parts.getOrNull(0)?.toDoubleOrNull()
-                    val lng = parts.getOrNull(1)?.toDoubleOrNull()
-                    if (lat != null && lng != null) Tg.sendLocation(target, lat, lng) else false
-                }
+                "location" -> parseLatLng(m.fileId)
+                    ?.let { (lat, lng) -> Tg.sendLocation(target, lat, lng) } ?: false
                 else -> Tg.sendText(target, m.text)
             }
             if (!ok) onSendFailed(m.msgType.ifEmpty { "text" }, target)
@@ -635,14 +646,10 @@ object Bridge : EventListener {
             // downgrade to application/octet-stream, so the recipient sees a
             // generic unopenable attachment)
             "document" -> Wmbridge.sendDocumentMessage(
-                connId, target, m.filePath, m.text, mimeOf(m.filePath), "", "", ""
+                connId, target, m.filePath, m.text, mimeOfPath(m.filePath), "", "", ""
             )
-            "location" -> {
-                val parts = m.fileId.split(",")
-                val lat = parts.getOrNull(0)?.toDoubleOrNull()
-                val lng = parts.getOrNull(1)?.toDoubleOrNull()
-                if (lat != null && lng != null) Wmbridge.sendLocation(connId, target, lat, lng) else ""
-            }
+            "location" -> parseLatLng(m.fileId)
+                ?.let { (lat, lng) -> Wmbridge.sendLocation(connId, target, lat, lng) } ?: ""
             else -> Wmbridge.sendTextMessage(connId, target, m.text)
         }
         if (msgId.isEmpty()) {
@@ -652,17 +659,33 @@ object Bridge : EventListener {
         return true
     }
 
-    /** MIME type of a stored media file, from its extension. */
-    private fun mimeOf(path: String): String {
-        val ext = path.substringAfterLast('.', "").lowercase()
-        if (ext.isEmpty()) return "application/octet-stream"
-        return android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-            ?: "application/octet-stream"
-    }
+    // when each contact was last subscribed: the chat list asks per visible row,
+    // so without this a scroll re-sends a subscription per rebind. Deliberately
+    // NOT permanent — a WhatsApp presence subscription is short-lived on the
+    // server and dropped on reconnect, which is why the open chat re-arms its
+    // own every 30s; a for-the-run memo swallowed that refresh and froze the
+    // subtitle (and the chat-list dot) at the first value seen.
+    private val presenceSubscribed = ConcurrentHashMap<String, Long>()
 
-    fun subscribePresence(userId: String) = executor.execute {
+    // just under the chat screen's re-arm interval, so the refresh gets through
+    // while a scroll's worth of rebinds still collapses into one subscription
+    private const val PRESENCE_MEMO_MS = 25_000L
+
+    /**
+     * Called per visible chat-list row. The memo is checked on the CALLING
+     * thread: doing it inside the task meant every rebind still allocated and
+     * queued a Runnable that almost always did nothing — onto the same serial
+     * executor that carries sends, mark-read and history requests, so a fling
+     * pushed a burst of no-ops ahead of real work.
+     */
+    fun subscribePresence(userId: String) {
         // Telegram pushes status updates on its own; nothing to subscribe
-        if (!isTg(userId)) Wmbridge.subscribePresence(connId, userId)
+        if (isTg(userId)) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val last = presenceSubscribed[userId]
+        if (last != null && now - last < PRESENCE_MEMO_MS) return
+        presenceSubscribed[userId] = now
+        executor.execute { Wmbridge.subscribePresence(connId, userId) }
     }
 
     // downloads the user explicitly asked for (tap on media); only these get
@@ -693,28 +716,43 @@ object Bridge : EventListener {
      * which callers waiting on one must handle.
      */
     fun downloadFile(msg: MessageRow, userInitiated: Boolean = false): Boolean {
-        if (msg.fileId.isEmpty()) return false
-        if (isTg(msg.chatId)) {
-            // TDLib dedups repeated downloadFile calls itself, so no in-flight
-            // claim is needed — but the user-initiated set still has to be
-            // marked, or onTgFileDone has nothing to match and a failed manual
-            // download stays silent.
-            val key = msg.chatId + "/" + msg.id
-            if (userInitiated) {
-                userRequestedDownloads.add(key)
-            } else if (msg.fileStatus == 3) {
-                // bind-time retry of a file TDLib called unreachable: once per
-                // run, or scrolling past it re-issues a download plus the
-                // blocking id probe on every rebind
-                if (autoRetriedFailures.size > MAX_RETRY_MEMO) autoRetriedFailures.clear()
-                if (!autoRetriedFailures.add(key)) return false
+        // A stored path outlives its file (our own Telegram sends reference the
+        // cacheDir staging copy, swept after a day), and the bubble goes on
+        // claiming "downloaded". Both transfer paths below already drop such a
+        // path on their own worker before fetching — but with no media reference
+        // neither runs, so nothing would ever correct the row and every bind
+        // would re-enter here. Clear it off the UI thread: this is reached from
+        // onBindViewHolder.
+        if (msg.fileId.isEmpty()) {
+            if (msg.filePath.isNotEmpty()) executor.execute {
+                if (java.io.File(msg.filePath).exists()) return@execute
+                if (db.setFileState(msg.chatId, msg.id, "", 0) > 0) notifyChat(msg.chatId)
             }
-            // A stored status of 1 ("downloading") is NOT proof that a download
-            // is running: it survives a process death mid-transfer, and taking
-            // it at face value left those rows blank forever, with every later
-            // bind returning here without re-issuing anything. Only an
-            // in-flight claim from THIS run may skip the request.
-            if (!downloading.add(key)) return true
+            return false
+        }
+        // Throttling policy, one copy for both protocols: the user-initiated set
+        // (so onTgFileDone / onFileDownloaded can tell a silent auto-download
+        // from a manual one), the once-per-run retry of a permanently failed
+        // file, and the in-flight claim.
+        val key = msg.chatId + "/" + msg.id
+        if (userInitiated) {
+            userRequestedDownloads.add(key)
+        } else if (msg.fileStatus == 3) {
+            // bind-time retry of a file the server called unreachable: once per
+            // run, or scrolling past it re-issues the download on every rebind
+            if (autoRetriedFailures.size > MAX_RETRY_MEMO) autoRetriedFailures.clear()
+            if (!autoRetriedFailures.add(key)) return false
+        }
+        // Claim the slot BEFORE touching the DB: this is called from
+        // onBindViewHolder, so a scroll would otherwise queue one point query per
+        // rebind onto the pool that performs the real transfers.
+        // A stored status of 1 ("downloading") is NOT proof that a download is
+        // running: it survives a process death mid-transfer, and taking it at
+        // face value left those rows blank forever, with every later bind
+        // returning here without re-issuing anything. Only an in-flight claim
+        // from THIS run may skip the request.
+        if (!downloading.add(key)) return true
+        if (isTg(msg.chatId)) {
             // Nothing was dispatched, so no completion will ever release the
             // claim: a location row carries "lat,lng" in fileId, which is not a
             // file id at all, and the message would then be stuck for the rest
@@ -723,17 +761,6 @@ object Bridge : EventListener {
             if (!started) downloading.remove(key)
             return started
         }
-        val key = msg.chatId + "/" + msg.id
-        if (userInitiated) {
-            userRequestedDownloads.add(key)
-        } else if (msg.fileStatus == 3) {
-            if (autoRetriedFailures.size > MAX_RETRY_MEMO) autoRetriedFailures.clear()
-            if (!autoRetriedFailures.add(key)) return false
-        }
-        // claim the in-flight slot BEFORE touching the DB: this is called from
-        // onBindViewHolder, so a scroll would otherwise queue one point query per
-        // rebind onto the pool that performs the real transfers
-        if (!downloading.add(key)) return true
         mediaExecutor.execute {
             // The claim used to be released here as soon as the request had been
             // HANDED to Go, not when the transfer finished, so every later bind
@@ -834,7 +861,7 @@ object Bridge : EventListener {
         }
     }
 
-    private fun notifySeek(chatId: String, msgId: String, found: Boolean) =
+    internal fun notifySeek(chatId: String, msgId: String, found: Boolean) =
         notifyUi { it.onSeekResult(chatId, msgId, found) }
 
     /**
@@ -992,9 +1019,12 @@ object Bridge : EventListener {
     fun syncAllProgress(chatId: String): Int {
         if (isTg(chatId)) return Tg.syncAllProgress(chatId)
         if (syncAllChat != chatId) return -1
-        val r = syncAllRounds
-        return 100 * r / (r + 1)
+        return asymptoticProgress(syncAllRounds)
     }
+
+    /** The percentage above, shared with the Telegram sync-all so both report
+     *  the same curve (and the same -1 "not running" convention). */
+    internal fun asymptoticProgress(rounds: Int): Int = 100 * rounds / (rounds + 1)
 
     /**
      * Starts fetching a chat's entire history. Returns false if another
@@ -1051,7 +1081,7 @@ object Bridge : EventListener {
         syncAllRounds = 0
     }
 
-    private fun notifySyncAll(chatId: String, progress: Int) =
+    internal fun notifySyncAll(chatId: String, progress: Int) =
         notifyUi { it.onChatSyncProgress(chatId, progress) }
 
     // --- full-history export -------------------------------------------------
@@ -1206,7 +1236,52 @@ object Bridge : EventListener {
         notifyChatsChanged()
     }
 
-    // --- account privacy settings ------------------------------------------
+    // --- account-scoped operations (profile, privacy) -----------------------
+    // Chat-scoped calls route by the chat id's "tg:" prefix; an account has no
+    // chat id, so these take the protocol explicitly. They exist so the account
+    // screens don't each hand-roll the dispatch: Tg's account calls are
+    // blocking, Bridge's are async-with-main-thread-callback, and every call
+    // site used to re-decide which worker to use and how to get back to main.
+
+    /** Runs a blocking Telegram account call off the UI thread and delivers its
+     *  result on the main thread — the same contract the WhatsApp paths use. */
+    private fun <T> onTg(work: () -> T, onResult: (T) -> Unit) {
+        Tg.io.execute {
+            val result = work()
+            main.post { onResult(result) }
+        }
+    }
+
+    private fun isTgProto(proto: String) = proto == ProtoPicker.TG
+
+    /** Our own profile name on [proto] — the name shown to everyone. Local read. */
+    fun myName(proto: String): String = if (isTgProto(proto)) Tg.myName() else myName()
+
+    /** Our own id on [proto]. */
+    fun selfId(proto: String): String = if (isTgProto(proto)) Tg.selfId() else selfId()
+
+    fun fetchMyAbout(proto: String, onResult: (String) -> Unit) =
+        if (isTgProto(proto)) onTg({ Tg.fetchMyAbout() }, onResult) else fetchMyAbout(onResult)
+
+    fun setMyName(proto: String, name: String, onResult: (Boolean) -> Unit) =
+        if (isTgProto(proto)) onTg({ Tg.setMyName(name) }, onResult) else setMyName(name, onResult)
+
+    fun setAbout(proto: String, text: String, onResult: (Boolean) -> Unit) =
+        if (isTgProto(proto)) onTg({ Tg.setAbout(text) }, onResult) else setAbout(text, onResult)
+
+    fun setProfilePicture(proto: String, jpegPath: String, onResult: (Boolean) -> Unit) =
+        if (isTgProto(proto)) onTg({ Tg.setProfilePicture(jpegPath) }, onResult)
+        else setProfilePicture(jpegPath, onResult)
+
+    fun fetchPrivacySettings(proto: String, onResult: (Map<String, String>?) -> Unit) =
+        if (isTgProto(proto)) onTg({ Tg.fetchPrivacySettings() }, onResult)
+        else fetchPrivacySettings(onResult)
+
+    fun setPrivacySetting(proto: String, name: String, value: String, onResult: (Boolean) -> Unit) =
+        if (isTgProto(proto)) onTg({ Tg.setPrivacySetting(name, value) }, onResult)
+        else setPrivacySetting(name, value, onResult)
+
+    // --- account privacy settings (WhatsApp transport) ----------------------
 
     /** Fetches the account's privacy settings; null on failure. Main-thread callback. */
     fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit) = executor.execute {
@@ -1327,6 +1402,7 @@ object Bridge : EventListener {
         // (a stale "typing…", a previous account's avatar, playback that keeps
         // running on a file whose chat no longer exists).
         main.post { AudioPlayer.stop() }
+        selfIdMemo = ""
         activeChatId = ""
         autoPlayKey = null
         historyInFlight = null
@@ -1341,6 +1417,7 @@ object Bridge : EventListener {
         autoRetriedFailures.clear()
         online.clear()
         lastSeen.clear()
+        presenceSubscribed.clear()
         lastSeenApprox.clear()
         chatStates.clear()
         main.post {
@@ -1402,7 +1479,7 @@ object Bridge : EventListener {
         main.postDelayed(notifyRunnable, 150)
     }
 
-    private fun notifyChat(chatId: String) {
+    internal fun notifyChat(chatId: String) {
         synchronized(changedChats) {
             changedChats.add(chatId)
             chatsChanged = true
@@ -1410,7 +1487,7 @@ object Bridge : EventListener {
         scheduleNotify()
     }
 
-    private fun notifyChatsChanged() {
+    internal fun notifyChatsChanged() {
         synchronized(changedChats) { chatsChanged = true }
         scheduleNotify()
     }
@@ -1423,7 +1500,12 @@ object Bridge : EventListener {
         Log.i(TAG, "state: $state")
         // on a fresh connection, pull the server-synced mute settings so
         // existing (possibly other-device) mutes are reflected locally
-        if (state == "connected" && !wasConnected) reconcileMutes()
+        if (state == "connected" && !wasConnected) {
+            reconcileMutes()
+            // the server drops every presence subscription with the socket, so
+            // the memo must not keep claiming they are still in place
+            presenceSubscribed.clear()
+        }
         notifyUi { it.onStateChanged(state) }
     }
 
@@ -1529,7 +1611,7 @@ object Bridge : EventListener {
         notifyChat(chatId)
     }
 
-    private fun postMessageNotification(
+    internal fun postMessageNotification(
         chatId: String, senderId: String, text: String, msgType: String, timeSent: Long,
     ) {
         val ctx = appContext ?: return
@@ -1772,11 +1854,11 @@ object Bridge : EventListener {
 
     // --- hooks for the Telegram client (Tg) -----------------------------------
     // Tg mirrors its data into the shared Db and reports through the same
-    // listener plumbing; these expose the private notification internals.
-
-    internal fun notifyChatInternal(chatId: String) = notifyChat(chatId)
-
-    internal fun notifyChatsChangedInternal() = notifyChatsChanged()
+    // listener plumbing. Only events that need a NAME of their own live here;
+    // the rest of Tg calls the notification helpers above directly, which are
+    // `internal` for exactly that. A second set of pure-rename forwarders
+    // (postChatState -> onChatState, postSeekResult -> notifySeek, …) meant
+    // every new Telegram event needed three declarations to reach the UI.
 
     internal fun notifyContactsChangedInternal() {
         synchronized(changedChats) { contactsChanged = true }
@@ -1788,30 +1870,12 @@ object Bridge : EventListener {
 
     internal fun notifyTgState() = notifyUi { it.onTgStateChanged() }
 
-    internal fun toastSendFailed() = toastUi(R.string.send_failed)
-
-    internal fun postTgNotification(
-        chatId: String, senderId: String, text: String, msgType: String, timeSent: Long,
-    ) = postMessageNotification(chatId, senderId, text, msgType, timeSent)
-
     internal fun postDownloadProgress(chatId: String, msgId: String, pct: Int) =
         notifyUi { it.onDownloadProgress(chatId, msgId, pct) }
-
-    internal fun postChatState(chatId: String, userId: String, state: String) =
-        onChatState(chatId, userId, state)
-
-    internal fun postPresence(userId: String, isOnline: Boolean, lastSeenTime: Long) =
-        onPresence(userId, isOnline, lastSeenTime)
-
-    internal fun postChatSyncProgress(chatId: String, progress: Int) =
-        notifySyncAll(chatId, progress)
 
     internal fun postChatExportProgress(chatId: String, fetched: Int) =
         notifyUi { it.onChatExportProgress(chatId, fetched) }
 
     internal fun postChatExportDone(chatId: String, messages: Int, complete: Boolean, success: Boolean) =
         notifyUi { it.onChatExportDone(chatId, messages, complete, success) }
-
-    internal fun postSeekResult(chatId: String, msgId: String, found: Boolean) =
-        notifySeek(chatId, msgId, found)
 }

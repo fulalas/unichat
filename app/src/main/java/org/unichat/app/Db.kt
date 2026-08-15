@@ -19,6 +19,8 @@ data class ChatRow(
     // "typing"/"recording" from Bridge.chatState, stamped in when the list is
     // built so the DiffUtil-backed adapter rebinds the row when it changes
     val transientState: String = "",
+    // contact currently online; stamped in the same way, from Bridge.isOnline
+    val online: Boolean = false,
 )
 
 data class MessageRow(
@@ -652,15 +654,22 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
         writableDatabase.execSQL("UPDATE messages SET file_status=0 WHERE file_status=1")
     }
 
-    /** Wipes every WhatsApp-side row (after a WhatsApp logout), leaving a
-     *  linked Telegram account's mirror intact. The inverse of [clearTgData]. */
-    fun clearWaData() = writableDatabase.transact {
-        execSQL("DELETE FROM messages WHERE chat_id NOT LIKE 'tg:%'")
-        execSQL("DELETE FROM reactions WHERE chat_id NOT LIKE 'tg:%'")
-        execSQL("DELETE FROM chats WHERE id NOT LIKE 'tg:%'")
-        execSQL("DELETE FROM contacts WHERE id NOT LIKE 'tg:%'")
-        execSQL("DELETE FROM deleted_chats WHERE id NOT LIKE 'tg:%'")
+    /**
+     * Wipes one account's rows on logout, leaving the other account's mirror
+     * intact. Both directions delete the same five tables and differ only in
+     * which side of the `tg:` prefix they keep, so they share one body: a table
+     * added to one wipe and forgotten in the other would leak rows for good.
+     */
+    private fun clearProtocolData(match: String) = writableDatabase.transact {
+        execSQL("DELETE FROM messages WHERE chat_id $match 'tg:%'")
+        execSQL("DELETE FROM reactions WHERE chat_id $match 'tg:%'")
+        execSQL("DELETE FROM chats WHERE id $match 'tg:%'")
+        execSQL("DELETE FROM contacts WHERE id $match 'tg:%'")
+        execSQL("DELETE FROM deleted_chats WHERE id $match 'tg:%'")
     }
+
+    /** Wipes every WhatsApp-side row (after a WhatsApp logout). */
+    fun clearWaData() = clearProtocolData("NOT LIKE")
 
     /** Renames a chat without touching its other columns. upsertChat writes
      *  `archived` too, so using it for a rename un-archived the chat. */
@@ -674,13 +683,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
     }
 
     /** Wipes every Telegram-side row (after a Telegram logout). */
-    fun clearTgData() = writableDatabase.transact {
-        execSQL("DELETE FROM messages WHERE chat_id LIKE 'tg:%'")
-        execSQL("DELETE FROM reactions WHERE chat_id LIKE 'tg:%'")
-        execSQL("DELETE FROM chats WHERE id LIKE 'tg:%'")
-        execSQL("DELETE FROM contacts WHERE id LIKE 'tg:%'")
-        execSQL("DELETE FROM deleted_chats WHERE id LIKE 'tg:%'")
-    }
+    fun clearTgData() = clearProtocolData("LIKE")
 
     /**
      * Replaces a message's media reference. Telegram file ids are only valid
@@ -709,10 +712,15 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
         )
     }
 
-    // Latest unread incoming message, used for sending a read receipt.
-    fun latestUnread(chatId: String): MessageRow? = queryFirst(
+    /**
+     * The one message of [chatId] picked by [where] + [order] — the shared shape
+     * behind [latestUnread], [oldestMessage] and [newestMessage], which used to
+     * spell out the same six columns and the same row mapper three times, so a
+     * column added to one of them silently skipped the other two.
+     */
+    private fun oneMessage(chatId: String, where: String, order: String): MessageRow? = queryFirst(
         "SELECT id, sender_id, text, from_me, time_sent, is_read FROM messages " +
-            "WHERE chat_id=? AND from_me=0 AND is_read=0 ORDER BY time_sent DESC LIMIT 1",
+            "WHERE chat_id=? AND $where ORDER BY $order LIMIT 1",
         arrayOf(chatId)
     ) {
         MessageRow(
@@ -721,6 +729,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
             timeSent = it.getLong(4), isRead = it.getInt(5) != 0
         )
     }
+
+    // Latest unread incoming message, used for sending a read receipt.
+    fun latestUnread(chatId: String): MessageRow? =
+        oneMessage(chatId, "from_me=0 AND is_read=0", "time_sent DESC")
 
     fun chats(): List<ChatRow> = namePreviewMentions(queryList(
         // The newest message is resolved ONCE, by rowid, and joined — four
@@ -894,30 +906,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
     // original was never stored): such a row sorts as "oldest" but can't anchor a request
     // for anything older (the phone would be asked for messages before epoch 0 and answer
     // with nothing), silently stalling pagination.
-    fun oldestMessage(chatId: String): MessageRow? = queryFirst(
-        "SELECT id, sender_id, text, from_me, time_sent, is_read FROM messages " +
-            "WHERE chat_id=? AND time_sent>0 ORDER BY time_sent ASC LIMIT 1",
-        arrayOf(chatId)
-    ) {
-        MessageRow(
-            id = it.getString(0), chatId = chatId, senderId = it.getString(1),
-            text = it.getString(2), fromMe = it.getInt(3) != 0,
-            timeSent = it.getLong(4), isRead = it.getInt(5) != 0
-        )
-    }
+    fun oldestMessage(chatId: String): MessageRow? =
+        oneMessage(chatId, "time_sent>0", "time_sent ASC")
 
     /** Newest stored message of a chat — where a full history walk starts. */
-    fun newestMessage(chatId: String): MessageRow? = queryFirst(
-        "SELECT id, sender_id, text, from_me, time_sent, is_read FROM messages " +
-            "WHERE chat_id=? AND time_sent>0 ORDER BY time_sent DESC, rowid DESC LIMIT 1",
-        arrayOf(chatId)
-    ) {
-        MessageRow(
-            id = it.getString(0), chatId = chatId, senderId = it.getString(1),
-            text = it.getString(2), fromMe = it.getInt(3) != 0,
-            timeSent = it.getLong(4), isRead = it.getInt(5) != 0
-        )
-    }
+    fun newestMessage(chatId: String): MessageRow? =
+        oneMessage(chatId, "time_sent>0", "time_sent DESC, rowid DESC")
 
     fun messageCount(chatId: String): Int = queryFirst(
         "SELECT COUNT(*) FROM messages WHERE chat_id=?", arrayOf(chatId)
@@ -982,12 +976,4 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 20) {
     fun contactName(id: String): String? = queryFirst(
         "SELECT name FROM contacts WHERE id=?", arrayOf(id)
     ) { if (it.isNull(0)) null else it.getString(0) }
-
-    fun clearAll() = writableDatabase.transact {
-        execSQL("DELETE FROM messages")
-        execSQL("DELETE FROM chats")
-        execSQL("DELETE FROM contacts")
-        execSQL("DELETE FROM reactions")
-        execSQL("DELETE FROM deleted_chats")
-    }
 }

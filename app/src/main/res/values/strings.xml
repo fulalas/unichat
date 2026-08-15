@@ -123,7 +123,6 @@
     <string name="last_seen_recently">last seen recently</string>
     <string name="last_seen_week">last seen within a week</string>
     <string name="last_seen_month">last seen within a month</string>
-    <string name="last_seen_long_ago">last seen a long time ago</string>
     <string name="attach">Attach file</string>
     <string name="recording_failed">Recording failed</string>
     <string name="recording_too_short">Too short to send — hold longer</string>

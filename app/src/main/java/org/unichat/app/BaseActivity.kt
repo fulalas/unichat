@@ -22,6 +22,23 @@ open class BaseActivity : AppCompatActivity() {
     /** Screens that deliberately draw under the bars (the fullscreen viewer). */
     protected open val padForSystemBars: Boolean = true
 
+    /**
+     * Dresses a protocol-scoped screen in that protocol's accent. WhatsApp is
+     * the overlay; Telegram is the base theme. Must run before any view is
+     * inflated. Four screens applied this by hand with two different protocol
+     * tests, so [ThemeColors.protocolAccent]'s rule for surfaces outside a chat
+     * and this one for whole screens could disagree about the same chat.
+     */
+    protected fun applyProtocolTheme(isTelegram: Boolean) {
+        if (!isTelegram) theme.applyStyle(R.style.ThemeOverlay_UniChat_Wa, true)
+    }
+
+    /** The toolbar's up arrow leaves the screen; overridden where it means more. */
+    override fun onSupportNavigateUp(): Boolean {
+        finish()
+        return true
+    }
+
     override fun onStart() {
         super.onStart()
         // one place to pick up a change to the system 12/24-hour setting, which

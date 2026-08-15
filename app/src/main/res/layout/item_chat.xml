@@ -12,26 +12,30 @@
         android:layout_width="50dp"
         android:layout_height="50dp">
 
-        <!-- reachable to screen readers on purpose: the adapter gives the avatar
-             its own click action (open the contact), distinct from the row's -->
+        <!-- inset inside the ring; reachable to screen readers on purpose, since
+             the adapter gives it its own click action (open the contact) -->
         <ImageView
             android:id="@+id/avatar"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_gravity="center"
             android:contentDescription="@string/avatar_desc" />
 
-        <!-- protocol badge: W (WhatsApp) / T (Telegram) on the avatar corner -->
-        <TextView
-            android:id="@+id/protoBadge"
-            android:layout_width="17dp"
-            android:layout_height="17dp"
+        <!-- which protocol the chat belongs to, as a thin ring around the avatar -->
+        <View
+            android:id="@+id/avatarRing"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@drawable/avatar_ring" />
+
+        <!-- shown only while the contact is online -->
+        <View
+            android:id="@+id/onlineDot"
+            android:layout_width="14dp"
+            android:layout_height="14dp"
             android:layout_gravity="bottom|end"
-            android:background="@drawable/proto_badge_wa"
-            android:gravity="center"
-            android:textColor="#FFFFFF"
-            android:textSize="10sp"
-            android:textStyle="bold"
-            android:importantForAccessibility="no" />
+            android:background="@drawable/online_dot"
+            android:visibility="gone" />
     </FrameLayout>
 
     <LinearLayout

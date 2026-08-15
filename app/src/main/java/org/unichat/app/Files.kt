@@ -72,13 +72,17 @@ fun Context.copyUriToCache(uri: Uri, prefix: String, name: String): File? {
     }
 }
 
+/** MIME type guessed from a file's extension, [fallback] when unknown. The one
+ *  owner of that lookup: a second copy elsewhere disagreed on the fallback. */
+fun mimeOfPath(path: String, fallback: String = "application/octet-stream"): String =
+    MimeTypeMap.getSingleton()
+        .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: fallback
+
 private const val FILE_PROVIDER_AUTHORITY = "org.unichat.app.fileprovider"
 
 /** A content Uri other apps may read [file] through, with its MIME type
  *  guessed from the extension ([fallbackMime] when unknown). */
 fun Context.providedFile(file: File, fallbackMime: String): Pair<Uri, String> {
     val uri = FileProvider.getUriForFile(this, FILE_PROVIDER_AUTHORITY, file)
-    val mime = MimeTypeMap.getSingleton()
-        .getMimeTypeFromExtension(file.extension.lowercase()) ?: fallbackMime
-    return uri to mime
+    return uri to mimeOfPath(file.path, fallbackMime)
 }

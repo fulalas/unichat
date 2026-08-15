@@ -50,7 +50,7 @@ type EventListener interface {
 	// phone), not for chat partners known merely by their WhatsApp push name.
 	OnContact(id string, name string, phone string, isSelf bool, isGroup bool, isSaved bool)
 	OnChat(chatId string, name string, unreadCount int, isArchived bool, lastMessageTime int64)
-	// OnContactsSynced fires once RequestContacts has emitted every contact, i.e.
+	// OnContactsSynced fires once requestContacts has emitted every contact, i.e.
 	// after a sync-complete when the LID→phone mapping is warm. The app uses it to
 	// reconcile any chat mistakenly keyed by a contact's LID (see ResolveChatId).
 	OnContactsSynced()
@@ -171,7 +171,6 @@ const mediaRetryTimeout = 60 * time.Second
 // answers a media retry request with a fresh DirectPath.
 type pendingMediaRetry struct {
 	chatId        string
-	mediaKey      []byte
 	downloadable  whatsmeow.DownloadableMessage
 	setDirectPath func(string)
 	ext           string
@@ -799,7 +798,7 @@ func requestContactsAsync(connId int) {
 			c.contactsSyncing = false
 			mx.Unlock()
 		}()
-		RequestContacts(connId)
+		requestContacts(connId)
 	}()
 }
 
@@ -1002,15 +1001,7 @@ func DeleteMessageForEveryone(connId int, chatId string, msgId string) bool {
 // reference (fileId), keeping the media re-downloadable after the local copy
 // is gone.
 func echoSentMessage(c *conn, chatJid types.JID, resp whatsmeow.SendResponse, message *waE2E.Message) {
-	var messageInfo types.MessageInfo
-	messageInfo.Chat = chatJid
-	messageInfo.IsFromMe = true
-	if c.getClient().Store.ID != nil {
-		messageInfo.Sender = *c.getClient().Store.ID
-	}
-	messageInfo.ID = resp.ID
-	messageInfo.Timestamp = resp.Timestamp
-	handleMessage(c, messageInfo, message, false)
+	echoMessage(c, chatJid, resp.ID, resp.Timestamp, message)
 }
 
 // echoLocal persists an optimistic local copy of a message about to be sent,
@@ -1018,6 +1009,13 @@ func echoSentMessage(c *conn, chatJid types.JID, resp whatsmeow.SendResponse, me
 // reuses the same pre-generated id; a failed send revokes the copy again via
 // OnMessageDeleted.
 func echoLocal(c *conn, chatJid types.JID, msgID string, message *waE2E.Message) {
+	echoMessage(c, chatJid, msgID, time.Now(), message)
+}
+
+// echoMessage stores a message of ours as if it had just arrived. The two
+// callers above differ only in where the id and timestamp come from — the
+// server's ack, or the local guess made before sending.
+func echoMessage(c *conn, chatJid types.JID, msgID string, ts time.Time, message *waE2E.Message) {
 	var messageInfo types.MessageInfo
 	messageInfo.Chat = chatJid
 	messageInfo.IsFromMe = true
@@ -1025,8 +1023,8 @@ func echoLocal(c *conn, chatJid types.JID, msgID string, message *waE2E.Message)
 		messageInfo.Sender = *c.getClient().Store.ID
 	}
 	messageInfo.ID = msgID
-	messageInfo.Timestamp = time.Now()
-	handleMessage(c, messageInfo, message, false)
+	messageInfo.Timestamp = ts
+	handleMessageFull(c, messageInfo, message, false, false, false, false)
 }
 
 // echoLocalMedia is echoLocal for media messages, emitted before the (slow)
@@ -1402,7 +1400,6 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 	}
 	pending := &pendingMediaRetry{
 		chatId:        chatId,
-		mediaKey:      downloadable.GetMediaKey(),
 		downloadable:  downloadable,
 		setDirectPath: setDirectPath,
 		ext:           ext,
@@ -1573,21 +1570,29 @@ func mediaPath(c *conn, msgId string, ext string) (string, error) {
 	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
 		return "", err
 	}
-	safe := func(s string) string {
-		return strings.Map(func(r rune) rune {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
-				return r
-			}
-			return '_'
-		}, s)
-	}
 	// the extension is remote-controlled too, so it gets the same treatment as
-	// the id (a '.' is the only extra character allowed through)
+	// the id (the leading '.' is added here, not allowed through)
 	cleanExt := ""
 	if ext != "" {
-		cleanExt = "." + safe(strings.TrimPrefix(ext, "."))
+		cleanExt = "." + safeName(strings.TrimPrefix(ext, "."), false)
 	}
-	return dir + "/" + safe(msgId) + cleanExt, nil
+	return dir + "/" + safeName(msgId, false) + cleanExt, nil
+}
+
+// safeName maps a remote-controlled string to a filesystem-safe one: letters,
+// digits and '-' survive, everything else becomes '_'. allowDot additionally
+// keeps '.', which the avatar cache needs because a chat id contains one and
+// media paths must not, so the extension stays the only dot there.
+func safeName(s string, allowDot bool) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+			return r
+		case allowDot && r == '.':
+			return r
+		}
+		return '_'
+	}, s)
 }
 
 // copyToMedia copies a just-sent source file to its permanent media path. It
@@ -2025,9 +2030,9 @@ func contactName(info types.ContactInfo) string {
 	return info.PushName
 }
 
-// RequestContacts emits OnContact for self, all address book contacts and all
+// requestContacts emits OnContact for self, all address book contacts and all
 // joined groups.
-func RequestContacts(connId int) {
+func requestContacts(connId int) {
 	c := getConn(connId)
 	if c == nil {
 		return
@@ -2164,12 +2169,7 @@ func GetAvatarFullPath(connId int, chatId string) string {
 // avatarFilePath is the on-disk cache path for a chat/user's avatar (preview
 // or full-resolution), so fetches and cache invalidation agree on the name.
 func avatarFilePath(c *conn, chatId string, preview bool) string {
-	sanitized := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' {
-			return r
-		}
-		return '_'
-	}, chatId)
+	sanitized := safeName(chatId, true)
 	suffix := ".jpg"
 	if !preview {
 		suffix = "_full.jpg"
@@ -2371,7 +2371,7 @@ func handleMediaRetryEvent(c *conn, evt *events.MediaRetry) {
 		c.log(LogWarning, fmt.Sprintf("%s error %v", why, err))
 		c.listener.OnFileDownloaded(pending.chatId, evt.MessageID, "", 3)
 	}
-	notif, err := whatsmeow.DecryptMediaRetryNotification(evt, pending.mediaKey)
+	notif, err := whatsmeow.DecryptMediaRetryNotification(evt, pending.downloadable.GetMediaKey())
 	if err != nil {
 		fail("media retry decrypt", err)
 		return
@@ -2629,10 +2629,6 @@ func reactionSender(c *conn, chatJid types.JID, key *waCommon.MessageKey) string
 	return getChatId(c.getClient(), &chatJid, nil)
 }
 
-func handleMessage(c *conn, messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool) {
-	handleMessageFull(c, messageInfo, msg, isSyncRead, false, false, false)
-}
-
 // isSelfChat reports whether chatId is our own "note to self" chat.
 func (c *conn) isSelfChat(chatId string) bool {
 	return c.getClient().Store.ID != nil && chatId == strFromJid(*c.getClient().Store.ID)
@@ -2807,6 +2803,22 @@ func extractQuote(ci *waE2E.ContextInfo) (id string, text string, msgType string
 	return id, qc.text, qc.msgType
 }
 
+// fromContext returns a msgContent with the fields every content kind derives
+// from its ContextInfo already filled: the quote triple and the forwarded flag.
+// Each branch of getMessageContent used to spell those four out itself, calling
+// GetContextInfo twice on the way, so adding a context-derived field meant
+// editing nine near-identical struct literals and a single missed one was
+// invisible.
+func fromContext(ci *waE2E.ContextInfo) msgContent {
+	id, text, msgType := extractQuote(ci)
+	return msgContent{
+		quotedId:   id,
+		quotedText: text,
+		quotedType: msgType,
+		forwarded:  ci.GetIsForwarded(),
+	}
+}
+
 // viewOnceType marks view-once media: its keys are never shared with
 // linked/companion devices, so it can only be opened on the primary phone and
 // there is nothing here to store or download. Carried as a message TYPE rather
@@ -2824,25 +2836,25 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 		return msgContent{text: text}, true
 	}
 	if ext := msg.GetExtendedTextMessage(); ext != nil {
-		qid, qtext, qtype := extractQuote(ext.GetContextInfo())
-		return msgContent{text: ext.GetText(), quotedId: qid, quotedText: qtext, quotedType: qtype,
-			forwarded: ext.GetContextInfo().GetIsForwarded()}, true
+		m := fromContext(ext.GetContextInfo())
+		m.text = ext.GetText()
+		return m, true
 	}
 	if img := msg.GetImageMessage(); img != nil {
 		if img.GetViewOnce() {
 			return msgContent{msgType: viewOnceType}, true
 		}
-		qid, qtext, qtype := extractQuote(img.GetContextInfo())
-		return msgContent{text: img.GetCaption(), msgType: "image", fileId: encodeFileId("img", img),
-			quotedId: qid, quotedText: qtext, quotedType: qtype, forwarded: img.GetContextInfo().GetIsForwarded()}, true
+		m := fromContext(img.GetContextInfo())
+		m.text, m.msgType, m.fileId = img.GetCaption(), "image", encodeFileId("img", img)
+		return m, true
 	}
 	if vid := msg.GetVideoMessage(); vid != nil {
 		if vid.GetViewOnce() {
 			return msgContent{msgType: viewOnceType}, true
 		}
-		qid, qtext, qtype := extractQuote(vid.GetContextInfo())
-		return msgContent{text: vid.GetCaption(), msgType: "video", fileId: encodeFileId("vid", vid),
-			quotedId: qid, quotedText: qtext, quotedType: qtype, forwarded: vid.GetContextInfo().GetIsForwarded()}, true
+		m := fromContext(vid.GetContextInfo())
+		m.text, m.msgType, m.fileId = vid.GetCaption(), "video", encodeFileId("vid", vid)
+		return m, true
 	}
 	// PTV ("video message" / round video note) is a VideoMessage in a separate
 	// field; treat it like a normal video so it reuses the "vid" download path.
@@ -2850,35 +2862,35 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 		if ptv.GetViewOnce() {
 			return msgContent{msgType: viewOnceType}, true
 		}
-		qid, qtext, qtype := extractQuote(ptv.GetContextInfo())
-		return msgContent{text: ptv.GetCaption(), msgType: "video", fileId: encodeFileId("vid", ptv),
-			quotedId: qid, quotedText: qtext, quotedType: qtype, forwarded: ptv.GetContextInfo().GetIsForwarded()}, true
+		m := fromContext(ptv.GetContextInfo())
+		m.text, m.msgType, m.fileId = ptv.GetCaption(), "video", encodeFileId("vid", ptv)
+		return m, true
 	}
 	if aud := msg.GetAudioMessage(); aud != nil {
 		if aud.GetViewOnce() {
 			return msgContent{msgType: viewOnceType}, true
 		}
-		duration := formatDuration(int(aud.GetSeconds()))
-		qid, qtext, qtype := extractQuote(aud.GetContextInfo())
-		return msgContent{text: duration, msgType: "audio", fileId: encodeFileId("aud", aud),
-			quotedId: qid, quotedText: qtext, quotedType: qtype, forwarded: aud.GetContextInfo().GetIsForwarded()}, true
+		m := fromContext(aud.GetContextInfo())
+		m.text = formatDuration(int(aud.GetSeconds()))
+		m.msgType, m.fileId = "audio", encodeFileId("aud", aud)
+		return m, true
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		name := doc.GetFileName()
 		if name == "" {
 			name = "file"
 		}
-		qid, qtext, qtype := extractQuote(doc.GetContextInfo())
-		return msgContent{text: name, msgType: "document", fileId: encodeFileId("doc", doc),
-			quotedId: qid, quotedText: qtext, quotedType: qtype, forwarded: doc.GetContextInfo().GetIsForwarded()}, true
+		m := fromContext(doc.GetContextInfo())
+		m.text, m.msgType, m.fileId = name, "document", encodeFileId("doc", doc)
+		return m, true
 	}
 	if stk := msg.GetStickerMessage(); stk != nil {
 		// render stickers as ordinary images: the WebP downloads and decodes
 		// through the same image path (BitmapFactory handles static WebP; an
 		// animated sticker shows its first frame)
-		qid, qtext, qtype := extractQuote(stk.GetContextInfo())
-		return msgContent{msgType: "image", fileId: encodeFileId("stk", stk),
-			quotedId: qid, quotedText: qtext, quotedType: qtype, forwarded: stk.GetContextInfo().GetIsForwarded()}, true
+		m := fromContext(stk.GetContextInfo())
+		m.msgType, m.fileId = "image", encodeFileId("stk", stk)
+		return m, true
 	}
 	if msg.GetContactMessage() != nil {
 		return msgContent{text: "[Contact card]"}, true
@@ -2886,10 +2898,10 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 	if loc := msg.GetLocationMessage(); loc != nil {
 		// coordinates travel in the (otherwise unused) fileId token so the UI
 		// can open them in a maps app via a geo: URI
-		qid, qtext, qtype := extractQuote(loc.GetContextInfo())
-		coords := fmt.Sprintf("%.6f,%.6f", loc.GetDegreesLatitude(), loc.GetDegreesLongitude())
-		return msgContent{text: loc.GetName(), msgType: "location", fileId: coords,
-			quotedId: qid, quotedText: qtext, quotedType: qtype, forwarded: loc.GetContextInfo().GetIsForwarded()}, true
+		m := fromContext(loc.GetContextInfo())
+		m.text, m.msgType = loc.GetName(), "location"
+		m.fileId = fmt.Sprintf("%.6f,%.6f", loc.GetDegreesLatitude(), loc.GetDegreesLongitude())
+		return m, true
 	}
 	if msg.GetPollCreationMessage() != nil || msg.GetPollCreationMessageV2() != nil ||
 		msg.GetPollCreationMessageV3() != nil {
@@ -2900,9 +2912,9 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 	// didn't even move up the list, and a reply quoting one showed a blank
 	// quote), which reads as lost messages.
 	if live := msg.GetLiveLocationMessage(); live != nil {
-		qid, qtext, qtype := extractQuote(live.GetContextInfo())
-		return msgContent{text: "[Live location]", quotedId: qid, quotedText: qtext, quotedType: qtype,
-			forwarded: live.GetContextInfo().GetIsForwarded()}, true
+		m := fromContext(live.GetContextInfo())
+		m.text = "[Live location]"
+		return m, true
 	}
 	if msg.GetPollUpdateMessage() != nil {
 		return msgContent{text: "[Poll vote]"}, true
