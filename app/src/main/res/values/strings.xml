@@ -50,6 +50,16 @@
     <string name="search">Search</string>
     <string name="search_messages">Search messages</string>
     <string name="no_results">0/0</string>
+    <string name="searching">Searching…</string>
+    <string name="search_failed">Search failed</string>
+    <!-- %1$s is a date, e.g. "20 July 2025" -->
+    <string name="searched_back_to">Searched back to %1$s</string>
+    <string name="no_matches_since">No matches since %1$s</string>
+    <string name="searched_all">Searched all messages</string>
+    <string name="searching_older">Looking for older messages… back to %1$s</string>
+    <string name="search_older">Search older</string>
+    <string name="stop">Stop</string>
+    <string name="phone_unreachable">Your phone didn\'t answer</string>
     <string name="theme">Theme</string>
     <string name="theme_light">Light</string>
     <string name="theme_dark">Dark</string>

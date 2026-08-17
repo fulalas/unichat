@@ -624,9 +624,12 @@ object Bridge : EventListener {
         val mediaPaths = if (deleteMedia) db.chatMediaPaths(chatId) else emptyList()
         db.deleteChat(chatId)
         appContext?.let { Prefs.setScrollAnchor(it, chatId, null, 0) }
-        // drop this chat's pagination state so a later re-sync starts clean
+        // drop this chat's pagination state so a later re-sync starts clean —
+        // including the persisted "searched everything" claim, which a re-synced
+        // chat has not earned again
         historyAnchor.remove(chatId)
         historyExhausted.remove(chatId)
+        appContext?.let { Prefs.clearHistoryComplete(it, chatId) }
         appContext?.let { ctx -> notifyExecutor.execute { Notifications.cancel(ctx, chatId) } }
         notifyChatsChanged()
         // unlink the files off the hot path: a media-heavy chat can hold
@@ -959,6 +962,33 @@ object Bridge : EventListener {
         if (!started) downloading.remove(key)
         return started
     }
+
+    /**
+     * Searches a chat's whole history on the server. Telegram only: WhatsApp is
+     * end-to-end encrypted, so its servers hold nothing readable to search and
+     * no companion-device query exists — those chats are searched locally, over
+     * what has been synced. Null means "no server search here" or a failed call.
+     * Blocking; worker threads only.
+     */
+    fun searchServer(chatId: String, query: String, fromMessageId: Long): Tg.SearchPage? =
+        if (isTg(chatId)) Tg.searchChat(chatId, query, fromMessageId) else null
+
+    /** The messages surrounding a server search hit, oldest first. Blocking. */
+    fun searchContext(chatId: String, msgId: String): List<MessageRow> =
+        if (isTg(chatId)) Tg.contextWindow(chatId, msgId) else emptyList()
+
+    /** More messages either side of a search window, as it is scrolled. Blocking. */
+    fun searchSlice(chatId: String, msgId: String, newer: Boolean): List<MessageRow> =
+        if (isTg(chatId)) Tg.historySlice(chatId, msgId, newer) else emptyList()
+
+    /**
+     * Fetches the file of a message shown in a search window. Those rows are not
+     * stored, so the usual download path — which records its progress on the
+     * row — has nothing to write to; this hands the path straight back instead.
+     * Blocking.
+     */
+    fun searchMedia(chatId: String, msgId: String): String =
+        if (isTg(chatId)) Tg.downloadNow(chatId, msgId) else ""
 
     // Asks the primary phone for one older page of a chat (scroll-to-top
     // pagination). Repeatable; a page that reaches the chat's start marks it
@@ -1555,6 +1585,9 @@ object Bridge : EventListener {
         seek = null
         historyAnchor.clear()
         historyExhausted.clear()
+        // the next account starts with an empty history, so no chat may still
+        // claim its search covered everything
+        appContext?.let { Prefs.clearHistoryComplete(it, null) }
         syncAllChat = null
         syncAllRounds = 0
         pendingMute.clear()
@@ -1734,6 +1767,10 @@ object Bridge : EventListener {
     private fun rekeyChatState(fromId: String, toId: String) {
         historyAnchor.remove(fromId)?.let { historyAnchor.putIfAbsent(toId, it) }
         if (historyExhausted.remove(fromId)) historyExhausted.add(toId)
+        appContext?.let { ctx ->
+            if (Prefs.historyComplete(ctx, fromId)) Prefs.setHistoryComplete(ctx, toId)
+            Prefs.clearHistoryComplete(ctx, fromId)
+        }
         if (syncAllChat == fromId) syncAllChat = toId
         if (pendingMute.remove(fromId)) pendingMute.add(toId)
         chatStates.remove(fromId)?.let { chatStates.putIfAbsent(toId, it) }

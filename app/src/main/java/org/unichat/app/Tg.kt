@@ -476,8 +476,20 @@ object Tg {
 
     // --- message mapping --------------------------------------------------------
 
-    // Maps one TDLib message into the shared row shape and stores it.
-    private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
+    /**
+     * One TDLib message mapped onto the shared row shape, plus the played flag
+     * the row itself does not carry.
+     *
+     * Free of DB writes on purpose: a search renders the window around a hit
+     * WITHOUT storing it. Dropping a far-back window into the history would
+     * leave an island with a gap on either side of it, and pagination anchors
+     * on the oldest stored row — which is exactly how a chat ends up jumping
+     * over months of messages.
+     */
+    private class Parsed(val row: MessageRow, val listened: Boolean)
+
+    /** Maps one TDLib message into the shared row shape; null if it has none. */
+    private fun parseMessage(msg: JSONObject): Parsed? {
         val rawChat = msg.getLong("chat_id")
         val chatId = idFor(rawChat)
         val msgId = msg.getLong("id")
@@ -493,7 +505,7 @@ object Tg {
             if (fromMe) msgId <= (readOutbox[rawChat] ?: 0)
             else msgId <= (readInbox[rawChat] ?: 0)
 
-        val content = msg.optJSONObject("content") ?: return
+        val content = msg.optJSONObject("content") ?: return null
         var msgType = ""
         var text = ""
         // The backing file is resolved once, by the same navigation the download
@@ -590,36 +602,49 @@ object Tg {
         localPathOf(msg, content)?.let { filePath = it; fileStatus = 2 }
 
         val senderName = if (senderId != chatId) Bridge.db.contactName(senderId) ?: "" else ""
-        Bridge.db.upsertMessage(
+        return Parsed(
             MessageRow(
                 msgId.toString(), chatId, senderId, text, fromMe, timeSent, isRead,
                 msgType = msgType, fileId = fileId,
+                filePath = filePath, fileStatus = fileStatus,
                 latitude = latitude, longitude = longitude,
                 edited = msg.optLong("edit_date") > 0, quotedId = quotedId,
                 senderName = senderName,
                 forwarded = msg.optJSONObject("forward_info") != null,
-            )
+            ),
+            listened,
         )
-        if (filePath.isNotEmpty()) {
-            Bridge.db.setFileState(chatId, msgId.toString(), filePath, fileStatus)
+    }
+
+    // Maps one TDLib message into the shared row shape and stores it.
+    private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
+        val parsed = parseMessage(msg) ?: return
+        val row = parsed.row
+        Bridge.db.upsertMessage(row)
+        // upsertMessage leaves the file columns alone, so a path TDLib already
+        // has is applied separately
+        if (row.filePath.isNotEmpty()) {
+            Bridge.db.setFileState(row.chatId, row.id, row.filePath, row.fileStatus)
         }
         // unconditional, not only when interaction_info is present: a message
         // whose last reaction was removed comes back carrying none, and skipping
         // it left the stale rows in place
-        applyReactions(chatId, msgId.toString(), msg.optJSONObject("interaction_info"), preview = false)
+        applyReactions(row.chatId, row.id, msg.optJSONObject("interaction_info"), preview = false)
         // upsertMessage deliberately never writes `played`, so apply it here
-        if (listened) Bridge.db.setPlayed(chatId, msgId.toString())
-        Bridge.db.bumpChat(chatId, timeSent)
-        if (notify && !fromMe && !isRead) {
+        if (parsed.listened) Bridge.db.setPlayed(row.chatId, row.id)
+        Bridge.db.bumpChat(row.chatId, row.timeSent)
+        if (notify && !row.fromMe && !row.isRead) {
             // eager-fetch images and voice notes for live messages, like WhatsApp
-            if ((msgType in PICTURE_TYPES || msgType == "audio") && fileId.isNotEmpty() && filePath.isEmpty()) {
-                downloadFile(MessageRow(msgId.toString(), chatId, senderId, text, fromMe, timeSent, isRead, msgType = msgType, fileId = fileId))
+            if ((row.msgType in PICTURE_TYPES || row.msgType == "audio") &&
+                row.fileId.isNotEmpty() && row.filePath.isEmpty()
+            ) {
+                downloadFile(row)
             }
-            if (chatId != Bridge.activeChatId && !Bridge.db.isMuted(chatId)) {
-                Bridge.postMessageNotification(chatId, senderId, text, msgType, timeSent)
+            if (row.chatId != Bridge.activeChatId && !Bridge.db.isMuted(row.chatId)) {
+                Bridge.postMessageNotification(row.chatId, row.senderId, row.text, row.msgType, row.timeSent)
             }
         }
-        Bridge.notifyChat(chatId)
+        Bridge.notifyChat(row.chatId)
     }
 
     /** Stand-in for a content type this build does not render, e.g. "[Poll]". */
@@ -1164,6 +1189,129 @@ object Tg {
                 historyBusy.remove(chatId)
             }
         }
+    }
+
+    // --- search ---------------------------------------------------------------
+
+    /** One page of server results: hit ids newest first, plus the paging state. */
+    class SearchPage(val ids: List<String>, val total: Int, val nextFrom: Long)
+
+    /**
+     * Searches one chat's WHOLE history on Telegram's servers, not just what
+     * this device stored. Blocking; worker threads only.
+     *
+     * [fromMessageId] is 0 for the first page and the previous page's [nextFrom]
+     * afterwards; TDLib answers 0 once nothing older is left. total is the real
+     * number of matches, so the counter no longer describes only what is loaded.
+     */
+    fun searchChat(chatId: String, query: String, fromMessageId: Long, limit: Int = 50): SearchPage? {
+        val res = request(
+            JSONObject().put("@type", "searchChatMessages")
+                .put("chat_id", chatIdOf(chatId))
+                .put("topic_id", JSONObject.NULL)
+                .put("query", query)
+                .put("sender_id", JSONObject.NULL)
+                .put("from_message_id", fromMessageId)
+                .put("offset", 0)
+                // the server caps this at 100 and may return fewer than asked
+                .put("limit", limit.coerceIn(1, 100))
+                .put("filter", JSONObject.NULL),
+            timeoutMs = 30_000,
+        ) ?: return null
+        val arr = res.optJSONArray("messages") ?: return null
+        val ids = ArrayList<String>(arr.length())
+        for (i in 0 until arr.length()) {
+            val id = arr.getJSONObject(i).optLong("id")
+            if (id > 0) ids.add(id.toString())
+        }
+        return SearchPage(ids, res.optInt("total_count"), res.optLong("next_from_message_id"))
+    }
+
+    /**
+     * The messages around [msgId], oldest first — the context a search hit is
+     * read in. Nothing is stored (see [Parsed]); rows this device already has
+     * win over the fetched copy, since those carry the downloaded file, the
+     * played state and the reactions.
+     */
+    fun contextWindow(chatId: String, msgId: String, radius: Int = 25): List<MessageRow> {
+        val id = msgId.toLongOrNull() ?: return emptyList()
+        // TDLib's own bounds: the offset may not go past -99 and the limit not
+        // past 100, and the limit must cover the offset
+        val r = radius.coerceIn(1, 49)
+        val res = request(
+            JSONObject().put("@type", "getChatHistory")
+                .put("chat_id", chatIdOf(chatId))
+                .put("from_message_id", id)
+                // negative offset also returns messages NEWER than the hit, so it
+                // sits in the middle of the window instead of at the top of it
+                .put("offset", -r)
+                .put("limit", r * 2 + 1)
+                .put("only_local", false),
+            timeoutMs = 30_000,
+        ) ?: return emptyList()
+        val arr = res.optJSONArray("messages") ?: return emptyList()
+        val rows = ArrayList<MessageRow>(arr.length())
+        for (i in 0 until arr.length()) parseMessage(arr.getJSONObject(i))?.let { rows.add(it.row) }
+        val stored = Bridge.db.messagesByIds(chatId, rows.mapTo(HashSet()) { it.id }).associateBy { it.id }
+        return rows.map { stored[it.id] ?: it }
+            .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
+    }
+
+    /**
+     * [count] messages older (or newer) than [msgId], oldest first — how the
+     * search window grows as it is scrolled. Nothing is stored, same as
+     * [contextWindow].
+     */
+    fun historySlice(chatId: String, msgId: String, newer: Boolean, count: Int = 30): List<MessageRow> {
+        val id = msgId.toLongOrNull() ?: return emptyList()
+        val n = count.coerceIn(1, 49)
+        val res = request(
+            JSONObject().put("@type", "getChatHistory")
+                .put("chat_id", chatIdOf(chatId))
+                .put("from_message_id", id)
+                // older: everything before the anchor. newer: the anchor plus n
+                // messages after it, which is the only way TDLib walks forwards
+                .put("offset", if (newer) -n else 0)
+                .put("limit", if (newer) n + 1 else n)
+                .put("only_local", false),
+            timeoutMs = 30_000,
+        ) ?: return emptyList()
+        val arr = res.optJSONArray("messages") ?: return emptyList()
+        val rows = ArrayList<MessageRow>(arr.length())
+        for (i in 0 until arr.length()) {
+            val row = parseMessage(arr.getJSONObject(i))?.row ?: continue
+            val rowId = row.id.toLongOrNull() ?: continue
+            // the anchor itself comes back in the "newer" answer
+            if (if (newer) rowId > id else rowId < id) rows.add(row)
+        }
+        val stored = Bridge.db.messagesByIds(chatId, rows.mapTo(HashSet()) { it.id }).associateBy { it.id }
+        return rows.map { stored[it.id] ?: it }
+            .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
+    }
+
+    /**
+     * Downloads one message's file and answers with its path, blocking until it
+     * lands. The ordinary download path writes progress onto the message's row,
+     * which a search window does not have — these messages are shown without
+     * being stored.
+     */
+    fun downloadNow(chatId: String, msgId: String): String {
+        val mid = msgId.toLongOrNull() ?: return ""
+        // resolved from the message, never from a stored id: TDLib file ids
+        // belong to the session that issued them
+        val fresh = request(
+            JSONObject().put("@type", "getMessage")
+                .put("chat_id", chatIdOf(chatId)).put("message_id", mid)
+        ) ?: return ""
+        val fid = fresh.optJSONObject("content")?.let { fileOf(it) }?.optInt("id") ?: return ""
+        if (fid == 0) return ""
+        val done = request(
+            JSONObject().put("@type", "downloadFile")
+                .put("file_id", fid).put("priority", 16).put("synchronous", true),
+            timeoutMs = 120_000,
+        ) ?: return ""
+        val path = done.optJSONObject("local")?.optString("path").orEmpty()
+        return if (usable(path)) path else ""
     }
 
     /**

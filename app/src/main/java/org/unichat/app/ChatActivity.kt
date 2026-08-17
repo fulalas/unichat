@@ -31,6 +31,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // were; bounded LRU (most-recent 50 chats) so it can't grow unbounded
         private const val MAX_SCROLL_STATES = 50
         private const val SEARCH_LOAD_LIMIT = 5000
+        // how long one requested page of older history is waited for, and how
+        // many such rounds pass in silence before the phone counts as absent
+        private const val DEEP_TICK_MS = 8_000L
+        private const val DEEP_IDLE_ROUNDS = 3
         // window of local messages shown initially; grows page by page as the
         // user scrolls to the top (before older history is fetched remotely)
         private const val LOCAL_PAGE = 500
@@ -129,9 +133,49 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private lateinit var searchBar: android.view.View
     private lateinit var searchInput: EditText
     private lateinit var searchCount: android.widget.TextView
+    private lateinit var searchCoverageRow: android.view.View
+    private lateinit var searchCoverage: android.widget.TextView
+    private lateinit var searchDeeper: android.widget.Button
     private var searchMatches: List<Int> = emptyList()
     private var currentMatch = -1
     private var searchActive = false
+    // Telegram: matches as the server reported them, newest first, with the
+    // paging anchor for the next batch (0 once nothing older is left)
+    private var serverHits: List<String> = emptyList()
+    private var serverTotal = 0
+    private var serverNextFrom = 0L
+    private var currentHit = -1
+    // each keystroke and each hit starts a network round trip: only the newest
+    // answer of each kind may be applied
+    private var searchSeq = 0
+    private var windowSeq = 0
+    private var hitsLoading = false
+    // WhatsApp: walking older history on request, and rounds spent waiting
+    private var deepening = false
+    private var idleRounds = 0
+    // how much of the chat the scan covers. Grows as deepening pulls older
+    // pages in, or the newly fetched messages would sit outside the window and
+    // every round would re-scan the very same rows.
+    private var searchLimit = SEARCH_LOAD_LIMIT
+    // oldest message the last round saw, to tell a fetched page apart from an
+    // ordinary chat event
+    private var deepOldest = 0L
+    // Its own thread: these calls block for up to 30s and must not sit in front
+    // of the shared io queue that reloads the chat
+    private val searchExec = java.util.concurrent.Executors.newSingleThreadExecutor()
+    // Whether the list is showing the temporary window around a search hit
+    // rather than the chat's own history. While it is, the normal (DB-backed)
+    // pagination is wrong — the window grows from the server, on both ends.
+    private var windowMode = false
+    private var windowLoading = false
+    private var windowTopDone = false
+    private var windowBottomDone = false
+    // media of window rows, fetched one row at a time; ids in flight, ids that
+    // failed (so a rebind doesn't retry forever), and one waiting to be opened
+    private val windowFetching = HashSet<String>()
+    private val windowFailed = HashSet<String>()
+    private var pendingWindowOpen: String? = null
+    private val windowMedia = java.util.concurrent.Executors.newFixedThreadPool(2)
     private lateinit var toolbarTitle: android.widget.TextView
     private lateinit var toolbarSubtitle: android.widget.TextView
     private var chatDisplayName: String = ""
@@ -291,6 +335,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchInput = findViewById(R.id.searchInput)
         searchCount = findViewById(R.id.searchCount)
         findViewById<ImageButton>(R.id.contextCancel).setOnClickListener { clearComposeContext() }
+        searchCoverageRow = findViewById(R.id.searchCoverageRow)
+        searchCoverage = findViewById(R.id.searchCoverage)
+        searchDeeper = findViewById(R.id.searchDeeper)
+        searchDeeper.setOnClickListener { toggleDeepSearch() }
         findViewById<ImageButton>(R.id.searchClose).setOnClickListener { closeSearch() }
         findViewById<ImageButton>(R.id.searchUp).setOnClickListener { stepMatch(-1) }
         findViewById<ImageButton>(R.id.searchDown).setOnClickListener { stepMatch(1) }
@@ -305,7 +353,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
         adapter = MessageAdapter(
             isGroup = isGroup,
-            onNeedDownload = { msg, userInitiated -> Bridge.downloadFile(msg, userInitiated) },
+            onNeedDownload = { msg, userInitiated ->
+                // rows of a search window have no database row behind them
+                if (windowMode) fetchWindowMedia(msg)
+                else Bridge.downloadFile(msg, userInitiated)
+            },
             onImageClick = { msg ->
                 val intent = Intent(this, ImageViewActivity::class.java)
                 intent.putExtra("path", msg.filePath)
@@ -365,6 +417,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 updateScrollFab()
                 showFloatingDate()
                 maybeLoadOlder()
+                // only a search window can grow downwards: the chat's own list
+                // already ends at its newest message
+                if (windowMode && lm.findLastVisibleItemPosition() >= adapter.itemCount - 6) {
+                    extendWindow(older = false)
+                }
             }
             override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
                 // the moment the user grabs the list, stop holding a jumped-to
@@ -444,6 +501,13 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (AudioPlayer.currentPath != null) main.post(audioTicker)
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // their queued calls can only deliver to this (now dead) screen
+        searchExec.shutdownNow()
+        windowMedia.shutdownNow()
+    }
+
     override fun onPause() {
         super.onPause()
         // catches losing the foreground before onStop does (e.g. an incoming
@@ -457,6 +521,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         super.onStop()
         Bridge.removeListener(this)
         Bridge.closeChat(chatId, owner = this)
+        // a history walk is something the user asked for on this screen; it must
+        // not keep pulling pages once they have left it
+        stopDeepening()
         // remember where we were so returning restores the position — but if we
         // were at the bottom, store null so the next load jumps to the real
         // bottom and shows whatever arrived meanwhile (e.g. a file just attached
@@ -555,6 +622,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun reload(markRead: Boolean = false) {
+        // this puts the chat's own history back on screen, whatever was there
+        windowMode = false
         io.execute {
             val messages = Bridge.db.messages(chatId, loadLimit)
             // names sender labels (groups) and @mentions (any chat)
@@ -628,6 +697,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // primary phone for an older page. The bridge dedupes in-flight requests
     // and stops once the start of the chat is reached.
     private fun maybeLoadOlder() {
+        // a search window is not the chat's history: it grows from the server on
+        // whichever end is being scrolled towards
+        if (windowMode) {
+            if (lm.findFirstVisibleItemPosition() <= 5) extendWindow(older = true)
+            return
+        }
         if (!restoredScroll || searchActive || adapter.itemCount == 0) return
         // don't prepend older rows mid-drag: it would shift positions and throw
         // off the drag range-select anchor (auto-scroll stops at the window edge)
@@ -922,6 +997,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // index into; don't reload it out from under the search (still mark read)
         if (searchActive) {
             Bridge.markChatRead(chatId)
+            // unless this IS the older history the search asked for — then the
+            // window is meant to widen, and the scan re-runs over it
+            if (deepening && rowIds == null) onDeepPage()
             return
         }
         // Mid-drag a reload is not safe: with a full window at the query LIMIT a
@@ -992,13 +1070,26 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchBar.visibility = android.view.View.VISIBLE
         searchInput.requestFocus()
         showKeyboard(searchInput)
-        // load a large recent window so search covers well beyond the normal view
-        // (bounded to avoid loading a huge history into memory at once)
+        // Telegram asks its servers, so there is nothing to preload: the chat
+        // keeps its normal window until a hit is picked, and that hit brings its
+        // own surroundings with it.
+        if (Tg.isTgId(chatId)) return
+        updateCoverage()
+        loadSearchWindow()
+    }
+
+    /**
+     * Applies the local search window — a large recent slice of the chat, bigger
+     * than the normal view but bounded, so searching does not pull a whole
+     * history into memory. WhatsApp only; see [runServerSearch].
+     */
+    private fun loadSearchWindow() {
         io.execute {
-            val all = Bridge.db.messages(chatId, SEARCH_LOAD_LIMIT)
+            val all = Bridge.db.messages(chatId, searchLimit)
             val names = contactNames()
             val quoteNames = quoteNamesFor(all)
             runOnUiThread {
+                if (!searchActive || isFinishing || isDestroyed) return@runOnUiThread
                 val q = searchInput.text?.toString().orEmpty()
                 // search indexes into the applied list, so run it once the diff
                 // has committed the full-history window
@@ -1012,7 +1103,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun closeSearch() {
         searchActive = false
         main.removeCallbacks(searchDebounce)
+        stopDeepening()
         searchBar.visibility = android.view.View.GONE
+        searchCoverageRow.visibility = android.view.View.GONE
         searchInput.setText("")
         adapter.highlightQuery = ""
         // clear the highlight spans off the rows already on screen; the reload
@@ -1020,6 +1113,14 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         rebindVisible()
         searchMatches = emptyList()
         currentMatch = -1
+        serverHits = emptyList()
+        serverTotal = 0
+        serverNextFrom = 0L
+        currentHit = -1
+        hitsLoading = false
+        windowFailed.clear()
+        pendingWindowOpen = null
+        searchLimit = SEARCH_LOAD_LIMIT
         searchCount.text = ""
         hideKeyboard(searchInput)
         reload() // restore the normal (recent) message window
@@ -1045,11 +1146,31 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         adapter.highlightQuery = q
         rebindVisible()
         if (q.isEmpty()) {
+            // supersede a query still in flight, or its answer would drop the
+            // list into a hit window for text the search box no longer holds
+            searchSeq++
+            // the screen is showing the window around a hit, not the chat's own
+            // history: put the history back now there is nothing to look for.
+            // Keyed on the window itself — a query that ended with no hits still
+            // leaves the previous one on screen.
+            val showingHit = windowMode
             searchMatches = emptyList()
             currentMatch = -1
+            serverHits = emptyList()
+            serverTotal = 0
+            serverNextFrom = 0L
+            currentHit = -1
             searchCount.text = ""
+            updateCoverage()
+            if (showingHit) reload()
             return
         }
+        // Telegram can be asked directly; WhatsApp is end-to-end encrypted, so
+        // its servers hold nothing to ask about and the scan stays local
+        if (Tg.isTgId(chatId)) runServerSearch(q) else runLocalSearch(q)
+    }
+
+    private fun runLocalSearch(q: String) {
         // The window can hold SEARCH_LOAD_LIMIT rows, so scan off the main
         // thread — this runs on every keystroke, next to the keyboard's own
         // frame budget.
@@ -1062,10 +1183,325 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             runOnUiThread {
                 // a newer keystroke superseded this scan
                 if (adapter.highlightQuery != q) return@runOnUiThread
+                val keepId = currentMatchId()
                 searchMatches = matches
-                currentMatch = matches.size - 1 // start at the most recent match
-                if (currentMatch >= 0) messageList.scrollToPosition(matches[currentMatch])
+                // hold the reader's place across a deepening refresh; otherwise
+                // start at the most recent match
+                val kept = matches.indexOfFirst { adapter.messageIdAt(it) == keepId }
+                currentMatch = if (deepening && kept >= 0) kept else matches.size - 1
+                if (!deepening && currentMatch >= 0) {
+                    messageList.scrollToPosition(matches[currentMatch])
+                }
                 updateSearchCount()
+                updateCoverage()
+            }
+        }
+    }
+
+    /** The message the current match sits on, "" when there is none. */
+    private fun currentMatchId(): String =
+        searchMatches.getOrNull(currentMatch)?.let { adapter.messageIdAt(it) } ?: ""
+
+    // --- Telegram: server-side search ----------------------------------------
+
+    /**
+     * Asks Telegram for every match in the chat, not just the synced part. The
+     * answer is a list of message ids; each one is read in context by fetching
+     * the messages around it (see [showHit]).
+     */
+    private fun runServerSearch(q: String) {
+        val seq = ++searchSeq
+        searchCount.setText(R.string.searching)
+        searchExec.execute {
+            val page = Bridge.searchServer(chatId, q, 0)
+            runOnUiThread {
+                // a newer keystroke superseded this query
+                if (seq != searchSeq || !searchActive) return@runOnUiThread
+                if (page == null) {
+                    searchCount.setText(R.string.search_failed)
+                    return@runOnUiThread
+                }
+                serverHits = page.ids
+                serverTotal = page.total
+                serverNextFrom = page.nextFrom
+                currentHit = if (serverHits.isEmpty()) -1 else 0 // newest match first
+                updateSearchCount()
+                if (currentHit >= 0) showHit(currentHit)
+                // nothing matched: the previous hit's window must not stay up as
+                // if it were still a result
+                else if (windowMode) reload()
+            }
+        }
+    }
+
+    /**
+     * Shows one hit surrounded by the messages that came before and after it.
+     * The window is rendered straight from the server answer and never stored:
+     * writing a far-back slice into the history would leave it stranded between
+     * two gaps, which is how a chat starts skipping months at a time.
+     */
+    private fun showHit(index: Int) {
+        val id = serverHits.getOrNull(index) ?: return
+        val seq = ++windowSeq
+        searchExec.execute {
+            val window = Bridge.searchContext(chatId, id)
+            val names = contactNames()
+            val quoteNames = quoteNamesFor(window)
+            runOnUiThread {
+                if (seq != windowSeq || !searchActive || isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                if (window.isEmpty()) {
+                    Toast.makeText(this, R.string.message_not_loaded, Toast.LENGTH_SHORT).show()
+                    return@runOnUiThread
+                }
+                windowMode = true
+                windowTopDone = false
+                windowBottomDone = false
+                adapter.submit(window, names, quoteNames) {
+                    scrollToMessage(id, toastIfMissing = false, center = true)
+                }
+            }
+        }
+    }
+
+    /**
+     * Grows the search window from the server as it is scrolled, so reading
+     * around a hit works like reading the chat itself. Each end stops asking
+     * once the server answers with nothing.
+     */
+    private fun extendWindow(older: Boolean) {
+        if (!windowMode || windowLoading) return
+        if (if (older) windowTopDone else windowBottomDone) return
+        val rows = adapter.messagesSnapshot()
+        if (rows.isEmpty()) return
+        val anchor = if (older) rows.first().id else rows.last().id
+        windowLoading = true
+        // the hit this slice belongs to: stepping to another one while it is in
+        // flight would otherwise resurrect the old window over the new one
+        val seq = windowSeq
+        searchExec.execute {
+            val more = Bridge.searchSlice(chatId, anchor, newer = !older)
+            val merged = if (more.isEmpty()) emptyList() else {
+                (if (older) more + rows else rows + more)
+                    .distinctBy { it.id }
+                    .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
+            }
+            val names = if (merged.isEmpty()) emptyMap() else contactNames()
+            val quoteNames = if (merged.isEmpty()) emptyMap() else quoteNamesFor(merged)
+            runOnUiThread {
+                windowLoading = false
+                if (seq != windowSeq || !windowMode || isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                if (merged.isEmpty()) {
+                    // that end of the history is reached; stop asking for it
+                    if (older) windowTopDone = true else windowBottomDone = true
+                    return@runOnUiThread
+                }
+                adapter.submit(merged, names, quoteNames)
+            }
+        }
+    }
+
+    /**
+     * Fetches the picture, video or voice note of a row in the search window.
+     * Those rows are not stored, so the normal download path — which reports
+     * progress by writing to the message's row — has nothing to write to and
+     * left every attachment blank.
+     */
+    private fun fetchWindowMedia(msg: MessageRow, userInitiated: Boolean = false) {
+        if (msg.fileId.isEmpty() || msg.filePath.isNotEmpty()) return
+        // one automatic try per file: a failed row still binds with an empty
+        // path, so every scroll past it would start another blocking fetch. A
+        // tap always retries.
+        if (userInitiated) windowFailed.remove(msg.id)
+        else if (msg.id in windowFailed) return
+        if (!windowFetching.add(msg.id)) return
+        // show it as downloading, exactly like a stored row would
+        adapter.refreshRows(mapOf(msg.id to msg.copy(fileStatus = 1)))
+        windowMedia.execute {
+            val path = Bridge.searchMedia(msg.chatId, msg.id)
+            runOnUiThread {
+                windowFetching.remove(msg.id)
+                if (!windowMode || isFinishing || isDestroyed) return@runOnUiThread
+                if (path.isEmpty()) windowFailed.add(msg.id)
+                val fresh = if (path.isEmpty()) msg.copy(fileStatus = 3)
+                    else msg.copy(filePath = path, fileStatus = 2)
+                adapter.refreshRows(mapOf(msg.id to fresh))
+                // a video or document the user tapped: open it now it is here
+                if (pendingWindowOpen == msg.id) {
+                    pendingWindowOpen = null
+                    if (path.isNotEmpty()) openMediaFile(fresh)
+                }
+            }
+        }
+    }
+
+    /** Moves through the server hits, pulling the next page as the end nears. */
+    private fun stepHit(delta: Int) {
+        if (serverHits.isEmpty()) return
+        val next = currentHit + delta
+        if (next < 0) return // already at the newest match
+        if (next >= serverHits.size) {
+            if (serverNextFrom == 0L) return // nothing older left
+            loadMoreHits()
+            return
+        }
+        currentHit = next
+        updateSearchCount()
+        showHit(currentHit)
+    }
+
+    private fun loadMoreHits() {
+        // without this, tapping twice at the end of the list fetches the same
+        // page twice: the anchor only moves when the first answer lands
+        if (hitsLoading) return
+        hitsLoading = true
+        val seq = searchSeq
+        val from = serverNextFrom
+        val q = adapter.highlightQuery
+        searchExec.execute {
+            val page = Bridge.searchServer(chatId, q, from)
+            runOnUiThread {
+                hitsLoading = false
+                if (seq != searchSeq || !searchActive || page == null) return@runOnUiThread
+                val fresh = page.ids.filterNot { it in serverHits }
+                if (fresh.isEmpty()) {
+                    serverNextFrom = 0L
+                    return@runOnUiThread
+                }
+                serverHits = serverHits + fresh
+                serverNextFrom = page.nextFrom
+                currentHit++
+                updateSearchCount()
+                showHit(currentHit)
+            }
+        }
+    }
+
+    // --- WhatsApp: how far back the search reached ---------------------------
+
+    /**
+     * Says what was actually searched. A WhatsApp chat is searched locally, so
+     * "no matches" only ever means "none in what is on this phone" — naming the
+     * oldest message it reached keeps that honest, and the button fetches more.
+     */
+    private fun updateCoverage() {
+        if (!searchActive || Tg.isTgId(chatId)) {
+            searchCoverageRow.visibility = android.view.View.GONE
+            return
+        }
+        if (searchInput.text.isNullOrBlank() && !deepening) {
+            searchCoverageRow.visibility = android.view.View.GONE
+            return
+        }
+        searchCoverageRow.visibility = android.view.View.VISIBLE
+        // "Sync all" and scroll-to-top pagination reach the chat's start too, and
+        // Bridge only remembers that for the current run — record it so the
+        // answer survives a restart
+        if (Bridge.isHistoryExhausted(chatId)) Prefs.setHistoryComplete(this, chatId)
+        searchDeeper.setText(if (deepening) R.string.stop else R.string.search_older)
+        // The date has to describe what was SCANNED, not what is stored: the
+        // window holds the newest searchLimit rows, so a long chat can hold
+        // messages older than the scan ever looked at. Claiming those would be
+        // the very lie this line exists to avoid.
+        val scanned = adapter.messagesSnapshot().firstOrNull()?.timeSent ?: 0L
+        io.execute {
+            val stored = Bridge.db.oldestMessage(chatId)?.timeSent ?: 0L
+            runOnUiThread {
+                if (!searchActive || isFinishing || isDestroyed) return@runOnUiThread
+                // "everything" means the walk reached the chat's start AND the
+                // scan reached the oldest row it brought back
+                val all = Prefs.historyComplete(this, chatId) && stored > 0 && scanned <= stored
+                searchDeeper.visibility =
+                    if (all) android.view.View.GONE else android.view.View.VISIBLE
+                val since = if (scanned > 0) TimeFormat.dateSeparator(this, scanned) else ""
+                searchCoverage.text = when {
+                    all -> getString(R.string.searched_all)
+                    since.isEmpty() -> ""
+                    deepening -> getString(R.string.searching_older, since)
+                    searchMatches.isEmpty() -> getString(R.string.no_matches_since, since)
+                    else -> getString(R.string.searched_back_to, since)
+                }
+            }
+        }
+    }
+
+    /**
+     * Pulls older history one page at a time, re-scanning after each, until the
+     * chat's start is reached or the user stops. Explicitly asked for: syncing
+     * before every search would be slow, and doing it silently would spend the
+     * phone's battery on searches that were never going to match.
+     */
+    private fun toggleDeepSearch() {
+        if (deepening) {
+            stopDeepening()
+            updateCoverage()
+            return
+        }
+        deepening = true
+        idleRounds = 0
+        // the floor to beat before a change counts as the page we asked for
+        deepOldest = adapter.messagesSnapshot().firstOrNull()?.timeSent ?: 0L
+        updateCoverage()
+        pullOlderPage()
+    }
+
+    private fun pullOlderPage() {
+        if (!deepening) return
+        if (Bridge.isHistoryExhausted(chatId)) {
+            Prefs.setHistoryComplete(this, chatId)
+            stopDeepening()
+            updateCoverage()
+            return
+        }
+        Bridge.requestChatHistory(chatId)
+        main.postDelayed(deepTick, DEEP_TICK_MS)
+    }
+
+    // Nothing arrived since the last request. A page can simply be dropped (one
+    // whole-history operation runs at a time), so retry a couple of rounds
+    // before concluding the phone is not answering.
+    private val deepTick = Runnable {
+        if (!deepening) return@Runnable
+        idleRounds++
+        if (idleRounds >= DEEP_IDLE_ROUNDS) {
+            stopDeepening()
+            searchCoverage.text = getString(R.string.phone_unreachable)
+            searchDeeper.setText(R.string.search_older)
+            return@Runnable
+        }
+        pullOlderPage()
+    }
+
+    private fun stopDeepening() {
+        deepening = false
+        idleRounds = 0
+        main.removeCallbacks(deepTick)
+    }
+
+    /**
+     * Something changed in the chat while deepening. Only an actually older
+     * message counts as the page that was asked for — an arriving message or a
+     * deletion fires the same event, and treating those as progress reset the
+     * "your phone didn't answer" counter forever.
+     */
+    private fun onDeepPage() {
+        io.execute {
+            val oldest = Bridge.db.oldestMessage(chatId)?.timeSent ?: 0L
+            runOnUiThread {
+                if (!deepening || isFinishing || isDestroyed) return@runOnUiThread
+                if (deepOldest != 0L && oldest >= deepOldest) return@runOnUiThread
+                deepOldest = oldest
+                main.removeCallbacks(deepTick)
+                idleRounds = 0
+                // the fetched page sits below the window's floor; without this
+                // every round would re-scan the same rows and find nothing new
+                searchLimit += LOCAL_PAGE
+                loadSearchWindow() // re-scans through runSearch once the diff commits
+                updateCoverage()
+                pullOlderPage()
             }
         }
     }
@@ -1099,6 +1535,13 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun stepMatch(delta: Int) {
+        // The loaded window runs oldest-first, the server's hits newest-first,
+        // so "up" (delta -1, older) walks the hit list forwards. Server hits
+        // also do not wrap: there is always more history behind the last one.
+        if (Tg.isTgId(chatId)) {
+            stepHit(-delta)
+            return
+        }
         if (searchMatches.isEmpty()) return
         val n = searchMatches.size
         currentMatch = ((currentMatch + delta) % n + n) % n
@@ -1107,6 +1550,13 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun updateSearchCount() {
+        if (Tg.isTgId(chatId)) {
+            // total comes from the server, so it counts the whole history rather
+            // than the handful of hits fetched so far
+            searchCount.text = if (serverHits.isEmpty()) getString(R.string.no_results)
+                else "${currentHit + 1}/${maxOf(serverTotal, serverHits.size)}"
+            return
+        }
         searchCount.text = if (searchMatches.isEmpty()) getString(R.string.no_results)
             else "${currentMatch + 1}/${searchMatches.size}"
     }
@@ -1709,7 +2159,13 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     // A user-asked download plus the "Downloading…" acknowledgement toast.
     private fun downloadWithToast(msg: MessageRow) {
-        Bridge.downloadFile(msg, userInitiated = true)
+        // a search window's rows have no DB row for the transfer to report on
+        if (windowMode) {
+            pendingWindowOpen = msg.id
+            fetchWindowMedia(msg, userInitiated = true)
+        } else {
+            Bridge.downloadFile(msg, userInitiated = true)
+        }
         Toast.makeText(this, R.string.downloading, Toast.LENGTH_SHORT).show()
     }
 

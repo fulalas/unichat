@@ -10,6 +10,7 @@ object Prefs {
     private const val KEY_FONT = "font_scale"
     private const val KEY_TG_LINKED = "tg_linked"
     private const val KEY_SCROLL = "scroll_"
+    private const val KEY_COMPLETE = "hist_done_"
 
     const val FONT_MIN = 0.8f
     const val FONT_MAX = 1.6f
@@ -48,6 +49,30 @@ object Prefs {
         val e = prefs(ctx).edit()
         if (msgId.isNullOrEmpty()) e.remove(KEY_SCROLL + chatId)
         else e.putString(KEY_SCROLL + chatId, "$msgId:$offset")
+        e.apply()
+    }
+
+    /**
+     * Whether a chat has been paged back to its very first message. Persisted,
+     * unlike Bridge's in-memory copy, because search uses it to tell you it
+     * really did read everything — an answer that must survive a restart.
+     */
+    fun historyComplete(ctx: Context, chatId: String): Boolean =
+        prefs(ctx).getBoolean(KEY_COMPLETE + chatId, false)
+
+    fun setHistoryComplete(ctx: Context, chatId: String) =
+        prefs(ctx).edit().putBoolean(KEY_COMPLETE + chatId, true).apply()
+
+    /**
+     * Forgets the claim — for one chat, or (null) for every chat. A deleted or
+     * re-linked account re-syncs from nothing, and a search still promising it
+     * had read everything would be exactly the false comfort this replaced.
+     */
+    fun clearHistoryComplete(ctx: Context, chatId: String?) {
+        val p = prefs(ctx)
+        val e = p.edit()
+        if (chatId != null) e.remove(KEY_COMPLETE + chatId)
+        else p.all.keys.filter { it.startsWith(KEY_COMPLETE) }.forEach { e.remove(it) }
         e.apply()
     }
 
