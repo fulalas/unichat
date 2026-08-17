@@ -11,6 +11,7 @@ import android.view.View
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatDelegate
+import android.widget.Toast
 import androidx.appcompat.widget.SearchView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -33,6 +34,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     private lateinit var emptyText: TextView
     private lateinit var adapter: ChatListAdapter
     private val io = Io.executor
+    // number lookups only: they block on the network far longer than any list
+    // read, and sharing io would stall every screen behind one of them
+    private val lookup = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,13 +52,19 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         emptyText = findViewById(R.id.emptyText)
         adapter = ChatListAdapter(
             onClick = { chat ->
-                val intent = Intent(this, ChatActivity::class.java)
-                intent.putExtra("chatId", chat.id)
-                intent.putExtra("chatName", chat.name)
-                startActivity(intent)
+                // an address-book result has no chat yet: ask WhatsApp for the
+                // number first, so a mistyped or non-WhatsApp number says so
+                // instead of opening a chat that can never deliver
+                if (PhoneBook.isPhoneEntry(chat.id)) openPhoneEntry(chat)
+                else openChat(chat.id, chat.name)
             },
-            onAvatarClick = { chat -> Bridge.openAvatar(this, chat.id) },
-            onLongClick = { chat -> showChatOptions(chat) },
+            onAvatarClick = { chat ->
+                if (!PhoneBook.isPhoneEntry(chat.id)) Bridge.openAvatar(this, chat.id)
+            },
+            onLongClick = { chat ->
+                // mute/delete/etc. need a chat; there isn't one yet
+                if (!PhoneBook.isPhoneEntry(chat.id)) showChatOptions(chat)
+            },
         )
         chatList.layoutManager = LinearLayoutManager(this)
         chatList.adapter = adapter
@@ -139,10 +149,14 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     override fun onDestroy() {
         super.onDestroy()
         Bridge.removeListener(this)
+        lookup.shutdownNow()
     }
 
     private var allChats: List<ChatRow> = emptyList()
     private var query: String = ""
+    // the contacts permission is offered once per run: the menu (and its
+    // SearchView) is rebuilt often, and re-asking on every search would nag
+    private var contactsAsked = false
     private var started = false
     // throttle for reloads while backgrounded: bursts (history sync, busy
     // groups) collapse to one full chat-list query per second instead of one
@@ -213,6 +227,38 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
+    private fun openChat(chatId: String, name: String) {
+        val intent = Intent(this, ChatActivity::class.java)
+        intent.putExtra("chatId", chatId)
+        intent.putExtra("chatName", name)
+        startActivity(intent)
+    }
+
+    /** Opens a chat with an address-book number, once WhatsApp confirms it. */
+    private fun openPhoneEntry(chat: ChatRow) {
+        val number = PhoneBook.numberOf(chat.id)
+        Toast.makeText(this, R.string.checking_number, Toast.LENGTH_SHORT).show()
+        // its own thread: the server has up to 75s to answer, and the shared io
+        // queue is what every screen reads its lists through
+        lookup.execute {
+            val jid = Bridge.resolveNumber(number)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                when {
+                    // never say someone is not on WhatsApp because we couldn't ask
+                    jid == Bridge.NUMBER_LOOKUP_FAILED ->
+                        Toast.makeText(this, R.string.number_check_failed, Toast.LENGTH_SHORT).show()
+                    jid.isEmpty() ->
+                        Toast.makeText(this, R.string.not_on_whatsapp, Toast.LENGTH_SHORT).show()
+                    else -> {
+                        Bridge.rememberContact(jid, chat.name)
+                        openChat(jid, chat.name)
+                    }
+                }
+            }
+        }
+    }
+
     private fun applyFilter() {
         if (query.isEmpty()) {
             submitChats(allChats)
@@ -226,6 +272,8 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         val q = query
         io.execute {
             val contacts = Bridge.db.searchContacts(q)
+            // people this phone knows but WhatsApp has not synced to us yet
+            val fromPhone = PhoneBook.search(this, q)
             runOnUiThread {
                 if (query != q) return@runOnUiThread // a newer query superseded this one
                 // match what the row actually SHOWS: an unresolved chat renders
@@ -241,7 +289,31 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 // keep the chat row (it carries recency/unread) and drop the
                 // contact duplicate, keyed on the shared JID
                 val seen = chatMatches.mapTo(HashSet()) { it.id }
-                val results = chatMatches + contacts.filter { it.id !in seen }
+                val known = chatMatches + contacts.filter { it.id !in seen }
+                // address-book people are the last resort: anyone already known
+                // to either service is shown as themselves, with their history
+                // Numbers already reachable, from both shapes a row can carry
+                // them in: a phone JID, and a contact row's "+55…" preview —
+                // which is the only handle on someone whose chat is keyed by a
+                // @lid. Telegram ids hold no number, so those can't be matched.
+                val knownDigits = HashSet<String>()
+                for (row in known) {
+                    if (isPhoneId(row.id)) knownDigits.add(row.id.substringBefore('@'))
+                    if (row.lastText.startsWith("+")) {
+                        PhoneBook.digitsOf(row.lastText).takeIf { it.length >= 8 }
+                            ?.let { knownDigits.add(it) }
+                    }
+                }
+                val newOnes = fromPhone
+                    .filter { PhoneBook.digitsOf(it.number) !in knownDigits }
+                    .map {
+                        ChatRow(
+                            id = it.id, name = it.name, lastText = it.number,
+                            lastTime = 0, lastFromMe = false, lastRead = false,
+                            unread = 0, isGroup = false,
+                        )
+                    }
+                val results = known + newOnes
                 submitChats(results)
                 emptyText.visibility = if (results.isEmpty()) View.VISIBLE else View.GONE
             }
@@ -359,11 +431,36 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         val searchItem = menu.add(0, M_SEARCH, 0, R.string.search)
         searchItem.setIcon(android.R.drawable.ic_menu_search)
+        // ALWAYS, not IF_ROOM: "if room" is re-decided every time the search box
+        // expands and collapses, and losing that contest demotes the item — the
+        // icon disappeared from the bar and "Search" turned up as a line inside
+        // the overflow menu, where an action view cannot even open.
         searchItem.setShowAsAction(
-            MenuItem.SHOW_AS_ACTION_IF_ROOM or MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW
+            MenuItem.SHOW_AS_ACTION_ALWAYS or MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW
         )
+        // Collapsing the box — with its X, or the back arrow it puts in the
+        // toolbar — reports no query change, so the list stayed filtered by a
+        // term that is no longer visible anywhere.
+        searchItem.setOnActionExpandListener(object : MenuItem.OnActionExpandListener {
+            override fun onMenuItemActionExpand(item: MenuItem) = true
+            override fun onMenuItemActionCollapse(item: MenuItem): Boolean {
+                if (query.isNotEmpty()) {
+                    query = ""
+                    applyFilter()
+                }
+                return true
+            }
+        })
         val searchView = SearchView(this)
         searchView.queryHint = getString(R.string.search)
+        // asked for here rather than at startup: this is the one moment it is
+        // obvious what it is for, and search works without it
+        searchView.setOnSearchClickListener {
+            if (!PhoneBook.granted(this) && !contactsAsked) {
+                contactsAsked = true
+                requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), 2)
+            }
+        }
         searchView.setOnQueryTextListener(object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(q: String?): Boolean = true
             override fun onQueryTextChange(q: String?): Boolean {

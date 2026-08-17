@@ -1786,6 +1786,48 @@ func GetMyAbout(connId int) string {
 	return infos[self].Status
 }
 
+// ResolveNumberFailed is what ResolveNumber answers when it could not ask at
+// all (no session, or the server did not respond). It cannot be mistaken for a
+// chat id, which always carries an '@'. "Not registered" must be told apart
+// from "could not check": reporting the first for the second tells someone
+// their contact is not on WhatsApp when the network merely dropped.
+const ResolveNumberFailed = "failed"
+
+// ResolveNumber asks the server whether a phone number is on WhatsApp and
+// returns the chat id to use for it, "" when it is not registered, or
+// ResolveNumberFailed when the question could not be asked. The number must be
+// in international form, e.g. "+5521999...".
+//
+// Contacts reach a linked device only through WhatsApp's own synced contact
+// list, which lags behind the phone's address book; this lets a number read
+// straight from the address book be messaged without waiting for that.
+// Blocking; call from a background thread.
+func ResolveNumber(connId int, phone string) string {
+	c := getConn(connId)
+	if c == nil || phone == "" {
+		return ResolveNumberFailed
+	}
+	found, err := c.getClient().IsOnWhatsApp(context.TODO(), []string{phone})
+	if err != nil {
+		c.log(LogWarning, fmt.Sprintf("number lookup error %v", err))
+		return ResolveNumberFailed
+	}
+	for _, r := range found {
+		if !r.IsIn {
+			continue
+		}
+		// JID is the "canonical" id, which for most accounts is now a @lid —
+		// and a chat opened under that id showed nothing, because the message
+		// is filed under the phone JID. Prefer the phone JID, which is what
+		// this app keys chats by, and fall back only when there is none.
+		if !r.PhoneNumber.IsEmpty() {
+			return strFromJid(r.PhoneNumber)
+		}
+		return strFromJid(r.JID)
+	}
+	return ""
+}
+
 // GetMyName returns the account's own profile (push) name — the name shown to
 // everyone who hasn't saved the number — or "" if unset.
 func GetMyName(connId int) string {

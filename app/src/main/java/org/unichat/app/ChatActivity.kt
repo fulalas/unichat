@@ -1215,8 +1215,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchExec.execute {
             val page = Bridge.searchServer(chatId, q, 0)
             runOnUiThread {
-                // a newer keystroke superseded this query
-                if (seq != searchSeq || !searchActive) return@runOnUiThread
+                // a newer keystroke superseded this query — or the screen is
+                // gone, which the toolbar's up arrow does without closing the
+                // search, leaving this to hand work to a stopped executor
+                if (seq != searchSeq || !searchActive || isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
                 if (page == null) {
                     searchCount.setText(R.string.search_failed)
                     return@runOnUiThread
@@ -1365,7 +1369,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             val page = Bridge.searchServer(chatId, q, from)
             runOnUiThread {
                 hitsLoading = false
-                if (seq != searchSeq || !searchActive || page == null) return@runOnUiThread
+                if (seq != searchSeq || !searchActive || page == null ||
+                    isFinishing || isDestroyed
+                ) {
+                    return@runOnUiThread
+                }
                 val fresh = page.ids.filterNot { it in serverHits }
                 if (fresh.isEmpty()) {
                     serverNextFrom = 0L

@@ -977,6 +977,41 @@ object Bridge : EventListener {
     fun searchContext(chatId: String, msgId: String): List<MessageRow> =
         if (isTg(chatId)) Tg.contextWindow(chatId, msgId) else emptyList()
 
+    /**
+     * The chat id for a phone number, or "" when it is not on WhatsApp. Lets a
+     * number read from the phone's address book be messaged before WhatsApp's
+     * own contact list has caught up with it. Blocking; worker threads only.
+     */
+    /** [resolveNumber] could not ask — not "the number is not registered". */
+    const val NUMBER_LOOKUP_FAILED = "failed"
+
+    fun resolveNumber(phone: String): String =
+        if (connId >= 0 && phone.isNotEmpty()) Wmbridge.resolveNumber(connId, phone)
+        else NUMBER_LOOKUP_FAILED
+
+    /**
+     * Keeps the address-book name of a number just messaged for the first time.
+     * Without it that chat reads as a bare number until WhatsApp's own contact
+     * list catches up — which is the very delay this path exists to work around.
+     */
+    fun rememberContact(chatId: String, name: String) {
+        if (chatId.isEmpty() || name.isEmpty()) return
+        executor.execute {
+            // your own number is in your address book too, and writing it back
+            // as an ordinary contact (is_self=0) would list you in your own
+            // search results for good
+            if (chatId == selfId()) return@execute
+            db.upsertContact(
+                chatId, name,
+                // only a phone JID holds a real number; a @lid's digits are not
+                // one, and would render as a plausible but invented "+number"
+                if (isPhoneId(chatId)) chatId.substringBefore('@') else "",
+                isSelf = false, isGroup = false, isSaved = true,
+            )
+            notifyChatsChanged()
+        }
+    }
+
     /** More messages either side of a search window, as it is scrolled. Blocking. */
     fun searchSlice(chatId: String, msgId: String, newer: Boolean): List<MessageRow> =
         if (isTg(chatId)) Tg.historySlice(chatId, msgId, newer) else emptyList()

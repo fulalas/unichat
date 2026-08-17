@@ -192,6 +192,12 @@ object AvatarLoader {
         return out
     }
 
+    /**
+     * The coloured initial on its own, for a row with no account behind it yet
+     * (an address-book search result): there is nobody to ask for a picture.
+     */
+    fun initials(name: String, sizePx: Int): Bitmap = placeholder(name, name, sizePx)
+
     private fun placeholder(chatId: String, name: String, sizePx: Int): Bitmap {
         // masked rather than abs(): abs(Int.MIN_VALUE) is negative, which would
         // index out of the palette the moment its size stops dividing 2^31
