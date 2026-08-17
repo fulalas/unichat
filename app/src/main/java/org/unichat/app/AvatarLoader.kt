@@ -13,18 +13,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlin.math.min
 
-/**
- * Loads chat avatars via the bridge (which caches them on disk) with an
- * in-memory bitmap cache. Falls back to a colored circle with the chat's
- * initial.
- *
- * Fast scrolling used to flood a tiny FIFO thread pool with duplicate/stale
- * fetches, so on-screen rows waited behind the whole backlog. This version:
- *  - dedups in-flight fetches per chat id (one fetch at a time),
- *  - remembers only the latest requesting ImageView per id and updates that,
- *  - keeps a memory-proportional bitmap cache so returning to the top is instant,
- *  - refreshes a cached avatar in the background when it is older than an hour.
- */
 object AvatarLoader {
 
     private const val REFRESH_MS = 60 * 60 * 1000L // 1 hour
@@ -33,18 +21,13 @@ object AvatarLoader {
     // bridge. Remember the miss for a while instead.
     private const val NO_AVATAR_MS = 30 * 60 * 1000L // 30 minutes
 
-    // memory-sized bitmap cache (KB) so many avatars survive long scrolls
     private val cache = newBitmapCache(32)
     private val loadedAt = ConcurrentHashMap<String, Long>()
     private val missedAt = ConcurrentHashMap<String, Long>()
     private val inFlight = Collections.synchronizedSet(HashSet<String>())
 
-    // Every ImageView still waiting on a given chat id, carrying the size it
-    // asked for. The queue is PendingViews (BitmapCaches.kt), shared with
-    // ImageLoader; only the still-bound test and the painting below are ours.
     private val requests = PendingViews<Int>()
 
-    /** Paints a finished avatar into every view still bound to [chatId]. Main thread. */
     private fun deliver(chatId: String, bitmap: Bitmap) {
         for (r in requests.take(chatId)) {
             val view = r.view.get() ?: continue
@@ -52,9 +35,6 @@ object AvatarLoader {
         }
     }
 
-    // Coloured-initial placeholders, keyed by (colour, initial, size): drawing
-    // one allocates a bitmap plus a Canvas/Paint, and it used to happen on the
-    // main thread on every bind of every picture-less chat.
     private val placeholders = newBitmapCache(64)
 
     // Two pools, because the two halves of a load have nothing in common:
@@ -74,11 +54,6 @@ object AvatarLoader {
         0xFFEFC050.toInt(), 0xFF5B5EA6.toInt(), 0xFF955251.toInt(), 0xFF45B8AC.toInt(),
     )
 
-    /**
-     * Drops the cached avatar for a chat/user id so the next load re-decodes it
-     * from disk — e.g. after the user changes their own profile picture, whose
-     * on-disk copy the bridge has just replaced.
-     */
     fun invalidate(chatId: String) {
         cache.remove(chatId)
         loadedAt.remove(chatId)
@@ -92,31 +67,20 @@ object AvatarLoader {
             imageView.setImageBitmap(cached)
             val fresh = System.currentTimeMillis() - (loadedAt[chatId] ?: 0L) < REFRESH_MS
             if (fresh) return
-            // show the cached bitmap now, refresh it in the background
         } else {
             imageView.setImageBitmap(placeholder(chatId, name, sizePx))
         }
 
-        // known to have no picture and asked recently: don't cross the bridge again
         val missed = missedAt[chatId]
         if (missed != null && System.currentTimeMillis() - missed < NO_AVATAR_MS) return
 
         requests.await(chatId, imageView, sizePx)
         if (!inFlight.add(chatId)) return // a fetch for this id is already running; we are queued on it
 
-        // A stale cached bitmap is already on screen, so its refresh is pure
-        // background work and goes straight to the (slow) fetch pool; a first
-        // load has a placeholder on screen and takes the fast path first.
         if (cached != null) fetcher.execute { resolve(chatId, sizePx, cachedOnly = false) }
         else decoder.execute { resolve(chatId, sizePx, cachedOnly = true) }
     }
 
-    /**
-     * Decodes [chatId]'s avatar and hands it to the waiting views. [cachedOnly]
-     * marks the decode-pool pass, which may only look at what is already on
-     * disk; when nothing is there the id is re-queued on the fetch pool, the
-     * only place the blocking bridge lookup is allowed to happen.
-     */
     private fun resolve(chatId: String, sizePx: Int, cachedOnly: Boolean) {
         var delivering = false
         var handedOff = false
@@ -159,7 +123,6 @@ object AvatarLoader {
             delivering = true
             main.post { deliver(chatId, circled) }
         } finally {
-            // the fetch pass owns the id from here on, queue included
             if (!handedOff) {
                 inFlight.remove(chatId)
                 // nothing will be painted, so don't leave the queue behind
@@ -192,10 +155,6 @@ object AvatarLoader {
         return out
     }
 
-    /**
-     * The coloured initial on its own, for a row with no account behind it yet
-     * (an address-book search result): there is nobody to ask for a picture.
-     */
     fun initials(name: String, sizePx: Int): Bitmap = placeholder(name, name, sizePx)
 
     private fun placeholder(chatId: String, name: String, sizePx: Int): Bitmap {

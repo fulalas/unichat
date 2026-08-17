@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Dark theme (true black for OLED) -->
     <color name="bg">#000000</color>
     <color name="surface">#111B21</color>
     <color name="surface_light">#202C33</color>
@@ -11,16 +10,12 @@
     <color name="text_secondary">#8696A0</color>
     <color name="divider">#1E2A30</color>
     <color name="unread_badge">#6AB2F2</color>
-    <!-- jump-to-quote row flash (semi-transparent accent blue) -->
     <color name="quote_flash">#5C6AB2F2</color>
-    <!-- multi-select highlight on a selected message row -->
     <color name="msg_selected">#336AB2F2</color>
 
-    <!-- WhatsApp chat-screen palette (green), applied via ThemeOverlay.UniChat.Wa -->
     <color name="accent_wa">#00A884</color>
     <color name="bubble_out_wa">#005C4B</color>
     <color name="quote_flash_wa">#5C00A884</color>
     <color name="msg_selected_wa">#3300A884</color>
-    <!-- presence dot: one colour for both protocols, it means "online" -->
     <color name="online_dot">#25D366</color>
 </resources>

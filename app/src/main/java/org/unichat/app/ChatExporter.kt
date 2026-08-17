@@ -9,7 +9,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Writes a chat's messages to a text file in WhatsApp's export format. */
 object ChatExporter {
 
     fun write(context: Context, db: Db, chatId: String, uri: Uri, messages: List<MessageRow>) {
@@ -17,7 +16,6 @@ object ChatExporter {
         val chatName = db.displayName(chatId)
         val isGroup = isGroupId(chatId)
         val you = context.getString(R.string.you)
-        // one instance for the whole file; per-row construction is wasteful
         val time = SimpleDateFormat("dd/MM/yyyy, HH:mm", Locale.US)
         // use{} on the stream itself: wrapping it first and only then taking
         // ownership leaked the provider's fd if the writer chain's construction
@@ -34,8 +32,6 @@ object ChatExporter {
         }
     }
 
-    // One message in WhatsApp's own export format:
-    // "31/12/2025, 23:59 - Sender: body"
     private fun line(
         context: Context, m: MessageRow, time: SimpleDateFormat, you: String,
         chatName: String, isGroup: Boolean, names: Map<String, String>,
@@ -46,9 +42,6 @@ object ChatExporter {
             !isGroup -> chatName
             else -> senderLabel(names, m.senderId, m.senderName)
         }
-        // audio appends its duration and location its coordinates — passed to
-        // previewLabel as its `detail`, so the labels themselves stay owned in
-        // one place instead of being re-spelled here
         val detail = when (m.msgType) {
             "audio" -> m.text
             "location" -> m.coordinates()

@@ -14,12 +14,6 @@ import androidx.appcompat.app.AlertDialog
 import java.io.File
 import kotlin.math.min
 
-/**
- * The logged-in user's own profile. Shows the account avatar, name, About and
- * phone, and lets the user change the avatar, the profile name (the push name
- * everyone sees) and the "About" text — all live on the WhatsApp account, so
- * changes apply to all linked devices. Phone is fixed and shown read-only.
- */
 class ProfileActivity : BaseActivity() {
 
     private lateinit var avatar: ImageView
@@ -74,8 +68,6 @@ class ProfileActivity : BaseActivity() {
         loadAbout()
     }
 
-    // Renders "+<number>" from the phone-JID; a LID (no phone) shows nothing.
-    // Defers to phoneLabel (Jid.kt), the single owner of that rendering.
     private fun formatPhone(id: String): String =
         if (isPhoneId(id) && id.substringBefore('@').isNotEmpty()) phoneLabel(id) else ""
 
@@ -96,7 +88,6 @@ class ProfileActivity : BaseActivity() {
         }
     }
 
-    /** Single place that renders a decoded avatar bitmap into the header. */
     private fun showAvatar(bmp: Bitmap) {
         avatar.scaleType = ImageView.ScaleType.CENTER_CROP
         avatar.setImageBitmap(bmp)
@@ -118,7 +109,6 @@ class ProfileActivity : BaseActivity() {
             setSelection(text.length)
         }
         editDialog(R.string.profile_name, input) {
-            // a profile name can't be blank; ignore an empty submission
             val text = input.text.toString().trim()
             if (text.isNotEmpty() && text != name) applyName(text)
         }
@@ -150,7 +140,6 @@ class ProfileActivity : BaseActivity() {
         }
     }
 
-    // Shared edit dialog: the input padded inside a frame, OK/Cancel buttons.
     private fun editDialog(titleRes: Int, input: EditText, onOk: () -> Unit) {
         val pad = (24 * resources.displayMetrics.density).toInt()
         val container = android.widget.FrameLayout(this).apply {
@@ -179,9 +168,6 @@ class ProfileActivity : BaseActivity() {
         }
     }
 
-    // Crops the picked image to a centered square and downscales it to a
-    // WhatsApp-sized JPEG before handing it to the bridge (the server expects a
-    // square profile picture).
     private fun onPhotoPicked(uri: Uri) {
         io.execute {
             val file = prepareAvatar(uri)

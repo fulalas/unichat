@@ -20,7 +20,6 @@ import android.provider.ContactsContract
  */
 object PhoneBook {
 
-    /** A person as the address book has them. [id] is a search-result key, not a chat id. */
     class Entry(val name: String, val number: String) {
         val id: String get() = PREFIX + number
     }
@@ -29,20 +28,13 @@ object PhoneBook {
 
     fun isPhoneEntry(id: String) = id.startsWith(PREFIX)
 
-    /** The number inside a phone-entry id, in international form. */
     fun numberOf(id: String) = id.removePrefix(PREFIX)
 
     fun granted(ctx: Context) =
         ctx.checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
 
-    /**
-     * Address-book people matching [query] by name or number. Blocking (a
-     * content-provider query); worker threads only.
-     */
     fun search(ctx: Context, query: String, limit: Int = 20): List<Entry> {
         if (query.isBlank() || !granted(ctx)) return emptyList()
-        // CONTENT_FILTER_URI matches name and number together and is the indexed
-        // path the platform's own contact pickers use
         val uri = Uri.withAppendedPath(
             ContactsContract.CommonDataKinds.Phone.CONTENT_FILTER_URI, Uri.encode(query)
         )
@@ -77,12 +69,10 @@ object PhoneBook {
         if (digits.isEmpty()) return ""
         return when {
             raw.trimStart().startsWith("+") -> "+$digits"
-            // international prefix as dialled from many countries
             digits.startsWith("00") -> "+" + digits.removePrefix("00")
             else -> ""
         }
     }
 
-    /** Just the digits, for comparing against chat ids and stored contacts. */
     fun digitsOf(number: String) = number.filter { it.isDigit() }
 }

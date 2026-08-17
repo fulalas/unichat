@@ -1,8 +1,4 @@
 #!/bin/bash
-# Builds libtdjson.so (TDLib JSON interface) for Android from the vendored
-# source in tdjson/td. Artifacts land in app/src/main/jniLibs/<abi>/.
-# Downloads/intermediate builds are cached under tdjson/ext (gitignored);
-# re-runs skip everything already built. Usage: ./build-tdlib.sh [abi ...]
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 [ -f "$DIR/../toolchain/env.sh" ] && source "$DIR/../toolchain/env.sh"
@@ -45,7 +41,6 @@ if [ ! -f "$TD_SRC/CMakeLists.txt" ]; then
 fi
 mkdir -p "$EXT"
 
-# --- gperf (host tool required by TDLib's build) --------------------------
 if ! command -v gperf >/dev/null && [ ! -x "$EXT/hosttools/bin/gperf" ]; then
     echo "== Building gperf (host) =="
     cd "$EXT"
@@ -57,7 +52,6 @@ if ! command -v gperf >/dev/null && [ ! -x "$EXT/hosttools/bin/gperf" ]; then
 fi
 export PATH="$EXT/hosttools/bin:$PATH"
 
-# --- OpenSSL (static, per ABI) ---------------------------------------------
 OPENSSL_VER=3.3.2
 openssl_target() {
     case "$1" in
@@ -107,7 +101,6 @@ build_openssl() {
     rm -rf "openssl-build-$abi"
 }
 
-# --- TDLib host stage (source generation for cross builds) -----------------
 if [ ! -f "$EXT/build-host/.prepared" ]; then
     echo "== TDLib host stage (prepare_cross_compiling) =="
     cmake -S "$TD_SRC" -B "$EXT/build-host" -DCMAKE_BUILD_TYPE=Release >/dev/null
@@ -115,7 +108,6 @@ if [ ! -f "$EXT/build-host/.prepared" ]; then
     touch "$EXT/build-host/.prepared"
 fi
 
-# --- TDLib cross build per ABI ---------------------------------------------
 STRIP="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
 for abi in "${ABIS[@]}"; do
     build_openssl "$abi"
@@ -138,7 +130,6 @@ for abi in "${ABIS[@]}"; do
     echo "   -> $out/libtdjson.so ($(du -h "$out/libtdjson.so" | cut -f1))"
 done
 
-# --- JNI shim (libtdjni.so) --------------------------------------------------
 CLANG="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
 clang_target() {
     case "$1" in

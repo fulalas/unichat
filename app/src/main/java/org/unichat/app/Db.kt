@@ -14,12 +14,8 @@ data class ChatRow(
     val isGroup: Boolean,
     val lastFromMe: Boolean = false,
     val lastRead: Boolean = false,
-    // notifications suppressed for this chat; shown as a crossed-bell icon
     val muted: Boolean = false,
-    // "typing"/"recording" from Bridge.chatState, stamped in when the list is
-    // built so the DiffUtil-backed adapter rebinds the row when it changes
     val transientState: String = "",
-    // contact currently online; stamped in the same way, from Bridge.isOnline
     val online: Boolean = false,
 )
 
@@ -38,38 +34,20 @@ data class MessageRow(
     val edited: Boolean = false,
     val quotedId: String = "",
     val quotedText: String = "",
-    // msg_type of the quoted message ("" for text), so the quote preview can be
-    // labelled through previewLabel instead of a fixed English word
     val quotedType: String = "",
     val senderName: String = "",
     val played: Boolean = false,
     val forwarded: Boolean = false,
     val reactions: String = "", // comma-separated emojis, one per reacting user
-    // Coordinates of a "location" row. Their own fields because they are not a
-    // media reference: they used to ride in fileId as "lat,lng", so that field
-    // meant two unrelated things and every consumer had to know which.
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
 )
 
-/** "lat,lng" as maps apps and the exporter expect it, "" for a non-location. */
 fun MessageRow.coordinates(): String =
     if (msgType == "location") "%.6f,%.6f".format(java.util.Locale.US, latitude, longitude) else ""
 
-// Sender identity of a single stored message (see Db.messageSender).
 data class SenderInfo(val senderId: String, val fromMe: Boolean, val senderName: String)
 
-/**
- * Single source of truth for a message's short preview label — chat list,
- * notifications, quote previews and the exporter all derive from this mapping.
- * emoji=true prefixes the type icon (chat-list / notification style);
- * emoji=false gives the bare label used in quote previews.
- *
- * [detail] is the exporter's extra context (a voice note's duration, a
- * location's coordinates), appended so the exporter doesn't need its own
- * competing copy of the type→label mapping. The labels come from resources so
- * they stay in step with the ones the bubbles render.
- */
 fun previewLabel(
     ctx: Context, msgType: String, text: String, emoji: Boolean, detail: String = "",
 ): String {
@@ -92,9 +70,6 @@ fun previewLabel(
             if (detail.isEmpty()) base else "$base ($detail)"
         }
         "document" -> labeled("📎", R.string.document_label)
-        // Kinds with nothing to render but a label. Owned here (not spelled out
-        // in the Go bridge) so they are translatable like every other type
-        // label — they used to arrive as English prose in the message body.
         in LABEL_ONLY_TYPES -> {
             val (icon, labelRes) = LABEL_ONLY_TYPES.getValue(msgType)
             val label = ctx.getString(labelRes)
@@ -104,23 +79,8 @@ fun previewLabel(
     }
 }
 
-/**
- * Content kinds drawn as a picture in the bubble and openable in the fullscreen
- * viewer. A sticker is one, but it is NOT a photo: it keeps its intrinsic size
- * and carries no caption or timestamp overlay, which is why it has a kind of its
- * own instead of being an "image" identified by a prefix on its download token.
- */
 val PICTURE_TYPES = setOf("image", "sticker")
 
-/**
- * Message kinds this client can only put a name to: it cannot render, download,
- * forward or share them. Each maps to its icon and its localized label.
- *
- * View-once media is here because its keys never reach a companion device; the
- * rest are protocol features this client does not implement. They are stored
- * and shown as a labelled row rather than dropped, so a conversation has no
- * invisible holes in it.
- */
 val LABEL_ONLY_TYPES: Map<String, Pair<String, Int>> = mapOf(
     "viewonce" to ("🔒" to R.string.view_once_label),
     "contact" to ("👤" to R.string.contact_label),
@@ -132,12 +92,6 @@ val LABEL_ONLY_TYPES: Map<String, Pair<String, Int>> = mapOf(
     "call" to ("📞" to R.string.call_label),
 )
 
-/**
- * Chat-list line for a message that has been reacted to, or null when it has no
- * reactions. Who reacted is not recorded per reaction (Telegram does not even
- * report it), so it is inferred: a reaction on YOUR message came from the other
- * side, a reaction on theirs is yours.
- */
 fun reactionPreview(
     ctx: Context, reactions: String?, lastFromMe: Boolean,
     chatName: String, msgType: String, msgText: String,
@@ -153,13 +107,9 @@ fun reactionPreview(
 
 class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
 
-    // for previewLabel's string resources (chats() builds chat-list previews)
     private val ctx: Context = context.applicationContext
 
     init {
-        // bridge event handlers write from Go callback threads while activity
-        // io threads read chats()/messages(); WAL lets those readers proceed
-        // instead of serializing behind history-sync write bursts
         setWriteAheadLoggingEnabled(true)
     }
 
@@ -207,8 +157,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
             "CREATE INDEX IF NOT EXISTS idx_msg_id ON messages(id)"
     }
 
-    /** Runs [body] as one transaction, so a multi-statement write can't be
-     *  interrupted half-way and leave rows only some of the statements removed. */
     private inline fun SQLiteDatabase.transact(body: SQLiteDatabase.() -> Unit) {
         beginTransaction()
         try {
@@ -246,7 +194,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
                 "sender_name TEXT NOT NULL DEFAULT ''," +
                 "played INTEGER NOT NULL DEFAULT 0," +
                 "forwarded INTEGER NOT NULL DEFAULT 0," +
-                // only meaningful for msg_type 'location'
                 "latitude REAL NOT NULL DEFAULT 0, longitude REAL NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(chat_id, id))"
         )
@@ -296,19 +243,13 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
             db.execSQL("ALTER TABLE messages ADD COLUMN played INTEGER NOT NULL DEFAULT 0")
         }
         if (oldVersion < 7) {
-            // one-time backlog cleanup: played receipts from before this feature
-            // existed are gone, so clear the stale dot on sent voice notes the
-            // recipient has already read (best available signal they engaged)
             db.execSQL("UPDATE messages SET played=1 WHERE from_me=1 AND msg_type='audio' AND is_read=1")
         }
         if (oldVersion < 8) {
-            // Status/Stories are disabled: purge anything already stored
             db.execSQL("DELETE FROM messages WHERE chat_id='status@broadcast'")
             db.execSQL("DELETE FROM chats WHERE id='status@broadcast'")
         }
         if (oldVersion < 9) {
-            // distinguishes address-book contacts from push-name-only chat
-            // partners; repopulated by the contact sync on the next connect
             db.execSQL("ALTER TABLE contacts ADD COLUMN is_saved INTEGER NOT NULL DEFAULT 0")
         }
         if (oldVersion < 10) {
@@ -340,9 +281,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
             db.execSQL(CREATE_TIME_INDEX)
         }
         if (oldVersion < 16) {
-            // quoted_type lets the quote preview be labelled through
-            // previewLabel; backfilled by whatever re-syncs, blank until then
-            // (the preview then falls back to the generic "Message" label)
             db.execSQL("ALTER TABLE messages ADD COLUMN quoted_type TEXT NOT NULL DEFAULT ''")
             db.execSQL(CREATE_ID_INDEX)
         }
@@ -350,9 +288,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
             db.execSQL(CREATE_DELETED_CHATS)
         }
         if (oldVersion < 22) {
-            // Location coordinates moved out of file_id, which was carrying
-            // either a media reference or a "lat,lng" pair depending on the
-            // message type, into columns of their own.
             db.execSQL("ALTER TABLE messages ADD COLUMN latitude REAL NOT NULL DEFAULT 0")
             db.execSQL("ALTER TABLE messages ADD COLUMN longitude REAL NOT NULL DEFAULT 0")
             db.execSQL(
@@ -364,12 +299,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
             )
         }
         if (oldVersion < 21) {
-            // Stickers became a content kind of their own instead of an "image"
-            // recognised by sniffing the "stk:" prefix off the download token.
-            // WhatsApp rows carry that prefix and can be re-typed; Telegram ones
-            // were stored with a bare numeric file id and are indistinguishable
-            // from photos in hindsight, so old Telegram stickers keep rendering
-            // as images until they are re-fetched.
             db.execSQL("UPDATE messages SET msg_type='sticker' WHERE msg_type='image' AND file_id LIKE 'stk:%'")
         }
         if (oldVersion < 20) {
@@ -387,14 +316,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
             db.execSQL(CREATE_PLACEHOLDER_INDEX)
         }
         if (oldVersion < 17) {
-            // last reaction in a chat, rendered as the chat-list preview when it
-            // is newer than the newest message (see chats())
             db.execSQL("ALTER TABLE chats ADD COLUMN react_text TEXT NOT NULL DEFAULT ''")
             db.execSQL("ALTER TABLE chats ADD COLUMN react_time INTEGER NOT NULL DEFAULT 0")
         }
     }
-
-    // --- cursor plumbing ------------------------------------------------------
 
     private fun <T> queryList(sql: String, args: Array<String>?, map: (Cursor) -> T): List<T> {
         val rows = ArrayList<T>()
@@ -468,8 +393,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         if (!chatExists(db, fromId)) return false
         db.beginTransaction()
         try {
-            // ensure the target exists (covers the pure-rename case where every
-            // message of the contact had arrived under the LID)
             db.execSQL("INSERT OR IGNORE INTO chats(id) VALUES(?)", arrayOf(toId))
             // move messages/reactions; OR IGNORE skips any row that already
             // exists under the target's key, then the leftovers are dropped
@@ -477,7 +400,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
             db.execSQL("DELETE FROM messages WHERE chat_id=?", arrayOf(fromId))
             db.execSQL("UPDATE OR IGNORE reactions SET chat_id=? WHERE chat_id=?", arrayOf(toId, fromId))
             db.execSQL("DELETE FROM reactions WHERE chat_id=?", arrayOf(fromId))
-            // fold metadata: latest activity time; stay muted/archived if either was
             db.execSQL(
                 "UPDATE chats SET " +
                     "last_time=max(last_time,(SELECT last_time FROM chats WHERE id=?))," +
@@ -499,7 +421,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         }
     }
 
-    /** Chats keyed by a contact's LID (id ends in "@lid") — candidates for merging. */
     fun lidChats(): List<String> =
         queryList("SELECT id FROM chats WHERE id LIKE '%@lid'", null) { it.getString(0) }
 
@@ -550,8 +471,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         )
     }
 
-    // Who wrote one stored message — used to label a quote preview with the
-    // quoted message's sender. Null when it isn't stored (never synced).
     fun messageSender(chatId: String, msgId: String): SenderInfo? = queryFirst(
         "SELECT sender_id, from_me, sender_name FROM messages WHERE chat_id=? AND id=?",
         arrayOf(chatId, msgId)
@@ -565,15 +484,11 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         execSQL("DELETE FROM reactions WHERE chat_id=? AND msg_id=?", arrayOf(chatId, msgId))
     }
 
-    // Downloaded media file paths of a chat, for deleting the files off disk
-    // when the chat itself is deleted.
     fun chatMediaPaths(chatId: String): List<String> = queryList(
         "SELECT file_path FROM messages WHERE chat_id=? AND file_path!=''",
         arrayOf(chatId)
     ) { it.getString(0) }
 
-    // Removes a chat entirely from local storage: its messages, their reactions
-    // and the chat row. Purely local — the chat is untouched on WhatsApp.
     fun deleteChat(chatId: String) {
         val now = System.currentTimeMillis() / 1000
         writableDatabase.transact {
@@ -608,12 +523,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         "SELECT muted FROM chats WHERE id=?", arrayOf(chatId)
     ) { it.getInt(0) != 0 } ?: false
 
-    // Every chat's id and current mute flag, archived included — the reconcile
-    // pass needs the full set, not just the visible (non-archived) list.
     fun mutedFlags(): Map<String, Boolean> =
         queryList("SELECT id, muted FROM chats", null) { it.getString(0) to (it.getInt(1) != 0) }.toMap()
 
-    // Each user has at most one reaction per message; a new one replaces it.
     fun upsertReaction(chatId: String, msgId: String, senderId: String, emoji: String) {
         writableDatabase.execSQL(
             "INSERT INTO reactions(chat_id, msg_id, sender_id, emoji) VALUES(?,?,?,?) " +
@@ -634,25 +546,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         arrayOf(chatId, msgId)
     ) { Pair(it.getString(0), it.getInt(1)) } ?: Pair("", 0)
 
-    /**
-     * Voice notes in a chat still marked unplayed, newest first. Used to
-     * re-check their state against the server: the flag only ever arrives with
-     * the message, so rows stored before it was known keep a stale dot that
-     * paging can never correct — paging only ever fetches OLDER messages.
-     */
     fun unplayedAudioIds(chatId: String, limit: Int): List<String> = queryList(
         "SELECT id FROM messages WHERE chat_id=? AND msg_type='audio' AND played=0 " +
             "ORDER BY time_sent DESC LIMIT ?",
         arrayOf(chatId, limit.toString())
     ) { it.getString(0) }
 
-    /**
-     * Messages stored as a bare "[SomeType]" placeholder — a content type this
-     * app did not understand when it first saw them. They cannot be corrected in
-     * place: upsertMessage never overwrites msg_type, and its text guard keeps
-     * the old value when the fresh one is empty (a caption-less video note).
-     * The caller re-fetches these and re-stores them from scratch.
-     */
     fun placeholderMessageIds(chatId: String, limit: Int): List<String> = queryList(
         "SELECT id FROM messages WHERE chat_id=? AND msg_type='' AND file_id='' " +
             "AND text LIKE '[%]' ORDER BY time_sent DESC LIMIT ?",
@@ -694,11 +593,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         }
     }
 
-    /**
-     * Telegram read markers: message ids are monotonically increasing int64s,
-     * so "everything up to X" is a numeric comparison. incoming=true marks
-     * received messages read (inbox), false marks our sent ones (outbox/ticks).
-     */
     fun markReadUpTo(chatId: String, upToId: Long, incoming: Boolean) {
         writableDatabase.execSQL(
             "UPDATE messages SET is_read=1 WHERE chat_id=? AND from_me=? AND is_read=0 " +
@@ -707,7 +601,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         )
     }
 
-    /** Drops all reactions of one message (Telegram resends the complete set). */
     fun clearReactions(chatId: String, msgId: String) {
         writableDatabase.execSQL(
             "DELETE FROM reactions WHERE chat_id=? AND msg_id=?", arrayOf(chatId, msgId)
@@ -723,12 +616,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         writableDatabase.execSQL("UPDATE messages SET file_status=0 WHERE file_status=1")
     }
 
-    /**
-     * Wipes one account's rows on logout, leaving the other account's mirror
-     * intact. Both directions delete the same five tables and differ only in
-     * which side of the `tg:` prefix they keep, so they share one body: a table
-     * added to one wipe and forgotten in the other would leak rows for good.
-     */
     private fun clearProtocolData(match: String) = writableDatabase.transact {
         execSQL("DELETE FROM messages WHERE chat_id $match 'tg:%'")
         execSQL("DELETE FROM reactions WHERE chat_id $match 'tg:%'")
@@ -737,7 +624,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         execSQL("DELETE FROM deleted_chats WHERE id $match 'tg:%'")
     }
 
-    /** Wipes every WhatsApp-side row (after a WhatsApp logout). */
     fun clearWaData() = clearProtocolData("NOT LIKE")
 
     /** Renames a chat without touching its other columns. upsertChat writes
@@ -751,7 +637,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         )
     }
 
-    /** Wipes every Telegram-side row (after a Telegram logout). */
     fun clearTgData() = clearProtocolData("LIKE")
 
     /**
@@ -773,20 +658,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
     }
 
     fun markChatRead(chatId: String) {
-        // is_read=0 filter: identical result, but only the actually-unread rows
-        // are written (this runs per incoming message while a chat is open)
         writableDatabase.execSQL(
             "UPDATE messages SET is_read=1 WHERE chat_id=? AND from_me=0 AND is_read=0",
             arrayOf(chatId)
         )
     }
 
-    /**
-     * The one message of [chatId] picked by [where] + [order] — the shared shape
-     * behind [latestUnread], [oldestMessage] and [newestMessage], which used to
-     * spell out the same six columns and the same row mapper three times, so a
-     * column added to one of them silently skipped the other two.
-     */
     private fun oneMessage(chatId: String, where: String, order: String): MessageRow? = queryFirst(
         "SELECT id, sender_id, text, from_me, time_sent, is_read FROM messages " +
             "WHERE chat_id=? AND $where ORDER BY $order LIMIT 1",
@@ -799,7 +676,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         )
     }
 
-    // Latest unread incoming message, used for sending a read receipt.
     fun latestUnread(chatId: String): MessageRow? =
         oneMessage(chatId, "from_me=0 AND is_read=0", "time_sent DESC")
 
@@ -814,16 +690,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         // which orders by (time_sent, rowid). This shares that tiebreaker.
         "SELECT c.id," +
             "COALESCE(NULLIF(c.name,''), NULLIF(ct.name,''), c.id) AS display_name," +
-            // raw type+text of the newest message; the display label is derived
-            // in Kotlin via previewLabel, the single owner of that mapping
             "COALESCE(lm.msg_type,'') AS last_type," +
             "COALESCE(lm.text,'') AS last_text," +
-            // Reactions ON the newest message. A reaction can only follow the
-            // message it is attached to, so when the newest message carries one
-            // it IS the chat's latest activity and is previewed instead of the
-            // message (as WhatsApp does). Derived from stored rows rather than
-            // from live events, so it is right for reactions that arrived
-            // before this run — reactions carry no timestamp of their own.
             "(SELECT GROUP_CONCAT(emoji) FROM reactions r " +
             "WHERE r.chat_id=c.id AND r.msg_id=lm.id) AS last_reactions," +
             "c.last_time," +
@@ -844,8 +712,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
     ) {
         ChatRow(
             id = it.getString(0), name = it.getString(1),
-            // a voice note stores its "m:ss" length in text, shown in
-            // parentheses after the label — same detail the exporter passes
             lastText = reactionPreview(
                 ctx, it.getString(4), it.getInt(8) != 0,
                 it.getString(1), it.getString(2), it.getString(3),
@@ -854,7 +720,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
                 detail = if (it.getString(2) == "audio") it.getString(3) else "",
             ),
             lastTime = it.getLong(5), unread = it.getInt(6), isGroup = it.getInt(7) != 0,
-            // a reaction is nobody's "sent" message, so it carries no tick
             lastFromMe = it.getInt(8) != 0 && it.getString(4).isNullOrEmpty(),
             lastRead = it.getInt(9) != 0,
             muted = it.getInt(10) != 0
@@ -873,9 +738,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         }
     }
 
-    // The full bubble-rendering shape, shared by the window query and the
-    // single-row refresh so the two can't drift apart. `src` is whatever the
-    // caller selects from (a windowed subquery, or the table itself).
     private fun messageColumns(src: String) =
         "SELECT id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, " +
             "file_status, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
@@ -897,13 +759,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         reactions = it.getString(19) ?: ""
     )
 
-    /**
-     * Re-reads specific messages of a chat. The open chat uses this when an
-     * event names the rows it touched (a read receipt, a reaction, a finished
-     * download) instead of re-querying its whole loaded window — which is up to
-     * 5000 rows, each with a correlated reactions subquery, and used to run
-     * several times a second during a burst of receipts.
-     */
     fun messagesByIds(chatId: String, ids: Collection<String>): List<MessageRow> {
         if (ids.isEmpty()) return emptyList()
         val holes = ids.joinToString(",") { "?" }
@@ -925,13 +780,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         arrayOf(chatId, limit.toString())
     ) { fullMessage(chatId, it) }
 
-    /**
-     * Every image in a chat, oldest first — the album the fullscreen viewer
-     * pages through. Ordered like the message list (rowid breaks a same-second
-     * tie) so swiping matches the order the bubbles appear in.
-     */
-    // Stickers are in the album too — they are pictures, just not photos — so
-    // the type is read back rather than assumed.
     fun chatImages(chatId: String): List<MessageRow> = queryList(
         "SELECT id, sender_id, from_me, time_sent, file_id, file_path, file_status, msg_type " +
             "FROM messages WHERE chat_id=? AND msg_type IN ('image','sticker') " +
@@ -946,7 +794,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         )
     }
 
-    // Search individual contacts (not just chats) by name or phone.
     fun searchContacts(query: String, limit: Int = 60): List<ChatRow> {
         // '%' and '_' typed in the search box are literal characters to the
         // user, not wildcards — unescaped, a single "_" matched every contact
@@ -971,8 +818,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         }
     }
 
-    // First voice message after the given one, regardless of how many messages
-    // are loaded in the UI. Used to chain voice-note playback.
     fun nextAudioMessage(chatId: String, afterMsgId: String): MessageRow? {
         val after = queryFirst(
             "SELECT time_sent, rowid FROM messages WHERE chat_id=? AND id=?",
@@ -1006,7 +851,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
     fun oldestMessage(chatId: String): MessageRow? =
         oneMessage(chatId, "time_sent>0", "time_sent ASC")
 
-    /** Newest stored message of a chat — where a full history walk starts. */
     fun newestMessage(chatId: String): MessageRow? =
         oneMessage(chatId, "time_sent>0", "time_sent DESC, rowid DESC")
 
@@ -1029,17 +873,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         arrayOf(msgId)
     ) { it.getString(0) }
 
-    /** Whether a message is stored locally (jump-to-quote seek target check). */
     fun hasMessage(chatId: String, msgId: String): Boolean = queryFirst(
         "SELECT 1 FROM messages WHERE chat_id=? AND id=? LIMIT 1", arrayOf(chatId, msgId)
     ) { true } ?: false
 
-    /**
-     * 1-based position of a message counted from the newest end, matching the
-     * (time_sent DESC, rowid DESC) window order of [messages] — i.e. the
-     * smallest `limit` that would include it. 0 when the message isn't stored
-     * locally (never synced). Used by jump-to-quote to size the load window.
-     */
     fun messageDepth(chatId: String, msgId: String): Int {
         val at = queryFirst(
             "SELECT time_sent, rowid FROM messages WHERE chat_id=? AND id=? LIMIT 1",
@@ -1068,8 +905,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
     fun contactNames(): Map<String, String> =
         queryList("SELECT id, name FROM contacts", null) { it.getString(0) to it.getString(1) }.toMap()
 
-    /** Stored contact name for a single id, or null if unknown. Indexed lookup —
-     *  cheap enough for a one-off resolve without scanning the whole table. */
     fun contactName(id: String): String? = queryFirst(
         "SELECT name FROM contacts WHERE id=?", arrayOf(id)
     ) { if (it.isNull(0)) null else it.getString(0) }

@@ -7,29 +7,11 @@ import android.text.SpannableStringBuilder
 import android.text.style.ImageSpan
 import androidx.core.content.ContextCompat
 
-/**
- * Builds a timestamp string with a compact WhatsApp-style delivery tick for
- * outgoing messages: a single grey check when sent, an accent double-check
- * when read. Rendered as an inline image so the two checks overlap tightly.
- */
 object Ticks {
 
-    // The tick drawable is identical for every outgoing row at a given
-    // (read, size, tint), so decode/tint/size it once and share it across rows
-    // instead of rebuilding it on each bind. Keyed by tint too, so a day/night
-    // theme switch (different colours) simply produces new cache entries.
-    //
-    // Invariant: a cached instance is fully configured before it is stored and
-    // is treated as immutable thereafter — every distinct (read, size, tint)
-    // gets its own entry, so callers MUST NOT mutate a returned drawable's
-    // bounds or tint (that would change every row sharing the instance).
     private val cache = HashMap<Long, Drawable>()
 
     private fun tick(context: Context, read: Boolean, h: Int, readTint: Int?): Drawable? {
-        // A read tick takes the protocol's colour — green for WhatsApp, blue for
-        // Telegram. Inside a chat the theme overlay already resolves that, so
-        // ?attr/chatAccent is right there; the chat list mixes both protocols in
-        // one themed context, so it passes the colour per row instead.
         val tint = if (read) readTint ?: context.themeColor(R.attr.chatAccent)
         else context.getColor(R.color.text_secondary)
         // pack tint (32b) | h (15b) | read (1b) into a Long with no overlap

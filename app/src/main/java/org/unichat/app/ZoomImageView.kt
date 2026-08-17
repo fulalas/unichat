@@ -9,11 +9,6 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.widget.ImageView
 
-/**
- * Fullscreen image view with pinch zoom, drag pan and double-tap zoom.
- * Single taps are reported via [onSingleTap] (the gesture detector consumes
- * all touches, so a regular OnClickListener would never fire).
- */
 class ZoomImageView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null,
 ) : ImageView(context, attrs) {
@@ -30,11 +25,7 @@ class ZoomImageView @JvmOverloads constructor(
     private var tx = 0f
     private var ty = 0f
     private var anim: Runnable? = null
-    // width the image currently occupies, kept from the last apply() so the
-    // pager can ask whether this view still has somewhere to pan
     private var contentWidth = 0f
-    // reused across apply() calls: it runs per pan MotionEvent and per frame of
-    // the double-tap zoom, and ImageView.setImageMatrix copies what it is given
     private val matrix = Matrix()
 
     init {
@@ -127,7 +118,6 @@ class ZoomImageView @JvmOverloads constructor(
         apply()
     }
 
-    /** Changes the zoom level keeping the (fx, fy) screen point fixed. */
     private fun applyZoom(newZoom: Float, fx: Float, fy: Float) {
         val ratio = newZoom / zoom
         tx = fx - (fx - tx) * ratio
@@ -162,7 +152,6 @@ class ZoomImageView @JvmOverloads constructor(
      */
     override fun canScrollHorizontally(direction: Int): Boolean = zoom > 1f
 
-    /** Back to fit-to-screen, for a recycled page bound to another image. */
     fun reset() {
         anim = null
         zoom = 1f
@@ -171,9 +160,6 @@ class ZoomImageView @JvmOverloads constructor(
         apply()
     }
 
-    // Rebuilds the image matrix from zoom/tx/ty, clamping the translation so
-    // the image stays centered while smaller than the view and never leaves
-    // gaps at the edges once zoomed in.
     private fun apply() {
         val d = drawable ?: return
         val vw = width.toFloat()

@@ -5,8 +5,6 @@
     android:orientation="horizontal"
     android:gravity="center_vertical">
 
-    <!-- reachable to screen readers on purpose: ChatActivity gives the avatar
-         its own click action (open the full-size photo) -->
     <ImageView
         android:id="@+id/toolbarAvatar"
         android:layout_width="38dp"

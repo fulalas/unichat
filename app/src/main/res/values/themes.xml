@@ -16,15 +16,12 @@
         <item name="android:textColorSecondary">@color/text_secondary</item>
         <item name="android:windowLightStatusBar">@bool/light_status_bar</item>
         <item name="android:windowLightNavigationBar">@bool/light_status_bar</item>
-        <!-- per-protocol chat colors: blue (Telegram) is the default -->
         <item name="chatAccent">@color/accent</item>
         <item name="chatBubbleOut">@color/bubble_out</item>
         <item name="chatQuoteFlash">@color/quote_flash</item>
         <item name="chatMsgSelected">@color/msg_selected</item>
     </style>
 
-    <!-- Applied by ChatActivity on top of the base theme for WhatsApp chats:
-         swaps the chat colors (and widget accent) to the WhatsApp green set. -->
     <style name="ThemeOverlay.UniChat.Wa" parent="">
         <item name="colorAccent">@color/accent_wa</item>
         <item name="chatAccent">@color/accent_wa</item>

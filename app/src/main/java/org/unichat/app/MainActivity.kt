@@ -19,7 +19,6 @@ import androidx.recyclerview.widget.RecyclerView
 class MainActivity : BaseActivity(), Bridge.UiListener {
 
     private companion object {
-        // menu item ids (were bare 1..7 literals in two lists 40 lines apart)
         private const val M_LOGOUT = 1
         private const val M_SEARCH = 2
         private const val M_THEME = 3
@@ -62,7 +61,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 if (!PhoneBook.isPhoneEntry(chat.id)) Bridge.openAvatar(this, chat.id)
             },
             onLongClick = { chat ->
-                // mute/delete/etc. need a chat; there isn't one yet
                 if (!PhoneBook.isPhoneEntry(chat.id)) showChatOptions(chat)
             },
         )
@@ -81,9 +79,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         WmService.start(this)
         Bridge.connect()
 
-        // stay registered while a chat is open on top: the list keeps updating
-        // in the background (read messages, typing state), so returning to it
-        // never flashes stale unread badges or "typing…" lines
         Bridge.addListener(this)
     }
 
@@ -91,15 +86,11 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         super.onStart()
         started = true
         if (!Bridge.hasAnySession()) {
-            // covers a logout that happened while we were in the background
-            // (redirecting from there would be blocked by Android anyway)
             startActivity(Intent(this, LoginActivity::class.java))
             finish()
             return
         }
         updateSubtitle()
-        // returning from LoginActivity may have linked the second protocol;
-        // drop the "Link account" entry then
         refreshAccountMenu()
         reload()
         refreshDayIfChanged()
@@ -110,8 +101,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         super.onStop()
         started = false
         chatList.removeCallbacks(midnightRefresh)
-        // the throttle's pending reload is posted on this view; drop it with the
-        // rest of the screen's callbacks so it can't fire after we're gone
         chatList.removeCallbacks(bgReloadRelease)
         bgReloadCooldown = false
         bgReloadPending = false
@@ -158,10 +147,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     // SearchView) is rebuilt often, and re-asking on every search would nag
     private var contactsAsked = false
     private var started = false
-    // throttle for reloads while backgrounded: bursts (history sync, busy
-    // groups) collapse to one full chat-list query per second instead of one
-    // per debounced event, while single events still refresh immediately so
-    // returning to this screen never shows stale data
     private var bgReloadCooldown = false
     private var bgReloadPending = false
 
@@ -201,25 +186,13 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // Stamps the transient typing/recording state into the rows so the
-    // adapter's diff picks up state changes (they arrive as chat-list change
-    // events, so the list is rebuilt when a state starts or clears). Rows are
-    // only copied when their state actually differs — the map is almost
-    // always empty, and identical rows keep the diff a no-op.
     private fun withChatStates(chats: List<ChatRow>): List<ChatRow> = chats.map {
         val state = Bridge.chatState(it.id) ?: ""
-        // presence rides along with the typing state: both are live values the
-        // DB knows nothing about, and both must reach the differ as row data or
-        // the row never rebinds when they change
         val online = !it.isGroup && Bridge.isOnline(it.id)
         if (state == it.transientState && online == it.online) it
         else it.copy(transientState = state, online = online)
     }
 
-    // Submits the list and, if it was scrolled to the very top, keeps it pinned
-    // there once the diff commits — so a chat that a new message reorders to the
-    // top stays visible instead of landing just above the viewport (mirrors the
-    // chat screen's stay-at-bottom rule).
     private fun submitChats(chats: List<ChatRow>) {
         val atTop = !chatList.canScrollVertically(-1)
         adapter.submit(withChatStates(chats)) {
@@ -234,7 +207,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         startActivity(intent)
     }
 
-    /** Opens a chat with an address-book number, once WhatsApp confirms it. */
     private fun openPhoneEntry(chat: ChatRow) {
         val number = PhoneBook.numberOf(chat.id)
         Toast.makeText(this, R.string.checking_number, Toast.LENGTH_SHORT).show()
@@ -265,14 +237,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             emptyText.visibility = if (allChats.isEmpty()) View.VISIBLE else View.GONE
             return
         }
-        // search both existing chats and the full contact list. Chats are
-        // matched on their already-resolved display name, so someone you've
-        // talked to but never saved as a contact (known only by push name)
-        // still turns up — searchContacts alone would miss them.
         val q = query
         io.execute {
             val contacts = Bridge.db.searchContacts(q)
-            // people this phone knows but WhatsApp has not synced to us yet
             val fromPhone = PhoneBook.search(this, q)
             runOnUiThread {
                 if (query != q) return@runOnUiThread // a newer query superseded this one
@@ -320,8 +287,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // Folds the linked protocols' states into one line: connected only when
-    // every linked account is, connecting while any still is.
     private fun updateSubtitle() {
         val states = buildList {
             if (Bridge.hasSession()) add(Bridge.state)
@@ -355,13 +320,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         submitChats(allChats)
     }
 
-    /**
-     * Someone started or stopped typing. Same treatment as presence, and for the
-     * same reason: the typing state lives in Bridge, not in the database, so the
-     * rows already in memory just need re-stamping. This used to arrive as a
-     * chats-changed event, which re-ran the whole chat-list query on every actor
-     * start, stop and 15-second expiry.
-     */
     override fun onChatState(chatId: String, state: String) {
         if (!started || query.isNotEmpty()) return
         // A chat nobody has loaded yet (its first message is arriving with the
@@ -374,8 +332,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         submitChats(allChats)
     }
 
-    // a Telegram logout finished: leave for the login screen if nothing is left,
-    // else offer to link it again
     override fun onTgAuth(state: String, message: String) {
         if (state != "wait_phone" || !started) return
         if (!Bridge.hasAnySession()) {
@@ -406,13 +362,10 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 finish()
                 return
             }
-            // the unlink has landed now, so the menu can offer to link it again
             refreshAccountMenu()
         }
     }
 
-    // how many accounts were linked when the menu was last built — the only
-    // thing about it that can change while this screen lives
     private var menuLinkedAccounts = -1
 
     // Rebuilding the menu also replaces the SearchView with a fresh, empty one
@@ -453,8 +406,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         })
         val searchView = SearchView(this)
         searchView.queryHint = getString(R.string.search)
-        // asked for here rather than at startup: this is the one moment it is
-        // obvious what it is for, and search works without it
         searchView.setOnSearchClickListener {
             if (!PhoneBook.granted(this) && !contactsAsked) {
                 contactsAsked = true
@@ -476,7 +427,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         menu.add(0, M_THEME, 3, R.string.theme)
         menu.add(0, M_FONT, 4, R.string.font_size)
         menu.add(0, M_ABOUT, 5, R.string.about)
-        // offered while a protocol is still unlinked
         menuLinkedAccounts = ProtoPicker.linked().size
         if (menuLinkedAccounts < 2) menu.add(0, M_ADD_ACCOUNT, 6, R.string.link_account)
         menu.add(0, M_LOGOUT, 7, R.string.logout)
@@ -486,7 +436,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
             M_LOGOUT -> {
-                // account-scoped: pick which protocol to unlink when both are
                 ProtoPicker.pick(this) { proto ->
                     AlertDialog.Builder(this)
                         .setTitle(getString(R.string.logout_account, ProtoPicker.label(this, proto)))
@@ -523,7 +472,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 return true
             }
             M_ADD_ACCOUNT -> {
-                // don't finish(): coming back keeps the chat list underneath
                 startActivity(Intent(this, LoginActivity::class.java))
                 return true
             }
@@ -531,8 +479,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         return super.onOptionsItemSelected(item)
     }
 
-    // Long-press on a chat: a small menu of per-chat actions. Mute toggles the
-    // local notification suppression; Delete opens the confirm dialog below.
     private fun showChatOptions(chat: ChatRow) {
         val muteLabel = getString(if (chat.muted) R.string.unmute_chat else R.string.mute_chat)
         val items = arrayOf(muteLabel, getString(R.string.delete_chat))
@@ -547,8 +493,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             .show()
     }
 
-    // Confirm before deleting a chat locally. The checkbox (checked by default)
-    // also removes the chat's downloaded media from disk.
     private fun showDeleteChatDialog(chat: ChatRow) {
         val deleteMedia = booleanArrayOf(true)
         AlertDialog.Builder(this)
@@ -609,7 +553,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         val view = layoutInflater.inflate(R.layout.dialog_font_size, null)
         val seek = view.findViewById<android.widget.SeekBar>(R.id.fontSeek)
         val preview = view.findViewById<android.widget.TextView>(R.id.fontPreview)
-        // 9 steps from FONT_MIN..FONT_MAX in 0.1 increments
         fun scaleFor(progress: Int) = Prefs.FONT_MIN + progress * 0.1f
         fun progressFor(scale: Float) = Math.round((scale - Prefs.FONT_MIN) / 0.1f)
         val baseSp = 17f

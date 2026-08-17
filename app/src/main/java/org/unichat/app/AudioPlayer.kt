@@ -8,15 +8,6 @@ import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.os.PowerManager
 
-/**
- * Plays one voice message at a time, independent of any activity: playback
- * survives screen lock and chaining to the next voice message is driven by
- * Bridge, not the chat screen.
- *
- * Supports two output routes: the loudspeaker (default) and the earpiece
- * (for privacy when the phone is held to the ear). Route changes recreate the
- * player, which is what makes the "rewind 1s on ear" transition possible.
- */
 object AudioPlayer {
     private var appContext: Context? = null
     private var audioManager: AudioManager? = null
@@ -36,26 +27,16 @@ object AudioPlayer {
     var earpiece: Boolean = false
         private set
 
-    // Playback speed, cycled by the UI: 1x → 1.5x → 2x → 1x. Applied to the
-    // current clip live and to every clip that follows (it is global, like
-    // WhatsApp's speed toggle).
     @Volatile var speed: Float = 1f
         private set
 
-    // Live proximity state, updated by the service's sensor listener. Manual
-    // play/resume route by this so the earpiece is used only when the phone is
-    // actually at the ear right now (not because a previous clip was).
     var proximityNear: Boolean = false
 
-    // True after a paused message was reset to the start: the user is done
-    // with it, so the proximity sensor must not act on it anymore. Starting
-    // or resuming playback re-arms the session.
     @Volatile var proximitySessionEnded: Boolean = false
         private set
 
     var onStateChanged: (() -> Unit)? = null        // chat screen UI
     var onServiceStateChanged: (() -> Unit)? = null  // service (notification + proximity)
-    // (path, chatId, msgId)
     var onCompleted: ((String, String, String) -> Unit)? = null
     var onPlayStarted: ((String, String, String) -> Unit)? = null
 
@@ -69,7 +50,6 @@ object AudioPlayer {
     val positionMs: Int get() = try { player?.currentPosition ?: 0 } catch (e: Exception) { 0 }
     val durationMs: Int get() = try { player?.duration ?: 0 } catch (e: Exception) { 0 }
 
-    /** Play a new file, or toggle pause/resume when already on this file. */
     fun playPause(path: String, chatId: String, msgId: String) {
         val p = player
         if (p != null && currentMsgId == msgId && currentChatId == chatId) {
@@ -127,7 +107,6 @@ object AudioPlayer {
                 val finishedPath = currentPath
                 val finishedChat = currentChatId
                 val finishedMsg = currentMsgId
-                // keep route for a possible immediate chain to the next voice
                 stopInternal(resetRoute = false)
                 notifyState()
                 if (finishedPath != null) onCompleted?.invoke(finishedPath, finishedChat, finishedMsg)
@@ -145,7 +124,6 @@ object AudioPlayer {
             proximitySessionEnded = false
             try { onPlayStarted?.invoke(path, chatId, msgId) } catch (e: Exception) {}
         } catch (e: Exception) {
-            // e.g. the file was deleted or truncated: setDataSource/prepare throw
             android.util.Log.w("AudioPlayer", "play failed for $path", e)
             try { fresh?.release() } catch (e2: Exception) {}
             stopInternal(resetRoute = true)
@@ -155,7 +133,6 @@ object AudioPlayer {
         notifyState()
     }
 
-    /** Advances the playback speed (1x → 1.5x → 2x → 1x); returns the new speed. */
     fun cycleSpeed(): Float {
         speed = when (speed) {
             1f -> 1.5f
@@ -182,9 +159,6 @@ object AudioPlayer {
 
     fun seekTo(ms: Int) {
         try { player?.seekTo(ms) } catch (e: Exception) {}
-        // dragging a PAUSED message back to the start means "done with it":
-        // its proximity session ends (a playing message dragged to the start
-        // is just a replay and stays eligible)
         if (ms == 0 && player != null && !isPlaying && !proximitySessionEnded) {
             proximitySessionEnded = true
             notifyState()
@@ -211,8 +185,6 @@ object AudioPlayer {
         val p = player ?: return
         if (p.isPlaying) return
         proximitySessionEnded = false
-        // route by the phone's current position, recreating on the right output
-        // if it no longer matches (e.g. paused at ear, resumed with phone away)
         if (earpiece != proximityNear) {
             val path = currentPath ?: return
             play(path, currentChatId, currentMsgId, p.currentPosition)
@@ -221,15 +193,11 @@ object AudioPlayer {
             // the audio) is what paused this clip in the first place
             requestFocus(earpiece && ownsAudioMode)
             p.start()
-            // pick up a speed the user chose while this clip was paused
             applySpeed(p)
             notifyState()
         }
     }
 
-    // --- proximity-driven transitions --------------------------------------
-
-    /** Bring-to-ear while playing: switch to earpiece and rewind. */
     fun switchToEarpiece(rewindMs: Int) {
         val p = player ?: return
         val path = currentPath ?: return
@@ -249,7 +217,6 @@ object AudioPlayer {
     // starting one on the media route did the same before it even played.
     private var ownsAudioMode = false
 
-    /** Called by the chain logic when no further voice message follows. */
     fun resetRoute() {
         earpiece = false
         releaseAudioMode()
@@ -266,8 +233,6 @@ object AudioPlayer {
      */
     val volumeStream: Int
         get() = if (ownsAudioMode) AudioManager.STREAM_VOICE_CALL else AudioManager.STREAM_MUSIC
-
-    // --- audio focus --------------------------------------------------------
 
     private var focusRequest: AudioFocusRequest? = null
     private var focusComm = false
@@ -304,12 +269,6 @@ object AudioPlayer {
         }
     }
 
-    /**
-     * Takes focus for one clip, so a voice note interrupts music or a podcast
-     * instead of playing on top of it — and so this player is told to get out of
-     * the way of a call or an alarm. Transient: playback is short and what was
-     * interrupted is expected to come back afterwards.
-     */
     private fun requestFocus(commMode: Boolean) {
         val am = audioManager ?: return
         // The request is reused while the route is unchanged: every clip of a
@@ -319,7 +278,6 @@ object AudioPlayer {
         val req = if (held != null && focusComm == commMode) held else {
             abandonFocus()
             AudioFocusRequest.Builder(
-                // at the ear on the telephony route nothing else may be audible
                 if (commMode) AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
                 else AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
             )
@@ -346,7 +304,6 @@ object AudioPlayer {
         audioManager?.abandonAudioFocusRequest(req)
     }
 
-    /** Undoes the communication mode, but only when this player established it. */
     private fun releaseAudioMode() {
         if (!ownsAudioMode) return
         ownsAudioMode = false
@@ -390,11 +347,6 @@ object AudioPlayer {
         return b.build()
     }
 
-    /**
-     * Re-runs the service-side state evaluation (notification + proximity
-     * gate) without a playback change — e.g. when the foreground chat
-     * changes, which affects whether the proximity sensor may act.
-     */
     fun refreshServiceState() {
         try { onServiceStateChanged?.invoke() } catch (e: Exception) {
             android.util.Log.e("AudioPlayer", "onServiceStateChanged listener threw", e)

@@ -11,28 +11,16 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
-/**
- * Telegram client over TDLib's JSON interface. Mirrors chats/messages into the
- * shared local Db under "tg:"-prefixed ids and reports UI events through
- * Bridge's listener plumbing, so the existing screens work unchanged.
- *
- * Threading: one receive loop thread handles every TDLib update; blocking
- * request/response pairs are correlated via "@extra". Heavier follow-up work
- * (history pages, exports) runs on its own executor.
- */
 object Tg {
 
     private const val TAG = "UniChatTg"
 
-    /** Chat/user ids are namespaced so they can share the Db with WhatsApp. */
     const val PREFIX = "tg:"
 
     fun isTgId(id: String): Boolean = id.startsWith(PREFIX)
     private fun chatIdOf(id: String): Long = id.removePrefix(PREFIX).toLongOrNull() ?: 0L
     private fun idFor(raw: Long): String = PREFIX + raw
 
-    // Same app credentials nchat embeds (hex-encoded there); TG_APIID/TG_APIHASH
-    // equivalents. Replace with our own registration eventually.
     private val API_ID = String(byteArrayOf(0x31, 0x30, 0x34, 0x31, 0x32, 0x30, 0x32, 0x37))
     private val API_HASH = decodeHex(
         "3536373261353832633265666532643939363232326636343237386563616163"
@@ -53,7 +41,6 @@ object Tg {
     @Volatile private var myPhone: String = ""
     @Volatile private var appVersion: String = "1.0"
 
-    // Short user-driven actions (auth, mute, mark-read, per-update refreshes).
     private val executor = Executors.newSingleThreadExecutor()
     // Unbounded paging work — export, sync-all, seek, the initial chat-list
     // load. These occupy a thread for minutes at a time, so they must not sit
@@ -75,7 +62,6 @@ object Tg {
     private val pending = ConcurrentHashMap<Long, Pair<CountDownLatch, Array<JSONObject?>>>()
     private val nextExtra = AtomicLong(1)
 
-    // last-read markers per raw chat id, so stored rows get the right is_read
     private val readInbox = ConcurrentHashMap<Long, Long>()
     private val readOutbox = ConcurrentHashMap<Long, Long>()
     // file id -> every (chatId, msgId) waiting on that download. A set, not a
@@ -83,7 +69,6 @@ object Tg {
     // re-sent photo shares one file id across messages, and keeping only the
     // last one left the earlier bubbles stuck on a spinner forever.
     private val fileTargets = ConcurrentHashMap<Int, MutableSet<Pair<String, String>>>()
-    // one in-flight history request per chat
     private val historyBusy = CopyOnWriteArraySet<String>()
     private val historyExhausted = CopyOnWriteArraySet<String>()
     // Messages already re-fetched once by the placeholder repair. A content
@@ -97,7 +82,6 @@ object Tg {
 
     fun selfId(): String = idFor(myId)
 
-    /** Starts the TDLib client and its receive loop. Idempotent. */
     @Synchronized
     fun init(context: Context) {
         if (clientId >= 0) return
@@ -108,18 +92,14 @@ object Tg {
         }
         clientId = TdJson.createClientId()
         Thread({ receiveLoop() }, "tg-receive").start()
-        // any request kicks TDLib into delivering updateAuthorizationState
         send(JSONObject().put("@type", "getOption").put("name", "version"))
     }
-
-    // --- request plumbing ----------------------------------------------------
 
     private fun send(obj: JSONObject) {
         val id = clientId
         if (id >= 0) TdJson.send(id, obj.toString())
     }
 
-    /** Sends [obj] and blocks (up to [timeoutMs]) for its "@extra" response. */
     private fun request(obj: JSONObject, timeoutMs: Long = 15_000): JSONObject? {
         val extra = nextExtra.getAndIncrement()
         val latch = CountDownLatch(1)
@@ -154,8 +134,6 @@ object Tg {
                         slot[0] = obj
                         latch.countDown()
                     }
-                    // responses that are also fresh data (e.g. messages) still
-                    // fall through to onUpdate via their own update events
                     continue
                 }
                 onUpdate(obj)
@@ -164,8 +142,6 @@ object Tg {
             }
         }
     }
-
-    // --- auth -----------------------------------------------------------------
 
     private fun onAuthState(st: JSONObject) {
         val type = st.optString("@type")
@@ -239,7 +215,6 @@ object Tg {
         }
     }
 
-    // Error text of the most recent failed request, for the auth screen.
     @Volatile private var lastError: String = ""
 
     fun startPhoneLogin(phone: String) = executor.execute {
@@ -277,16 +252,11 @@ object Tg {
             myLastName = me.optString("last_name")
             myPhone = me.optString("phone_number")
         }
-        // pull the whole main chat list; chats arrive via updateNewChat.
-        // loadChats returns ok per page and error 404 once the end is reached
-        // (request() maps both error and timeout to null), so page until then.
         var pages = 20
         while (pages-- > 0) {
             request(JSONObject().put("@type", "loadChats").put("limit", 100)) ?: break
         }
     }
-
-    // --- updates ---------------------------------------------------------------
 
     private fun onUpdate(obj: JSONObject) {
         when (obj.optString("@type")) {
@@ -327,7 +297,6 @@ object Tg {
             "updateMessageContent" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
                 val msgId = obj.getLong("message_id")
-                // re-fetch the message for a consistent row (edit, poll update…)
                 executor.execute {
                     val fresh = request(
                         JSONObject().put("@type", "getMessage")
@@ -428,7 +397,6 @@ object Tg {
         val muted = chat.optJSONObject("notification_settings")?.optInt("mute_for", 0) ?: 0
         if (muted > 0) Bridge.db.setMuted(id, true)
         last?.let { storeMessage(it) }
-        // group flag for the chat list (ids alone can't tell for basic groups)
         val type = chat.optJSONObject("type")?.optString("@type") ?: ""
         if (type == "chatTypeBasicGroup" || type == "chatTypeSupergroup") {
             Bridge.db.upsertContact(id, title, "", isSelf = false, isGroup = true, isSaved = false)
@@ -453,11 +421,6 @@ object Tg {
         Bridge.notifyContactsChangedInternal()
     }
 
-    /**
-     * Publishes a user's presence. Telegram gives an exact time only when both
-     * sides share their last-seen; otherwise it reports a bucket ("recently",
-     * "within a week", "within a month"), which is all its own clients show too.
-     */
     private fun applyUserStatus(userId: String, status: JSONObject?) {
         val type = status?.optString("@type") ?: return
         val online = type == "userStatusOnline"
@@ -474,8 +437,6 @@ object Tg {
         )
     }
 
-    // --- message mapping --------------------------------------------------------
-
     /**
      * One TDLib message mapped onto the shared row shape, plus the played flag
      * the row itself does not carry.
@@ -488,7 +449,6 @@ object Tg {
      */
     private class Parsed(val row: MessageRow, val listened: Boolean)
 
-    /** Maps one TDLib message into the shared row shape; null if it has none. */
     private fun parseMessage(msg: JSONObject): Parsed? {
         val rawChat = msg.getLong("chat_id")
         val chatId = idFor(rawChat)
@@ -527,7 +487,6 @@ object Tg {
                 msgType = "video"
                 text = content.optJSONObject("caption")?.optString("text") ?: ""
             }
-            // a round "video note" plays like any other video for us
             "messageVideoNote" -> msgType = "video"
             "messageAnimation" -> {
                 msgType = "video"
@@ -537,9 +496,6 @@ object Tg {
                 msgType = "audio"
                 val secs = content.getJSONObject("voice_note").optInt("duration")
                 text = TimeFormat.mmss(secs)
-                // the recipient played it (or we played a received one): this is
-                // the only signal that clears the unplayed dot, and it arrives as
-                // an updateMessageContent long after the message was stored
                 listened = content.optBoolean("is_listened")
             }
             "messageAudio" -> {
@@ -553,8 +509,6 @@ object Tg {
             "messageSticker" -> {
                 val sticker = content.getJSONObject("sticker")
                 if (sticker.optJSONObject("format")?.optString("@type") == "stickerFormatWebp") {
-                    // same content kind the WhatsApp bridge reports, so both
-                    // render as stickers rather than one of them as a photo
                     msgType = "sticker"
                 } else {
                     // animated/video stickers have no still frame to show, so the
@@ -577,9 +531,6 @@ object Tg {
                 latitude = loc.optDouble("latitude")
                 longitude = loc.optDouble("longitude")
             }
-            // Kinds this client only labels. Mapped onto the SAME msg_types the
-            // WhatsApp bridge emits, so previewLabel renders one translated
-            // wording for both services instead of each inventing its own.
             "messageCall" -> msgType = "call"
             "messageContact" -> msgType = "contact"
             "messagePoll" -> msgType = "poll"
@@ -596,7 +547,6 @@ object Tg {
             }
         }
 
-        // file already on disk in TDLib's store? reuse its path right away
         var filePath = ""
         var fileStatus = 0
         localPathOf(msg, content)?.let { filePath = it; fileStatus = 2 }
@@ -616,7 +566,6 @@ object Tg {
         )
     }
 
-    // Maps one TDLib message into the shared row shape and stores it.
     private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
         val parsed = parseMessage(msg) ?: return
         val row = parsed.row
@@ -634,7 +583,6 @@ object Tg {
         if (parsed.listened) Bridge.db.setPlayed(row.chatId, row.id)
         Bridge.db.bumpChat(row.chatId, row.timeSent)
         if (notify && !row.fromMe && !row.isRead) {
-            // eager-fetch images and voice notes for live messages, like WhatsApp
             if ((row.msgType in PICTURE_TYPES || row.msgType == "audio") &&
                 row.fileId.isNotEmpty() && row.filePath.isEmpty()
             ) {
@@ -647,11 +595,9 @@ object Tg {
         Bridge.notifyChat(row.chatId)
     }
 
-    /** Stand-in for a content type this build does not render, e.g. "[Poll]". */
     private fun placeholderFor(content: JSONObject): String =
         "[" + content.optString("@type").removePrefix("message") + "]"
 
-    // The local file path inside a message's content, if already downloaded.
     private fun localPathOf(msg: JSONObject, content: JSONObject): String? {
         val file = fileOf(content) ?: return null
         val local = file.optJSONObject("local") ?: return null
@@ -663,7 +609,6 @@ object Tg {
         return if (path.isNotEmpty() && java.io.File(path).exists()) path else null
     }
 
-    /** The file object backing a message content, whatever its media type. */
     private fun fileOf(content: JSONObject): JSONObject? {
         val file = when (content.optString("@type")) {
             "messagePhoto" -> {
@@ -718,8 +663,6 @@ object Tg {
         // rewrite the chat's preview line with an old reaction.
         if (preview) Bridge.notifyChatsChanged()
     }
-
-    // --- downloads ---------------------------------------------------------------
 
     fun downloadFile(msg: MessageRow): Boolean {
         val fid = msg.fileId.toIntOrNull() ?: return false
@@ -807,7 +750,6 @@ object Tg {
         return true
     }
 
-    /** Where TDLib says a fully downloaded file sits, or null if it isn't. */
     private fun completedAt(res: JSONObject): String? {
         val local = res.optJSONObject("local") ?: return null
         if (!local.optBoolean("is_downloading_completed")) return null
@@ -875,8 +817,6 @@ object Tg {
         }
     }
 
-    // --- sending -------------------------------------------------------------------
-
     private fun replyTo(quotedId: String): JSONObject? =
         quotedId.toLongOrNull()?.let {
             JSONObject().put("@type", "inputMessageReplyToMessage").put("message_id", it)
@@ -887,7 +827,6 @@ object Tg {
             .put("chat_id", chatIdOf(chatId))
             .put("input_message_content", content)
         replyTo(quotedId)?.let { req.put("reply_to", it) }
-        // the response is the pending message; updateNewMessage stores it
         return request(req) != null
     }
 
@@ -1022,8 +961,6 @@ object Tg {
     fun sendReaction(chatId: String, msgId: String, emoji: String) {
         val mid = msgId.toLongOrNull() ?: return
         if (emoji.isEmpty()) {
-            // remove OUR chosen reaction(s): the empty-emoji contract carries no
-            // emoji to remove, so look the chosen types up first
             val msg = request(
                 JSONObject().put("@type", "getMessage")
                     .put("chat_id", chatIdOf(chatId)).put("message_id", mid)
@@ -1101,7 +1038,6 @@ object Tg {
                     // off, account-wide, with no way back from the unmute.
                     JSONObject().put("@type", "chatNotificationSettings")
                         .put("use_default_mute_for", false)
-                        // "forever" per Telegram convention
                         .put("mute_for", if (muted) 2147483647 else 0)
                         .put("use_default_sound", true)
                         .put("use_default_show_preview", true)
@@ -1115,14 +1051,8 @@ object Tg {
         Bridge.notifyChatsChanged()
     }
 
-    // --- history ---------------------------------------------------------------------
-
     fun isHistoryExhausted(chatId: String): Boolean = chatId in historyExhausted
 
-    /**
-     * Fetches one older page into the Db. [onDone] gets the number of stored
-     * messages (0 = start of history reached), -1 on failure/busy.
-     */
     fun requestHistoryPage(chatId: String, pageSize: Int = 100, onDone: ((Int) -> Unit)? = null) {
         if (!historyBusy.add(chatId)) { onDone?.invoke(-1); return }
         pager.execute {
@@ -1143,7 +1073,6 @@ object Tg {
         }
     }
 
-    // Blocking history fetch; returns stored count, -1 on error. Executor only.
     private fun fetchHistory(chatId: String, fromMsgId: Long, limit: Int): Int =
         fetchHistoryPage(chatId, fromMsgId, limit).first
 
@@ -1178,7 +1107,6 @@ object Tg {
         // main thread
         pager.execute {
             try {
-                // from 0 = newest; fills the visible window
                 if (Bridge.db.messageCount(chatId) < 60 &&
                     fetchHistory(chatId, 0, 60) > 0
                 ) {
@@ -1191,19 +1119,8 @@ object Tg {
         }
     }
 
-    // --- search ---------------------------------------------------------------
-
-    /** One page of server results: hit ids newest first, plus the paging state. */
     class SearchPage(val ids: List<String>, val total: Int, val nextFrom: Long)
 
-    /**
-     * Searches one chat's WHOLE history on Telegram's servers, not just what
-     * this device stored. Blocking; worker threads only.
-     *
-     * [fromMessageId] is 0 for the first page and the previous page's [nextFrom]
-     * afterwards; TDLib answers 0 once nothing older is left. total is the real
-     * number of matches, so the counter no longer describes only what is loaded.
-     */
     fun searchChat(chatId: String, query: String, fromMessageId: Long, limit: Int = 50): SearchPage? {
         val res = request(
             JSONObject().put("@type", "searchChatMessages")
@@ -1227,12 +1144,6 @@ object Tg {
         return SearchPage(ids, res.optInt("total_count"), res.optLong("next_from_message_id"))
     }
 
-    /**
-     * The messages around [msgId], oldest first — the context a search hit is
-     * read in. Nothing is stored (see [Parsed]); rows this device already has
-     * win over the fetched copy, since those carry the downloaded file, the
-     * played state and the reactions.
-     */
     fun contextWindow(chatId: String, msgId: String, radius: Int = 25): List<MessageRow> {
         val id = msgId.toLongOrNull() ?: return emptyList()
         // TDLib's own bounds: the offset may not go past -99 and the limit not
@@ -1257,11 +1168,6 @@ object Tg {
             .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
     }
 
-    /**
-     * [count] messages older (or newer) than [msgId], oldest first — how the
-     * search window grows as it is scrolled. Nothing is stored, same as
-     * [contextWindow].
-     */
     fun historySlice(chatId: String, msgId: String, newer: Boolean, count: Int = 30): List<MessageRow> {
         val id = msgId.toLongOrNull() ?: return emptyList()
         val n = count.coerceIn(1, 49)
@@ -1352,7 +1258,6 @@ object Tg {
                 changed = true
             }
             if (msgId in stale) {
-                // dropped and re-stored, since the row's type is what is wrong
                 Bridge.db.deleteMessage(chatId, msgId)
                 storeMessage(m)
                 changed = true
@@ -1361,7 +1266,6 @@ object Tg {
         if (changed) Bridge.notifyChat(chatId)
     }
 
-    // sync-all: page until the start of the chat is reached
     @Volatile private var syncAllChat: String? = null
     @Volatile private var syncAllRounds = 0
 
@@ -1416,18 +1320,11 @@ object Tg {
         }
     }
 
-    // --- export -----------------------------------------------------------------------
-
     @Volatile private var exportChatId: String? = null
-    // Messages this export has ADDED to the local store, which is what the
-    // WhatsApp side reports too. It used to be a running sum of page sizes: a
-    // page that re-delivered messages already stored counted them again, so the
-    // number shown could exceed the chat's real length.
     @Volatile private var exportCount = 0
 
     fun exportProgress(chatId: String): Int = if (exportChatId == chatId) exportCount else -1
 
-    /** Pages the full history into the Db, then writes the export file. */
     fun exportChat(chatId: String, uri: android.net.Uri): Boolean {
         if (exportChatId != null) return false
         exportChatId = chatId
@@ -1465,17 +1362,12 @@ object Tg {
                 complete = false
             } finally {
                 exportChatId = null
-                // hand back the persistable grant the activity gave us, as the
-                // WhatsApp export does — they otherwise accumulate against the
-                // system's per-app limit
                 Bridge.releaseExportUri(uri)
                 Bridge.postChatExportDone(chatId, messages, complete, success)
             }
         }
         return true
     }
-
-    // --- jump-to-quote seek --------------------------------------------------------------
 
     fun seekMessage(chatId: String, targetId: String, fromId: String, maxPages: Int) {
         pager.execute {
@@ -1500,12 +1392,8 @@ object Tg {
         }
     }
 
-    // --- avatars ------------------------------------------------------------------------
-
-    // Small on-disk cache of resolved avatar paths, so list binds don't re-ask.
     private val avatarPaths = ConcurrentHashMap<String, String>()
 
-    /** Path of a chat's small profile photo, downloading it if needed. Blocking. */
     fun avatarPath(chatId: String, big: Boolean = false, cachedOnly: Boolean = false): String {
         val key = chatId + if (big) "/big" else ""
         if (!big) avatarPaths[key]?.let { return it }
@@ -1539,8 +1427,6 @@ object Tg {
         if (path.isNotEmpty() && !big) avatarPaths[key] = path
         return path
     }
-
-    // --- own profile ----------------------------------------------------------------------
 
     fun myName(): String =
         listOf(myFirstName, myLastName).filter { it.isNotEmpty() }.joinToString(" ")
@@ -1587,16 +1473,12 @@ object Tg {
         return ok
     }
 
-    // --- privacy ------------------------------------------------------------------------------
-
-    // UI key -> TDLib userPrivacySetting type
     private val PRIVACY_KEYS = mapOf(
         "last" to "userPrivacySettingShowStatus",
         "profile" to "userPrivacySettingShowProfilePhoto",
         "status" to "userPrivacySettingShowBio",
     )
 
-    /** Same key/value shape the WhatsApp privacy screen uses; null on failure. */
     fun fetchPrivacySettings(): Map<String, String>? {
         val out = HashMap<String, String>()
         for ((key, setting) in PRIVACY_KEYS) {

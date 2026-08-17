@@ -12,17 +12,11 @@ import android.graphics.drawable.Icon
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Per-chat incoming-message notifications, grouped under a summary. Each chat
- * gets one MessagingStyle notification that accumulates its recent messages.
- */
 object Notifications {
 
     private const val CHANNEL_MESSAGES = "messages"
     private const val GROUP = "org.unichat.app.MESSAGES"
     private const val SUMMARY_ID = 100
-    // per-chat notifications are distinguished by tag (the chatId), so a fixed
-    // id is fine and hashCode collisions between chats can't merge them
     private const val MSG_ID = 1
     private const val MAX_LINES = 6
 
@@ -75,8 +69,6 @@ object Notifications {
         }
         val senderIcon = if (senderAvatarPath.isNotEmpty())
             Icon.createWithFilePath(senderAvatarPath) else null
-        // whose name this notification's avatar belongs to (derived once, not
-        // re-derived per line)
         val iconOwner = if (isGroup) senderName else chatName
         synchronized(lines) {
             for (line in lines) {
@@ -161,15 +153,6 @@ object Notifications {
             history.keys.toList()
         }
 
-    /**
-     * PendingIntent that opens a chat from a notification: a ChatActivity
-     * deep-link with MainActivity synthesized underneath, so the chat opens
-     * from any app state and Back returns to the chat list. The unique
-     * per-chat action keeps extras from being coalesced across chats, and the
-     * chatId-derived request code keeps the PendingIntents distinct — every
-     * notification (message or media) must use this same scheme so they can't
-     * collide. chatName is optional (resolved from the DB when absent).
-     */
     fun chatContentIntent(context: Context, chatId: String, chatName: String? = null): PendingIntent {
         val openIntent = Intent(context, ChatActivity::class.java)
             .putExtra("chatId", chatId)
@@ -220,8 +203,6 @@ object Notifications {
         syncSummary(context, manager)
     }
 
-    // The user swiped a notification away: forget its accumulated lines so they
-    // don't reappear, and drop the summary if it is no longer needed.
     fun onDismissed(context: Context, chatId: String) {
         history.remove(chatId)
         syncSummary(context, context.getSystemService(NotificationManager::class.java))

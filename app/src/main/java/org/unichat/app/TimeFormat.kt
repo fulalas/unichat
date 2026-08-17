@@ -31,16 +31,12 @@ object TimeFormat {
     private var dayFmt = SimpleDateFormat("EEE", locale)
     private var dateFmt = SimpleDateFormat("dd/MM/yyyy", locale)
 
-    /** Re-reads the system 12/24-hour preference, locale and time zone.
-     *  Main thread only. */
     fun refreshClockFormat(context: Context) {
         val h24 = android.text.format.DateFormat.is24HourFormat(context)
         val loc = Locale.getDefault()
         val zone = TimeZone.getDefault().id
         if (use24h == h24 && locale == loc && zoneId == zone) return
         use24h = h24
-        // a zone change invalidates the same objects a locale change does, plus
-        // the scratch Calendars: both are re-created from the current defaults
         if (locale != loc || zoneId != zone) {
             locale = loc
             zoneId = zone
@@ -66,14 +62,11 @@ object TimeFormat {
 
     fun clock(epochSeconds: Long): String = timeFmt.format(Date(epochSeconds * 1000))
 
-    /** Formats a whole-second duration as "m:ss" (e.g. 0:07), the stored
-     *  voice-note duration format. Negative inputs clamp to 0. */
     fun mmss(seconds: Int): String {
         val s = seconds.coerceAtLeast(0)
         return "%d:%02d".format(s / 60, s % 60)
     }
 
-    /** Parses a "m:ss" duration string into whole seconds, or 0 if malformed. */
     fun parseSeconds(text: String): Int {
         val parts = text.split(":")
         if (parts.size != 2) return 0
@@ -82,7 +75,6 @@ object TimeFormat {
         return m * 60 + s
     }
 
-    /** Compact timestamp for the chat list: time today, weekday this week, date otherwise. */
     fun compact(context: Context, epochSeconds: Long): String {
         if (epochSeconds <= 0) return ""
         val then = atSeconds(calA, epochSeconds)
@@ -97,9 +89,6 @@ object TimeFormat {
         }
     }
 
-    /** Day + clock time for the "last seen …" subtitle, e.g. "yesterday at
-     *  8:42 PM". Used mid-sentence, so the relative-day words are lowercase
-     *  ("today"/"yesterday"); weekdays and dates keep their normal caps. */
     fun compactWithTime(context: Context, epochSeconds: Long): String {
         if (epochSeconds <= 0) return ""
         val time = clock(epochSeconds)
@@ -118,7 +107,6 @@ object TimeFormat {
     private var sepFmt = SimpleDateFormat("MMMM d", locale)
     private var sepYearFmt = SimpleDateFormat("MMMM d, yyyy", locale)
 
-    /** Day label for a chat date separator: Today / Yesterday / "July 9". */
     fun dateSeparator(context: Context, epochSeconds: Long): String {
         if (epochSeconds <= 0) return ""
         val then = atSeconds(calA, epochSeconds)
@@ -133,14 +121,11 @@ object TimeFormat {
         }
     }
 
-    /** True if the two epoch-second timestamps fall on the same calendar day. */
     fun sameDay(a: Long, b: Long): Boolean {
         if (a <= 0 || b <= 0) return a == b
         return dayStampOf(atSeconds(calA, a)) == dayStampOf(atSeconds(calB, b))
     }
 
-    /** Today encoded as YEAR*1000 + DAY_OF_YEAR — a cheap calendar-day identity
-     *  (the same encoding daysBetween compares), for day-rollover detection. */
     fun dayStamp(): Int = dayStampOf(now())
 
     private fun dayStampOf(c: Calendar): Int =

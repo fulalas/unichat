@@ -4,7 +4,6 @@
     <string name="whatsapp">WhatsApp</string>
     <string name="telegram">Telegram</string>
     <string name="choose_account">Which account?</string>
-    <!-- export file name: protocol label + chat name -->
     <string name="export_file_name">%1$s chat - %2$s.txt</string>
     <string name="avatar_desc">Profile picture</string>
     <string name="record_voice">Record voice message</string>
@@ -32,7 +31,6 @@
     <string name="get_pair_code">Get pairing code</string>
     <string name="pair_requesting">Acquiring pairing code…</string>
     <string name="pair_code_hint">On your phone, open the WhatsApp notification “Enter code to link new device” and type this code:</string>
-    <!-- pairing failures; the bridge reports a code and the wording lives here -->
     <string name="pair_phone_too_short">Phone number is too short</string>
     <string name="pair_phone_not_international">Use international format with country code (no leading zero)</string>
     <string name="pair_not_connected">Not connected to WhatsApp, check your internet connection</string>
@@ -55,7 +53,6 @@
     <string name="number_check_failed">Could not check the number</string>
     <string name="not_on_whatsapp">This number is not on WhatsApp</string>
     <string name="search_failed">Search failed</string>
-    <!-- %1$s is a date, e.g. "20 July 2025" -->
     <string name="searched_back_to">Searched back to %1$s</string>
     <string name="no_matches_since">No matches since %1$s</string>
     <string name="searched_all">Searched all messages</string>
@@ -74,7 +71,6 @@
     <string name="share_to">Share to…</string>
     <string name="typing">typing…</string>
     <string name="recording_voice">recording audio…</string>
-    <!-- group presence: prefix the activity line with the member's name(s) -->
     <string name="group_activity">%1$s is %2$s</string>
     <string name="group_activity_plural">%1$s are %2$s</string>
     <string name="voice_message">Voice message</string>
@@ -88,7 +84,6 @@
     <string name="share">Share</string>
     <string name="no_avatar">No profile picture</string>
     <string name="you">You</string>
-    <!-- your own chat in a target picker; %1$s is the protocol -->
     <string name="you_proto">You (%1$s)</string>
     <string name="edited">Edited</string>
     <string name="reply">Reply</string>
@@ -99,10 +94,7 @@
     <string name="photo_label">Photo</string>
     <string name="sticker_label">Sticker</string>
     <string name="video_label">Video</string>
-    <!-- view-once media: its keys are never shared with a companion device -->
     <string name="view_once_label">View once (open on your phone)</string>
-    <!-- Message kinds this client shows as a label only. The bridge sends the
-         TYPE and no body, so the wording lives here and can be translated. -->
     <string name="document_label">File</string>
     <string name="contact_label">Contact card</string>
     <string name="poll_label">Poll</string>
@@ -111,17 +103,13 @@
     <string name="group_invite_label">Group invite</string>
     <string name="live_location_label">Live location</string>
     <string name="call_label">Call</string>
-    <!-- an animated sticker has no still frame, so the row shows its emoji -->
     <string name="sticker_with_emoji">%1$s (sticker)</string>
-    <!-- accessibility label for the video bubble's download button -->
     <string name="download">Download</string>
-    <!-- unread badge cap: "99+", never a bare 99 (which reads as exact) -->
     <string name="unread_overflow">99+</string>
     <string name="go_to_message">Go to message</string>
     <string name="forwarded">↪ Forwarded</string>
     <string name="download_failed">Download failed</string>
     <string name="react">React</string>
-    <!-- chat-list preview when the newest thing in a chat is a reaction -->
     <string name="reacted_to">%1$s reacted %2$s to \"%3$s\"</string>
     <string name="reacted_to_noname">Reacted %1$s to \"%2$s\"</string>
     <string name="remove_reaction">Remove reaction</string>
@@ -149,8 +137,6 @@
     <string name="delete_for_me">Delete for me</string>
     <string name="online">online</string>
     <string name="last_seen">last seen %1$s</string>
-    <!-- Telegram reports only a bucket when the contact hides their exact
-         last-seen (or when you hide yours) -->
     <string name="last_seen_recently">last seen recently</string>
     <string name="last_seen_week">last seen within a week</string>
     <string name="last_seen_month">last seen within a month</string>
@@ -198,7 +184,6 @@
     <string name="sync_done">Chat fully synced</string>
     <string name="sync_failed">Sync failed — check your connection</string>
     <string name="share_failed">Could not read the shared file</string>
-    <!-- some targets could not be staged: say so instead of the plain "Sending…" -->
     <string name="share_partial">Sending to %1$d of %2$d chats — the rest couldn\'t be prepared</string>
     <string name="send_failed">Send failed</string>
     <string name="logout_confirm">Unlink this device and delete local data?</string>
@@ -207,9 +192,7 @@
     <string name="about_message">Version %1$s (build %2$d)\n\nA minimal native Android messenger for WhatsApp and Telegram in one chat list.\n\nhttps://github.com/fulalas/unichat</string>
     <string name="today">Today</string>
     <string name="yesterday">Yesterday</string>
-    <!-- lowercase for mid-sentence use, e.g. "last seen yesterday at 8:42 PM" -->
     <string name="yesterday_lc">yesterday</string>
     <string name="today_lc">today</string>
-    <!-- joins the day word and clock time in the "last seen" subtitle -->
     <string name="day_at_time">%1$s at %2$s</string>
 </resources>

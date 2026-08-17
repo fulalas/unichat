@@ -1,7 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Protocol ring drawn around a contact's avatar: green for WhatsApp, blue for
-     Telegram. The fill is transparent and the row tints the whole drawable, so
-     only the stroke takes the colour. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
     <solid android:color="@android:color/transparent" />
     <stroke android:width="2dp" android:color="#FFFFFF" />

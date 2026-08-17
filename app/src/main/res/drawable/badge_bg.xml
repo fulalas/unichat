@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
-    <!-- per-protocol accent: green in WhatsApp chats, blue in Telegram ones
-         (chat-screen buttons: play circle, send/mic, scroll-to-bottom) -->
     <solid android:color="?attr/chatAccent" />
 </shape>

@@ -12,8 +12,6 @@
         android:layout_width="50dp"
         android:layout_height="50dp">
 
-        <!-- inset inside the ring; reachable to screen readers on purpose, since
-             the adapter gives it its own click action (open the contact) -->
         <ImageView
             android:id="@+id/avatar"
             android:layout_width="44dp"
@@ -21,14 +19,12 @@
             android:layout_gravity="center"
             android:contentDescription="@string/avatar_desc" />
 
-        <!-- which protocol the chat belongs to, as a thin ring around the avatar -->
         <View
             android:id="@+id/avatarRing"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:background="@drawable/avatar_ring" />
 
-        <!-- shown only while the contact is online -->
         <View
             android:id="@+id/onlineDot"
             android:layout_width="14dp"
@@ -45,7 +41,6 @@
         android:layout_marginStart="14dp"
         android:orientation="vertical">
 
-        <!-- top row: name grows, timestamp pinned to the right -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -71,8 +66,6 @@
                 android:textSize="12sp" />
         </LinearLayout>
 
-        <!-- bottom row: preview spans full width (under the timestamp),
-             the unread badge takes space only when shown -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

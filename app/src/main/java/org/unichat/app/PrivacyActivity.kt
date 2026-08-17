@@ -7,12 +7,6 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.SwitchCompat
 
-/**
- * Account privacy settings (who can see last seen/online, profile photo,
- * about, and the read-receipts toggle). Values live on the WhatsApp account,
- * so changes made here apply to all linked devices; the screen always fetches
- * fresh values on entry.
- */
 class PrivacyActivity : BaseActivity() {
 
     private lateinit var valueLastSeen: TextView
@@ -24,7 +18,6 @@ class PrivacyActivity : BaseActivity() {
     private var loaded = false
     private var proto: String = ProtoPicker.WA
     private val isTg get() = proto == ProtoPicker.TG
-    // guards the switch listener against programmatic check changes
     private var rendering = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -98,9 +91,6 @@ class PrivacyActivity : BaseActivity() {
         else -> value ?: ""
     }
 
-    // Everyone / My contacts / Nobody chooser for a standard setting.
-    // ("My contacts except…" needs an exception list the protocol manages
-    // elsewhere, so it is displayed when active but not offered here.)
     private fun chooseThreeWay(titleRes: Int, name: String, onDone: (() -> Unit)? = null) {
         if (!loaded) return
         choose(titleRes, name, listOf("all", "contacts", "none"), onDone)
@@ -119,9 +109,6 @@ class PrivacyActivity : BaseActivity() {
             .show()
     }
 
-    // WhatsApp pairs these on one row: pick who sees the last seen, then who
-    // sees the online state (Everyone or the same audience as last seen).
-    // Telegram has no separate "online" audience, so the chained dialog is skipped.
     private fun chooseLastSeenAndOnline() {
         if (!loaded) return
         if (isTg) {

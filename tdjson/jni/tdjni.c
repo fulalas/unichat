@@ -9,7 +9,6 @@ extern int td_create_client_id(void);
 extern void td_send(int client_id, const char *request);
 extern const char *td_receive(double timeout);
 
-// Copies a jbyteArray into a NUL-terminated malloc'd C string.
 static char *to_cstr(JNIEnv *env, jbyteArray arr) {
     jsize len = (*env)->GetArrayLength(env, arr);
     char *buf = malloc((size_t)len + 1);

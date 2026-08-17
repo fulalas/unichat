@@ -1,7 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Determinate circular progress ring (WhatsApp-style): a faint full ring as
-     the track, with a solid ring arc drawn on top proportional to the level,
-     starting at the top (12 o'clock) and sweeping clockwise. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:id="@android:id/background">
         <shape

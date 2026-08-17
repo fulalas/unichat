@@ -6,10 +6,6 @@ import android.os.Bundle
 import android.widget.Toast
 import java.io.File
 
-/**
- * Receives ACTION_SEND / ACTION_SEND_MULTIPLE from other apps and forwards to
- * the chosen chats.
- */
 class ShareActivity : BaseActivity() {
 
     private val io = Io.executor
@@ -55,7 +51,6 @@ class ShareActivity : BaseActivity() {
         }
     }
 
-    /** The shared content URIs: one for SEND, a list for SEND_MULTIPLE. */
     private fun extraStreams(intent: Intent, action: String?): List<Uri> {
         @Suppress("DEPRECATION")
         return if (action == Intent.ACTION_SEND_MULTIPLE) {
@@ -94,7 +89,6 @@ class ShareActivity : BaseActivity() {
                         val local = duplicateInCache(master, name, itemIndex, i + 1)
                             ?: return@forEachIndexed
                         staged++
-                        // caption only on the first item, like WhatsApp
                         val caption = if (itemIndex == 0) text.orEmpty() else ""
                         Bridge.sendFile(chatId, local.absolutePath, name, mime, caption)
                     }
@@ -126,12 +120,9 @@ class ShareActivity : BaseActivity() {
                 return@execute
             }
             runOnUiThread {
-                // the sends are only enqueued here and continue in the Bridge
-                // singleton; a failure surfaces later as its own toast
                 if (!isFinishing) {
                     Toast.makeText(this, R.string.share_sending, Toast.LENGTH_SHORT).show()
                 }
-                // jump into the chat only when there's a single, unambiguous target
                 if (chatIds.size == 1) {
                     val open = Intent(this, ChatActivity::class.java)
                     open.putExtra("chatId", chatIds[0])
@@ -142,9 +133,6 @@ class ShareActivity : BaseActivity() {
         }
     }
 
-    // Duplicates an already-staged master file into a fresh per-target staging
-    // file (local disk copy — no second read of the original content URI).
-    // The indices keep names unique across items and share targets.
     private fun duplicateInCache(src: File, name: String, item: Int, target: Int): File? {
         val out = stagingFile("share", "${item}_${target}_$name")
         return try {

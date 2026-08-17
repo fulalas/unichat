@@ -3,23 +3,8 @@ package org.unichat.app
 import android.view.MotionEvent
 import androidx.recyclerview.widget.RecyclerView
 
-/**
- * Long-press-then-drag range selection for the message list. A long-press on a
- * row (handled by the adapter) calls [arm]; if the finger then moves, this takes
- * over the gesture — the anchor is the row under the finger when the drag
- * begins — and selects the contiguous range between the anchor and the row now
- * under the finger. Dragging back restores each row it passes to the state it
- * had before the drag started. Auto-scrolls while the finger sits near the top
- * or bottom edge so the range can extend past the visible window.
- *
- * It only ever acts on a gesture a long-press armed, so ordinary scrolling —
- * including scrolling while already in selection mode to tap more rows — is
- * untouched.
- */
 class DragSelectTouchListener(
     private val adapter: MessageAdapter,
-    // called when a drag ends, so the host can apply updates it deferred while
-    // adapter positions had to stay stable
     private val onDragFinished: () -> Unit = {},
 ) : RecyclerView.OnItemTouchListener {
 
@@ -27,11 +12,8 @@ class DragSelectTouchListener(
     var isDragging = false
         private set
     private var anchor = -1
-    // extent of the current drag range, so reversing direction can restore rows
     private var rangeMin = -1
     private var rangeMax = -1
-    // selection as it was when the drag began, so rows the drag no longer covers
-    // revert to their prior state instead of being blindly deselected
     private var preSelected: Set<String> = emptySet()
 
     private var lastX = 0f
@@ -41,7 +23,6 @@ class DragSelectTouchListener(
     private var autoScrolling = false
     private var maxScrollPx = 0f
 
-    /** Called by the adapter's long-press: the next drag range-selects from the touched row. */
     fun arm() {
         armed = true
     }
@@ -69,8 +50,6 @@ class DragSelectTouchListener(
 
     override fun onRequestDisallowInterceptTouchEvent(disallow: Boolean) {}
 
-    // Anchors on the row under the finger; false (don't start) if there's no row
-    // there (e.g. a gap), leaving it armed to try on the next move.
     private fun startDrag(rv: RecyclerView, x: Float, y: Float): Boolean {
         val child = rv.findChildViewUnder(x, y) ?: return false
         val pos = rv.getChildAdapterPosition(child)
@@ -92,9 +71,6 @@ class DragSelectTouchListener(
         if (pos != RecyclerView.NO_POSITION) selectRange(pos)
     }
 
-    // Extends/retracts the selection to cover [anchor..pos], touching only the
-    // rows that crossed the edge since the last step: newly-covered rows select,
-    // newly-uncovered rows revert to their pre-drag state.
     private fun selectRange(pos: Int) {
         if (anchor < 0) return
         val min = minOf(anchor, pos)
@@ -111,12 +87,6 @@ class DragSelectTouchListener(
 
     private fun wasSelected(pos: Int): Boolean = adapter.messageIdAt(pos) in preSelected
 
-    /**
-     * Ends the gesture and releases every piece of drag state. Public so the
-     * host can call it from onStop: a gesture torn down without an UP/CANCEL
-     * would otherwise leave isDragging set, which permanently suppresses
-     * pagination (and deferred reloads) for the screen's remaining life.
-     */
     fun stopDrag() {
         val wasDragging = isDragging
         if (isDragging) { isDragging = false; adapter.commitDragSelection() }
@@ -128,8 +98,6 @@ class DragSelectTouchListener(
         autoScrolling = false
         if (wasDragging) onDragFinished()
     }
-
-    // --- edge auto-scroll ----------------------------------------------------
 
     private fun updateAutoScroll(rv: RecyclerView, y: Float) {
         val hot = (rv.height * 0.12f).coerceAtLeast(1f)
@@ -152,7 +120,6 @@ class DragSelectTouchListener(
             val rv = rv
             if (rv == null || !isDragging || velocity == 0) { autoScrolling = false; return }
             rv.scrollBy(0, velocity)
-            // the row under the finger changes as content slides past it
             selectUnder(rv, lastX, lastY)
             rv.postOnAnimation(this)
         }

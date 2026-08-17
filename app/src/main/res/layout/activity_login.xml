@@ -11,7 +11,6 @@
         android:gravity="center_horizontal"
         android:padding="24dp">
 
-        <!-- protocol switch -->
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -37,7 +36,6 @@
                 android:textColor="@color/text_secondary" />
         </LinearLayout>
 
-        <!-- WhatsApp: QR / pairing code -->
         <LinearLayout
             android:id="@+id/waPanel"
             android:layout_width="match_parent"
@@ -133,7 +131,6 @@
                 android:layout_marginTop="12dp" />
         </LinearLayout>
 
-        <!-- Telegram: phone -> code -> optional 2FA password -->
         <LinearLayout
             android:id="@+id/tgPanel"
             android:layout_width="match_parent"
@@ -235,8 +232,6 @@
             android:textColor="@color/text_secondary"
             android:layout_marginTop="20dp" />
 
-        <!-- shown once at least one account is linked: leave when YOU are done,
-             instead of being yanked to the chat list mid-flow -->
         <Button
             android:id="@+id/continueButton"
             android:layout_width="wrap_content"

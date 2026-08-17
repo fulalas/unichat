@@ -4,8 +4,6 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <!-- one page per image in the chat; a single image (an avatar) is just a
-         one-page pager -->
     <androidx.viewpager2.widget.ViewPager2
         android:id="@+id/pager"
         android:layout_width="match_parent"

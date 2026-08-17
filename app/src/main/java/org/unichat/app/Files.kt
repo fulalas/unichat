@@ -7,37 +7,22 @@ import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import java.io.File
 
-// Shared file plumbing: cacheDir staging of content URIs (attach/share/record
-// flows) and FileProvider hand-off to external apps.
-
 /** Prefixes of cacheDir staging files, shared with Bridge.cleanStaleCache's
  *  startup sweep — every staging producer must use one of these. */
 val STAGING_PREFIXES = listOf("attach", "share", "rec", "avatar")
 
 private val UNSAFE_FILE_CHARS = Regex("[^A-Za-z0-9._-]")
 
-// User-visible file names (the chat export) keep spaces and non-ASCII letters,
-// so they can't use the strict allow-list above — but they must reject the same
-// path/control characters, which a hand-rolled deny-list per call site kept
-// getting subtly wrong (it let NULs and newlines through).
 private val UNSAFE_DISPLAY_CHARS = Regex("[\\\\/:*?\"<>|\\p{Cntrl}]")
 
-/** Sanitizes a human-readable name for use as a file name. */
 fun safeDisplayFileName(name: String): String =
     name.replace(UNSAFE_DISPLAY_CHARS, "_").trim().ifEmpty { "chat" }
 
-/** A fresh cacheDir staging file named "<prefix>_<timestamp>_<sanitized name>". */
 fun Context.stagingFile(prefix: String, name: String): File {
     val safe = name.replace(UNSAFE_FILE_CHARS, "_")
     return File(cacheDir, "${prefix}_${System.currentTimeMillis()}_$safe")
 }
 
-/** Resolves a content Uri's display name, or the last path segment if the
- *  provider exposes none. Never throws: ShareActivity is exported, so the Uri
- *  comes from an arbitrary app and querying it can fail with SecurityException
- *  (a grant that was never given, or already revoked) — which, raised on the
- *  bare worker that stages a share, would take the process down instead of
- *  reporting the failure. */
 fun Context.uriDisplayName(uri: Uri): String? {
     try {
         contentResolver.query(uri, null, null, null, null)?.use { c ->
@@ -72,16 +57,12 @@ fun Context.copyUriToCache(uri: Uri, prefix: String, name: String): File? {
     }
 }
 
-/** MIME type guessed from a file's extension, [fallback] when unknown. The one
- *  owner of that lookup: a second copy elsewhere disagreed on the fallback. */
 fun mimeOfPath(path: String, fallback: String = "application/octet-stream"): String =
     MimeTypeMap.getSingleton()
         .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: fallback
 
 private const val FILE_PROVIDER_AUTHORITY = "org.unichat.app.fileprovider"
 
-/** A content Uri other apps may read [file] through, with its MIME type
- *  guessed from the extension ([fallbackMime] when unknown). */
 fun Context.providedFile(file: File, fallbackMime: String): Pair<Uri, String> {
     val uri = FileProvider.getUriForFile(this, FILE_PROVIDER_AUTHORITY, file)
     return uri to mimeOfPath(file.path, fallbackMime)

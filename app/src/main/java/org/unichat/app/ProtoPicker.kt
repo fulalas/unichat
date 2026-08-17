@@ -3,11 +3,6 @@ package org.unichat.app
 import android.content.Context
 import androidx.appcompat.app.AlertDialog
 
-/**
- * Protocol chooser for account-scoped actions (profile, privacy, logout):
- * asks WhatsApp or Telegram when both are linked, goes straight through when
- * only one is. Protocols are identified by "wa" / "tg".
- */
 object ProtoPicker {
     const val WA = "wa"
     const val TG = "tg"

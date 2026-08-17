@@ -15,11 +15,6 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 
-/**
- * Account linking for both protocols: a WhatsApp panel (QR / pairing code,
- * exactly the companion-device flow) and a Telegram panel (phone → login code
- * → optional two-step password). Opened at first run and from "Link account".
- */
 class LoginActivity : BaseActivity(), Bridge.UiListener {
 
     private lateinit var tabWhatsApp: Button
@@ -76,7 +71,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             statusText.text = getString(R.string.state_disconnected)
             return
         }
-        // opened from "Link account": start on the protocol still missing
         val onlyTgMissing = Bridge.hasSession() && !Tg.hasSession()
         // WhatsApp already linked at open: its repeated "connected" state
         // events are not a fresh link and must not close this screen
@@ -96,8 +90,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             Bridge.requestPairCode(phone)
         }
 
-        // the code is auto-copied on arrival, but a later copy may overwrite
-        // the clipboard; holding the code copies it again
         pairCodeText.setOnLongClickListener {
             if (lastPairCode.isNotEmpty()) copyPairCode(lastPairCode)
             true
@@ -171,8 +163,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         if (tg) renderStep(currentTgUiState())
     }
 
-    // Maps TDLib's auth state to the panel step, so reopening this screen
-    // mid-flow (or a code sent from a previous attempt) lands on the right step.
     private fun currentTgUiState(): String = when (Tg.authState) {
         "authorizationStateWaitCode" -> "wait_code"
         "authorizationStateWaitPassword" -> "wait_password"
@@ -208,7 +198,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
                 qrProgress.visibility = View.GONE
                 qrImage.visibility = View.VISIBLE
                 qrImage.setImageBitmap(bitmap)
-                // a QR on screen means the login socket is up; nothing to report
                 if (!showingTg) statusText.text = ""
             }
         }
@@ -217,22 +206,13 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
     override fun onPairCode(code: String) {
         pairCodeHint.visibility = View.VISIBLE
         pairCodeText.visibility = View.VISIBLE
-        // display as XXXX-XXXX like WhatsApp does
         pairCodeText.text = if (code.length == 8) code.substring(0, 4) + "-" + code.substring(4) else code
-        // put the raw code on the clipboard right away (undashed so it pastes
-        // cleanly); a new code from a later socket round replaces it
         lastPairCode = code
         copyPairCode(code)
         pairButton.isEnabled = true
         if (!showingTg) statusText.text = ""
     }
 
-    /**
-     * [code] is one of the bridge's stable pairing-error codes, not prose: this
-     * text is the first thing a user reads on the first screen they see, so the
-     * wording is ours and translatable. "other:" carries whatsmeow's own detail
-     * for failures with no code of their own.
-     */
     override fun onPairError(code: String) {
         pairButton.isEnabled = true
         val message = when {
@@ -246,8 +226,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         statusText.text = message
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
-
-    // --- Telegram auth steps -------------------------------------------------
 
     override fun onTgAuth(state: String, message: String) {
         // A rejected phone/code/password: TDLib's error answers the request but
@@ -269,7 +247,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         renderStep(state)
     }
 
-    /** Shows the panel for one auth step. Never triggers a flow transition. */
     private fun renderStep(state: String) {
         when (state) {
             "wait_phone" -> {
@@ -305,8 +282,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
                 waLinkedHandled = true
                 onProtocolLinked(linkedTg = false)
             }
-            // establishing the login socket (initial start or a QR-timeout
-            // restart); a fresh QR/pair code clears this when it arrives
             "connecting" -> if (!showingTg) statusText.text = getString(R.string.login_waiting)
             "disconnected" -> if (!showingTg) statusText.text = getString(R.string.state_disconnected)
             "outdated" -> statusText.text = getString(R.string.state_outdated)
@@ -327,7 +302,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         if (leaving) return
         leaving = true
         WmService.start(this)
-        // opened from "Link account" with Main underneath: just close this
         if (!isTaskRoot) {
             finish()
             return
@@ -336,7 +310,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         finish()
     }
 
-    /** Encodes the login ref as a QR bitmap; null if zxing rejects the content. */
     private fun renderQr(content: String, size: Int): Bitmap? {
         return try {
             val hints = mapOf(EncodeHintType.MARGIN to 1)
@@ -349,7 +322,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             }
             Bitmap.createBitmap(pixels, size, size, Bitmap.Config.RGB_565)
         } catch (e: Exception) {
-            // WriterException for content that won't fit the requested version
             android.util.Log.w("LoginActivity", "QR encode failed", e)
             null
         }

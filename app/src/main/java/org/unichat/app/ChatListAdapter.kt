@@ -24,12 +24,9 @@ class ChatListAdapter(
             override fun areContentsTheSame(a: ChatRow, b: ChatRow) = a == b
         }
 
-        // runs on every non-typing row bind; compile once, not per bind
         private val PREVIEW_WS = Regex("\\s*[\\r\\n]+\\s*")
     }
 
-    // DiffUtil-backed list: rebinds only the rows that actually changed
-    // instead of redrawing the whole list on every message/state event
     private val differ = AsyncListDiffer(this, DIFF)
     private val chats: List<ChatRow> get() = differ.currentList
 
@@ -46,9 +43,6 @@ class ChatListAdapter(
         val muteIcon: ImageView = view.findViewById(R.id.muteIcon)
         val avatarRing: View = view.findViewById(R.id.avatarRing)
         val onlineDot: View = view.findViewById(R.id.onlineDot)
-        // the row currently bound to this recycled holder (with its display
-        // label already resolved); the once-attached listeners read it instead
-        // of capturing a fresh lambda — and re-resolving the label — per click
         var current: ChatRow? = null
     }
 
@@ -73,13 +67,10 @@ class ChatListAdapter(
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val row = chats[position]
         val name = row.displayLabelWithProto(holder.itemView.context)
-        // resolve the label once and hand the listeners the row they'll report
         val chat = if (name == row.name) row else row.copy(name = name)
         holder.current = chat
         holder.name.text = name
         val context = holder.itemView.context
-        // transient states share one rendering (accent-coloured label); only the
-        // string differs
         val transient = when (chat.transientState) {
             "typing" -> R.string.typing
             "recording" -> R.string.recording_voice
@@ -89,15 +80,11 @@ class ChatListAdapter(
             holder.lastMessage.text = context.getString(transient)
             holder.lastMessage.setTextColor(context.protocolAccent(chat.id))
         } else {
-            // the preview is a single line, so fold any line breaks into
-            // spaces (matching WhatsApp) instead of truncating at the first
             holder.lastMessage.text = chat.lastText.replace(PREVIEW_WS, " ")
             holder.lastMessage.setTextColor(context.getColor(R.color.text_secondary))
         }
         val time = TimeFormat.compact(context, chat.lastTime)
         holder.timestamp.text = if (chat.lastFromMe) {
-            // compact tick left of the timestamp: grey ✓ sent, accent ✓✓ read
-            // the list mixes protocols, so the read tick is coloured per row
             Ticks.timeWithTick(
                 context, time, chat.lastRead, holder.timestamp.textSize,
                 tickFirst = true, readTint = context.protocolAccent(chat.id),
@@ -112,15 +99,12 @@ class ChatListAdapter(
             // letting every chat wear the same accent
             holder.unreadBadge.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(context.protocolAccent(chat.id))
-            // "99+" (not a bare "99", which reads as an exact count)
             holder.unreadBadge.text =
                 if (chat.unread > 99) context.getString(R.string.unread_overflow)
                 else chat.unread.toString()
         } else {
-            // GONE (not INVISIBLE) so the preview line reclaims the badge's width
             holder.unreadBadge.visibility = View.GONE
         }
-        // which protocol the chat belongs to, as a ring around the avatar
         holder.avatarRing.backgroundTintList =
             android.content.res.ColorStateList.valueOf(context.protocolAccent(chat.id))
         holder.onlineDot.visibility = if (chat.online) View.VISIBLE else View.GONE

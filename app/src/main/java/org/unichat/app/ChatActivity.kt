@@ -16,52 +16,28 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.io.File
 
-/**
- * A finished-but-unsent recording, held across activity instances. Carries the
- * amplitude envelope with the file: it is what buildWaveform renders into the
- * waveform recipients see, and it used to live only in the instance that
- * captured the audio.
- */
 private class PendingRecording(val file: File, val duration: Int, val amps: List<Int>)
 
 class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     companion object {
-        // per-chat scroll position so returning to a chat restores where you
-        // were; bounded LRU (most-recent 50 chats) so it can't grow unbounded
         private const val MAX_SCROLL_STATES = 50
         private const val SEARCH_LOAD_LIMIT = 5000
-        // how long one requested page of older history is waited for, and how
-        // many such rounds pass in silence before the phone counts as absent
         private const val DEEP_TICK_MS = 8_000L
         private const val DEEP_IDLE_ROUNDS = 3
-        // window of local messages shown initially; grows page by page as the
-        // user scrolls to the top (before older history is fetched remotely)
         private const val LOCAL_PAGE = 500
-        // upper bound on how long the screen is kept (dimly) alive for a
-        // single voice note
         private const val RECORD_WAKE_LOCK_MS = 30 * 60 * 1000L
-        // message types backed by a file on disk, so forwarding one has to wait
-        // for its download (a set, not a per-message listOf in the batch loop)
         private val FILE_MEDIA_TYPES = PICTURE_TYPES + setOf("audio", "video", "document")
-        // contextual-action-bar item ids for multi-select
         private const val M_FORWARD = 1
         private const val M_COPY = 2
         private const val M_DELETE = 3
-        // hard cap on history pages the bridge seek pulls while paging back from
-        // the reply toward the quoted original — bounds the effort for a target
-        // that turns out not to be in the phone's history at all
         private const val MAX_SEEK_PAGES = 20
         // Backstop against a dropped bridge callback ONLY, so it must outlast the
         // worst case of the operation it guards: MAX_SEEK_PAGES pages, each with
         // its own bridge-side timeout. A flat 60s used to abort slow-but-working
         // seeks and toast "message not loaded" while pages were still arriving.
         private val SEEK_TIMEOUT_MS = MAX_SEEK_PAGES * Bridge.historyTimeoutMs + 30_000L
-        // rows of older context to load above a jumped-to message: just enough to
-        // keep it off the top edge (so maybeLoadOlder doesn't retrigger) without
-        // over-fetching a whole page beyond what the jump needs
         private const val SEEK_CONTEXT_ROWS = 20
-        // how often the open chat re-subscribes to the contact's presence
         private const val PRESENCE_RESUBSCRIBE_MS = 30_000L
         private val scrollStates =
             object : LinkedHashMap<String, android.os.Parcelable?>(16, 0.75f, true) {
@@ -93,7 +69,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private val pickFile = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent()
     ) { uri -> uri?.let { onFilePicked(it) } }
-    // system "save as" dialog (defaults to Downloads); null uri = cancelled
     private val createExportFile = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("text/plain")
     ) { uri -> uri?.let { writeChatExport(it) } }
@@ -101,28 +76,16 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private lateinit var contextText: android.widget.TextView
     private var restoredScroll = false
     private var hasNewBelow = false
-    // a video the user tapped (outside its download icon) to open: it's being
-    // downloaded and should launch automatically once the file lands
     private var pendingVideoOpen: String? = null
-    // jump-to-quote origins: each quote tap pushes the message it came from,
-    // so the scroll chevron first returns there (most recent first) and only
-    // then drops to the bottom; reaching the bottom by hand clears the trail
     private val quoteJumpReturns = ArrayDeque<String>()
     private var loadLimit = LOCAL_PAGE
-    // guards against growing the local window several times for one top-hit
     private var loadingMoreLocal = false
 
-    // jump-to-quote seek: when the tapped quote's original isn't in the loaded
-    // window, widen the window if it's stored, otherwise have the bridge page
-    // history back from the reply until it lands, then jump. seekQuotedId is the
-    // target; seekOrigin is the replying message (the return-trail entry and the
-    // anchor the bridge pages back from); seekFetching guards the one bridge call.
     private var seekQuotedId: String? = null
     private var seekOrigin: MessageRow? = null
     // A message the image viewer asked us to jump to, applied on the next list
     // commit so the reload that follows onStart cannot scroll it away again.
     private var pendingJumpId: String? = null
-    // the running seek came from the image viewer, so its landing is centred
     private var seekCenter = false
     private var seekFetching = false
     private val seekTimeout = Runnable { if (seekQuotedId != null) failSeek() }
@@ -139,8 +102,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private var searchMatches: List<Int> = emptyList()
     private var currentMatch = -1
     private var searchActive = false
-    // Telegram: matches as the server reported them, newest first, with the
-    // paging anchor for the next batch (0 once nothing older is left)
     private var serverHits: List<String> = emptyList()
     private var serverTotal = 0
     private var serverNextFrom = 0L
@@ -150,15 +111,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private var searchSeq = 0
     private var windowSeq = 0
     private var hitsLoading = false
-    // WhatsApp: walking older history on request, and rounds spent waiting
     private var deepening = false
     private var idleRounds = 0
     // how much of the chat the scan covers. Grows as deepening pulls older
     // pages in, or the newly fetched messages would sit outside the window and
     // every round would re-scan the very same rows.
     private var searchLimit = SEARCH_LOAD_LIMIT
-    // oldest message the last round saw, to tell a fetched page apart from an
-    // ordinary chat event
     private var deepOldest = 0L
     // Its own thread: these calls block for up to 30s and must not sit in front
     // of the shared io queue that reloads the chat
@@ -193,11 +151,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // lets it fade, so a long voice note doesn't burn a fully lit screen.
     private var recordWakeLock: PowerManager.WakeLock? = null
 
-    // A finished-but-not-yet-sent recording: set when recording is stopped by a
-    // focus loss (incoming call, app switch, screen off) instead of an explicit
-    // send/cancel. The composer stays in its send/cancel UI so the user can
-    // still fire it off or discard it — a captured recording is never thrown
-    // away on its own.
     private var pendingAudio: File? = null
     private var pendingDuration: Int = 0
 
@@ -210,9 +163,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // Amplitude envelope of the recording, sampled while it runs; sent along
-    // with the voice note so recipients see a real waveform instead of a
-    // flat line (official clients render the message's Waveform field).
     private val recordAmps = ArrayList<Int>()
     private val ampTicker = object : Runnable {
         override fun run() {
@@ -222,9 +172,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // Downsamples the recorded amplitudes into WhatsApp's waveform format:
-    // 64 bars, 0..100 each, sqrt-scaled against the clip's own peak so quiet
-    // passages stay visible the way the official app draws them.
     private fun buildWaveform(samples: List<Int>): ByteArray {
         if (samples.isEmpty()) return ByteArray(0)
         val bars = 64
@@ -253,9 +200,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // The viewer can page far back through the chat's images, so the message it
-    // returns is often nowhere near where the user was: seek it like a tapped
-    // quote rather than assuming it is in the loaded window.
     private val openImage = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -265,7 +209,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // the saved position — undoing any jump made now. It is parked instead
         // and applied once the list has settled.
         pendingJumpId = target
-        // ...unless nothing is coming: a search left open skips the reload
         if (searchActive) consumePendingJump()
     }
 
@@ -279,7 +222,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
         if (!Bridge.init(this)) { finish(); return }
 
-        // toolbar: avatar + name + presence line
         val toolbarView = layoutInflater.inflate(R.layout.chat_toolbar, null)
         toolbarTitle = toolbarView.findViewById(R.id.toolbarTitle)
         toolbarSubtitle = toolbarView.findViewById(R.id.toolbarSubtitle)
@@ -290,8 +232,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             setDisplayHomeAsUpEnabled(true)
             setDisplayShowTitleEnabled(false)
             setDisplayShowCustomEnabled(true)
-            // fill the toolbar width so the subtitle never ends up sized to the
-            // (shorter) initial content and truncated (e.g. "last seen…")
             setCustomView(
                 toolbarView,
                 androidx.appcompat.app.ActionBar.LayoutParams(
@@ -310,7 +250,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             // that produced "Rafael (Telegram) (Telegram)". The extra is only
             // good enough to paint the toolbar before this read lands.
             val name = Bridge.db.displayName(chatId).let {
-                // your own chat exists on both accounts under the same name
                 val proto = selfProtocol(this, chatId)
                 if (proto.isEmpty()) it else "$it ($proto)"
             }
@@ -354,7 +293,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         adapter = MessageAdapter(
             isGroup = isGroup,
             onNeedDownload = { msg, userInitiated ->
-                // rows of a search window have no database row behind them
                 if (windowMode) fetchWindowMedia(msg)
                 else Bridge.downloadFile(msg, userInitiated)
             },
@@ -362,8 +300,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 val intent = Intent(this, ImageViewActivity::class.java)
                 intent.putExtra("path", msg.filePath)
                 intent.putExtra("chatId", chatId)
-                // for result: the viewer's "Go to message" answers with the id
-                // of whichever image was on screen when it was closed
                 openImage.launch(intent)
             },
             onDocumentClick = { msg -> openDocument(msg) },
@@ -378,21 +314,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         lm.stackFromEnd = true
         messageList.layoutManager = lm
         messageList.adapter = adapter
-        // long-press-then-drag range selection (with edge auto-scroll)
         dragSelect = DragSelectTouchListener(adapter, onDragFinished = { onDragSelectFinished() })
             .also { messageList.addOnItemTouchListener(it) }
-        // keep more offscreen rows bound so small scrolls don't rebind, and drop
-        // item animations: with DiffUtil driving updates the default change
-        // cross-fade just reads as flicker when a chat (re)loads
         messageList.setItemViewCacheSize(24)
         messageList.itemAnimator = null
 
         scrollFab.setOnClickListener {
-            // after a jump-to-quote, the chevron first retraces the jump(s)
-            // back to where each started; only then it drops to the bottom.
-            // Pop past any origin that is stale (unloaded) or already at/above
-            // the current view: the down-chevron must only ever move downward,
-            // so a return target has to sit below what's on screen right now.
             val lastVisible = lm.findLastVisibleItemPosition()
             var returnId: String? = null
             while (quoteJumpReturns.isNotEmpty()) {
@@ -411,30 +338,23 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                 if (!messageList.canScrollVertically(1)) {
                     hasNewBelow = false
-                    // back at the bottom on their own — the return trail is moot
                     quoteJumpReturns.clear()
                 }
                 updateScrollFab()
                 showFloatingDate()
                 maybeLoadOlder()
-                // only a search window can grow downwards: the chat's own list
-                // already ends at its newest message
                 if (windowMode && lm.findLastVisibleItemPosition() >= adapter.itemCount - 6) {
                     extendWindow(older = false)
                 }
             }
             override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
-                // the moment the user grabs the list, stop holding a jumped-to
-                // message in place so we never fight their scroll
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) cancelHold()
             }
         })
 
-        // attach: file/location chooser while idle, cancel while recording/pending
         attachButton.setOnClickListener {
             if (recorder != null || pendingAudio != null) finishRecording(send = false) else showAttachMenu()
         }
-        // action button: send recording/pending, else send text, else start recording
         actionButton.setOnClickListener {
             when {
                 recorder != null || pendingAudio != null -> finishRecording(send = true)
@@ -442,7 +362,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 else -> startRecording()
             }
         }
-        // toggle the action icon between mic (empty) and send (has text)
         input.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -450,8 +369,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         })
         updateActionButton()
 
-        // top up a sparsely-synced chat with one older page on open (skipped
-        // when plenty is already local, so re-opening doesn't keep backfilling)
         Bridge.requestInitialHistory(chatId)
     }
 
@@ -468,15 +385,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         super.onStart()
         Bridge.addListener(this)
         Bridge.openChat(chatId, owner = this)
-        // chaining across messages is handled by Bridge and keeps running with
-        // the screen off; this hook only refreshes the visible UI while shown
         val hook = {
             runOnUiThread {
                 // the earpiece fallback moves playback to the call stream, so
                 // the volume keys have to follow it mid-clip
                 volumeControlStream = AudioPlayer.volumeStream
-                // update only the visible audio rows in place instead of
-                // rebinding the whole list on every play/pause/chain
                 adapter.refreshAudioRows(messageList)
                 main.removeCallbacks(audioTicker)
                 if (AudioPlayer.currentPath != null) main.post(audioTicker)
@@ -503,7 +416,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onDestroy() {
         super.onDestroy()
-        // their queued calls can only deliver to this (now dead) screen
         searchExec.shutdownNow()
         windowMedia.shutdownNow()
     }
@@ -531,7 +443,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // restoring a now-stale anchor that sits above the newest message
         val atBottomNow = isAtBottom()
         scrollStates[chatId] = if (atBottomNow) null else lm.onSaveInstanceState()
-        // ...and durably, since the in-memory state dies with the process
         saveScrollAnchor(atBottomNow)
         // drop the UI hook so the singleton AudioPlayer doesn't retain this
         // activity; playback itself continues in the background. Identity-checked:
@@ -540,9 +451,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // unconditionally used to kill the live screen's audio UI updates.
         if (AudioPlayer.onStateChanged === audioHook) AudioPlayer.onStateChanged = null
         audioHook = null
-        // normally a no-op: onPause already turned a live recording into a
-        // pending one; kept here as a fallback for any path that reaches
-        // onStop without onPause (e.g. certain multi-window transitions)
         captureRecordingAsPending()
         // stopRecorder already drops it on every normal path; leaving the screen
         // must never leave the lock behind
@@ -554,11 +462,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // GPS engine running, retain this activity, and eventually toast (or send
         // a location) for a screen the user has left
         releaseLocationRequests()
-        // don't launch a video app in the user's face after they've left
         pendingVideoOpen = null
-        // a running jump-to-quote seek can't progress once we stop listening
         if (seekQuotedId != null) clearSeek()
-        // a gesture interrupted by leaving the screen never gets its UP/CANCEL
         dragSelect?.stopDrag()
         cancelHold()
     }
@@ -570,9 +475,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         !messageList.canScrollVertically(1) ||
             lm.findLastVisibleItemPosition() >= adapter.itemCount - 1
 
-    // Contact-name map for group sender labels, cached across reloads (a full
-    // contacts scan per message event is wasted work — the map almost never
-    // changes). Invalidated when a contact upsert fires onChatsChanged.
     @Volatile private var cachedContactNames: Map<String, String>? = null
 
     // Only a real contact write invalidates it. Hooking this to onChatsChanged
@@ -587,20 +489,13 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun contactNames(): Map<String, String> =
         cachedContactNames ?: Bridge.db.contactNames().also { cachedContactNames = it }
 
-    // quoted message id → resolved sender label, cached across reloads: the
-    // labels never change for a given message, but they were re-resolved with
-    // one or two point queries per distinct quote on EVERY reload.
     private val cachedQuoteNames = java.util.concurrent.ConcurrentHashMap<String, String>()
 
-    // Resolves the quote-preview sender labels for the loaded rows (quoted
-    // message id → display name, "" when that message is unknown). Runs on the
-    // io thread so binds never query the DB.
     private fun quoteNamesFor(messages: List<MessageRow>): Map<String, String> {
         val labels = HashMap<String, String>()
         for (m in messages) {
             val qid = m.quotedId
             if (qid.isEmpty() || labels.containsKey(qid)) continue
-            // resolved once per quoted message, then reused across reloads
             val memo = cachedQuoteNames[qid]
             if (memo != null) {
                 labels[qid] = memo
@@ -608,7 +503,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             }
             val label = Bridge.db.messageSender(m.chatId, qid)?.let { s ->
                 if (s.fromMe) getString(R.string.you)
-                // senderLabel (Jid.kt) owns the name→push-name→phone fallback
                 else senderLabel(
                     Bridge.db.contactName(s.senderId)?.let { mapOf(s.senderId to it) } ?: emptyMap(),
                     s.senderId, s.senderName
@@ -622,16 +516,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun reload(markRead: Boolean = false) {
-        // this puts the chat's own history back on screen, whatever was there
         windowMode = false
         io.execute {
             val messages = Bridge.db.messages(chatId, loadLimit)
-            // names sender labels (groups) and @mentions (any chat)
             val names = contactNames()
             val quoteNames = quoteNamesFor(messages)
             runOnUiThread {
-                // a video the user asked to open: launch it the moment its
-                // download lands, or drop the request if it failed
                 pendingVideoOpen?.let { id ->
                     val m = messages.find { it.id == id }
                     if (m != null && m.filePath.isNotEmpty()) {
@@ -654,14 +544,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 adapter.submit(messages, names, quoteNames) {
                     loadingMoreLocal = false
                     when {
-                        // first load after entering: restore saved position or start at bottom
                         !restoredScroll -> {
                             restoredScroll = true
                             val saved = scrollStates[chatId]
                             when {
-                                // same process: the exact layout state
                                 saved != null -> lm.onRestoreInstanceState(saved)
-                                // cold start: re-find the message we were on
                                 !scrollStates.containsKey(chatId) && restoreScrollAnchor() -> Unit
                                 adapter.itemCount > 0 ->
                                     messageList.scrollToPosition(adapter.itemCount - 1)
@@ -682,9 +569,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     // after the restore above, so the jump is what the user is
                     // left looking at
                     consumePendingJump()
-                    // a jump-to-quote seek advances as each (local widen / remote
-                    // page) reload commits: jump when the target is now loaded,
-                    // else fetch the next page
                     if (seekQuotedId != null) driveSeek()
                 }
             }
@@ -692,13 +576,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // Pagination: hitting the top of the list loads older messages — first by
-    // widening the local window, then (local history exhausted) by asking the
-    // primary phone for an older page. The bridge dedupes in-flight requests
-    // and stops once the start of the chat is reached.
     private fun maybeLoadOlder() {
-        // a search window is not the chat's history: it grows from the server on
-        // whichever end is being scrolled towards
         if (windowMode) {
             if (lm.findFirstVisibleItemPosition() <= 5) extendWindow(older = true)
             return
@@ -724,12 +602,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // last position the chip was formatted for; onScrolled fires per frame, so
-    // skip the date re-format while the top visible row hasn't changed
     private var floatingDatePos = -1
 
-    // Floating day chip: shows the top visible message's date while scrolling,
-    // then fades out shortly after scrolling stops.
     private fun showFloatingDate() {
         val pos = lm.findFirstVisibleItemPosition()
         val msgs = adapter.messagesSnapshot()
@@ -738,8 +612,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             floatingDatePos = pos
             floatingDate.text = TimeFormat.dateSeparator(this, msgs[pos].timeSent)
         }
-        // onScrolled fires per frame; only touch the view when it isn't already
-        // showing at full opacity
         if (floatingDate.visibility != android.view.View.VISIBLE || floatingDate.alpha != 1f) {
             floatingDate.animate().cancel()
             floatingDate.alpha = 1f
@@ -771,8 +643,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (msgId.isEmpty()) return false
         val index = adapter.indexOfMessage(msgId)
         return if (index >= 0) {
-            // flash the target row when it (re)binds (the payload makes
-            // RecyclerView reuse the holder in place instead of cross-fading)
             adapter.flashMsgId = msgId
             adapter.notifyItemChanged(index, Unit)
             holdScrollToMessage(msgId, index, center)
@@ -785,7 +655,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // one active hold at a time (see holdScrollToMessage)
     private var holdListener: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
 
     // Jumps to a message instantly and keeps it pinned at the top for a short
@@ -827,8 +696,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     if (view == null) { lm.scrollToPositionWithOffset(targetIndex, 0); return }
                     val visible = messageList.height -
                         messageList.paddingTop - messageList.paddingBottom
-                    // negative for a row taller than the screen: that shows its
-                    // middle, which is what "centred" means for a big photo
                     val wanted = (visible - view.height) / 2
                     if (kotlin.math.abs(view.top - messageList.paddingTop - wanted) <= 4) {
                         cancelHold()
@@ -850,17 +717,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         holdListener = null
     }
 
-    // --- jump to a quoted message (syncing it in if needed) ------------------
-
-    // A quote was tapped: jump straight to the original if it's loaded,
-    // otherwise start syncing it in (widening the local window, then paging the
-    // phone's history) and jump once it lands.
     private fun onQuoteTapped(origin: MessageRow) {
         if (origin.quotedId.isEmpty()) return
         if (seekQuotedId != null) clearSeek() // supersede any in-progress seek
         if (scrollToMessage(origin.quotedId, toastIfMissing = false)) {
-            // remember where the jump started so the chevron can lead back; skip
-            // consecutive duplicates so re-tapping the same quote doesn't stack
             if (quoteJumpReturns.lastOrNull() != origin.id) quoteJumpReturns.addLast(origin.id)
             return
         }
@@ -871,10 +731,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         driveSeek()
     }
 
-    // Advances the seek: jump if the target is loaded; else widen the window if
-    // it's already stored; else ask the bridge to page history back from the
-    // reply until it lands. Re-entered from reload()'s commit (as fetched pages
-    // arrive) and from onSeekResult.
     private fun driveSeek() {
         val target = seekQuotedId ?: return
         if (adapter.indexOfMessage(target) >= 0) { completeSeek(); return }
@@ -883,13 +739,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             runOnUiThread {
                 if (seekQuotedId != target) return@runOnUiThread // superseded/cancelled
                 if (depth > 0) {
-                    // stored (a fetched page landed it, or it was just off-window):
-                    // widen and reload — the reload commit re-enters and jumps.
-                    // Load a little older context ABOVE the target too, so the
-                    // jump doesn't land it at the very top edge — which would
-                    // retrigger older-history loading and scroll off the target.
-                    // A small margin is enough (the target pins to the top); it
-                    // avoids over-fetching a whole extra page for a deep target.
                     val need = depth + SEEK_CONTEXT_ROWS
                     if (need > loadLimit) loadLimit = need
                     reload()
@@ -904,7 +753,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     main.removeCallbacks(seekTimeout)
                     main.postDelayed(seekTimeout, SEEK_TIMEOUT_MS)
                 }
-                // else fetching: wait for onSeekResult (or a reload once it lands)
             }
         }
     }
@@ -915,12 +763,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         else failSeek()
     }
 
-    /**
-     * Jumps to the message the image viewer returned. Loaded messages scroll
-     * straight there; anything further back is driven in by the same seek a
-     * tapped quote uses, which widens the window and pages history until it
-     * lands (and re-enters through the commit above as each page arrives).
-     */
     private fun consumePendingJump() {
         val target = pendingJumpId ?: return
         pendingJumpId = null
@@ -971,8 +813,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // this chat's rows were folded into toId; retarget so the screen doesn't
         // go blank (it was querying an id that no longer has any messages)
         if (fromId != this.chatId) return
-        // carry the saved scroll position over to the new key, or returning to
-        // this chat would jump to the bottom and lose the user's place
         scrollStates.remove(fromId)?.let { scrollStates[toId] = it }
         Prefs.scrollAnchor(this, fromId)?.let { (id, off) ->
             Prefs.setScrollAnchor(this, toId, id, off)
@@ -1025,12 +865,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         reload(markRead = true)
     }
 
-    /**
-     * Re-reads [ids] and swaps them into the list in place. Also resolves a
-     * pending "open this video when it lands" request, which a download
-     * completion would otherwise never satisfy — it is a row event, so it no
-     * longer passes through reload().
-     */
     private fun refreshRows(ids: Set<String>) {
         io.execute {
             val fresh = Bridge.db.messagesByIds(chatId, ids).associateBy { it.id }
@@ -1050,39 +884,25 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // a message change that arrived while a drag range-select was in progress
     private var reloadAfterDrag = false
 
-    /** Called by the drag listener when a range-select gesture ends. */
     fun onDragSelectFinished() {
         if (!reloadAfterDrag) return
         reloadAfterDrag = false
         reload(markRead = true)
     }
 
-    // --- in-chat search ------------------------------------------------------
-
     private fun openSearch() {
         searchActive = true
-        // drop any pending "download then open" so closing search (which
-        // reloads) can't suddenly launch a video the user has moved on from
         pendingVideoOpen = null
         searchBar.visibility = android.view.View.VISIBLE
         searchInput.requestFocus()
         showKeyboard(searchInput)
-        // Telegram asks its servers, so there is nothing to preload: the chat
-        // keeps its normal window until a hit is picked, and that hit brings its
-        // own surroundings with it.
         if (Tg.isTgId(chatId)) return
         updateCoverage()
         loadSearchWindow()
     }
 
-    /**
-     * Applies the local search window — a large recent slice of the chat, bigger
-     * than the normal view but bounded, so searching does not pull a whole
-     * history into memory. WhatsApp only; see [runServerSearch].
-     */
     private fun loadSearchWindow() {
         io.execute {
             val all = Bridge.db.messages(chatId, searchLimit)
@@ -1108,8 +928,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchCoverageRow.visibility = android.view.View.GONE
         searchInput.setText("")
         adapter.highlightQuery = ""
-        // clear the highlight spans off the rows already on screen; the reload
-        // below only rebinds rows the diff considers changed
         rebindVisible()
         searchMatches = emptyList()
         currentMatch = -1
@@ -1171,9 +989,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun runLocalSearch(q: String) {
-        // The window can hold SEARCH_LOAD_LIMIT rows, so scan off the main
-        // thread — this runs on every keystroke, next to the keyboard's own
-        // frame budget.
         val msgs = adapter.messagesSnapshot()
         io.execute {
             val matches = msgs.indices.filter { i ->
@@ -1181,12 +996,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 m.msgType != "audio" && m.text.contains(q, ignoreCase = true)
             }
             runOnUiThread {
-                // a newer keystroke superseded this scan
                 if (adapter.highlightQuery != q) return@runOnUiThread
                 val keepId = currentMatchId()
                 searchMatches = matches
-                // hold the reader's place across a deepening refresh; otherwise
-                // start at the most recent match
                 val kept = matches.indexOfFirst { adapter.messageIdAt(it) == keepId }
                 currentMatch = if (deepening && kept >= 0) kept else matches.size - 1
                 if (!deepening && currentMatch >= 0) {
@@ -1198,17 +1010,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /** The message the current match sits on, "" when there is none. */
     private fun currentMatchId(): String =
         searchMatches.getOrNull(currentMatch)?.let { adapter.messageIdAt(it) } ?: ""
 
-    // --- Telegram: server-side search ----------------------------------------
-
-    /**
-     * Asks Telegram for every match in the chat, not just the synced part. The
-     * answer is a list of message ids; each one is read in context by fetching
-     * the messages around it (see [showHit]).
-     */
     private fun runServerSearch(q: String) {
         val seq = ++searchSeq
         searchCount.setText(R.string.searching)
@@ -1269,11 +1073,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * Grows the search window from the server as it is scrolled, so reading
-     * around a hit works like reading the chat itself. Each end stops asking
-     * once the server answers with nothing.
-     */
     private fun extendWindow(older: Boolean) {
         if (!windowMode || windowLoading) return
         if (if (older) windowTopDone else windowBottomDone) return
@@ -1299,7 +1098,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     return@runOnUiThread
                 }
                 if (merged.isEmpty()) {
-                    // that end of the history is reached; stop asking for it
                     if (older) windowTopDone = true else windowBottomDone = true
                     return@runOnUiThread
                 }
@@ -1322,7 +1120,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (userInitiated) windowFailed.remove(msg.id)
         else if (msg.id in windowFailed) return
         if (!windowFetching.add(msg.id)) return
-        // show it as downloading, exactly like a stored row would
         adapter.refreshRows(mapOf(msg.id to msg.copy(fileStatus = 1)))
         windowMedia.execute {
             val path = Bridge.searchMedia(msg.chatId, msg.id)
@@ -1333,7 +1130,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 val fresh = if (path.isEmpty()) msg.copy(fileStatus = 3)
                     else msg.copy(filePath = path, fileStatus = 2)
                 adapter.refreshRows(mapOf(msg.id to fresh))
-                // a video or document the user tapped: open it now it is here
                 if (pendingWindowOpen == msg.id) {
                     pendingWindowOpen = null
                     if (path.isNotEmpty()) openMediaFile(fresh)
@@ -1342,7 +1138,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /** Moves through the server hits, pulling the next page as the end nears. */
     private fun stepHit(delta: Int) {
         if (serverHits.isEmpty()) return
         val next = currentHit + delta
@@ -1388,8 +1183,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // --- WhatsApp: how far back the search reached ---------------------------
-
     /**
      * Says what was actually searched. A WhatsApp chat is searched locally, so
      * "no matches" only ever means "none in what is on this phone" — naming the
@@ -1405,9 +1198,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             return
         }
         searchCoverageRow.visibility = android.view.View.VISIBLE
-        // "Sync all" and scroll-to-top pagination reach the chat's start too, and
-        // Bridge only remembers that for the current run — record it so the
-        // answer survives a restart
         if (Bridge.isHistoryExhausted(chatId)) Prefs.setHistoryComplete(this, chatId)
         searchDeeper.setText(if (deepening) R.string.stop else R.string.search_older)
         // The date has to describe what was SCANNED, not what is stored: the
@@ -1419,8 +1209,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             val stored = Bridge.db.oldestMessage(chatId)?.timeSent ?: 0L
             runOnUiThread {
                 if (!searchActive || isFinishing || isDestroyed) return@runOnUiThread
-                // "everything" means the walk reached the chat's start AND the
-                // scan reached the oldest row it brought back
                 val all = Prefs.historyComplete(this, chatId) && stored > 0 && scanned <= stored
                 searchDeeper.visibility =
                     if (all) android.view.View.GONE else android.view.View.VISIBLE
@@ -1450,7 +1238,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         deepening = true
         idleRounds = 0
-        // the floor to beat before a change counts as the page we asked for
         deepOldest = adapter.messagesSnapshot().firstOrNull()?.timeSent ?: 0L
         updateCoverage()
         pullOlderPage()
@@ -1533,7 +1320,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         Prefs.setScrollAnchor(this, chatId, id, offset)
     }
 
-    /** Restores the stored anchor; false when it is gone or not loaded yet. */
     private fun restoreScrollAnchor(): Boolean {
         val (msgId, offset) = Prefs.scrollAnchor(this, chatId) ?: return false
         val pos = adapter.indexOfMessage(msgId)
@@ -1559,8 +1345,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun updateSearchCount() {
         if (Tg.isTgId(chatId)) {
-            // total comes from the server, so it counts the whole history rather
-            // than the handful of hits fetched so far
             searchCount.text = if (serverHits.isEmpty()) getString(R.string.no_results)
                 else "${currentHit + 1}/${maxOf(serverTotal, serverHits.size)}"
             return
@@ -1569,8 +1353,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             else "${currentMatch + 1}/${searchMatches.size}"
     }
 
-    // --- chat menu -----------------------------------------------------------
-
     private fun showChatMenu(anchor: android.view.View) {
         val popup = android.widget.PopupMenu(this, anchor)
         popup.menu.add(0, 1, 0, R.string.sync_all)
@@ -1578,7 +1360,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> {
-                    // false = another whole-history op (sync-all/export) is busy
                     if (!Bridge.syncAllHistory(chatId)) {
                         Toast.makeText(this, R.string.history_busy, Toast.LENGTH_SHORT).show()
                     }
@@ -1591,22 +1372,13 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         popup.show()
     }
 
-    // --- chat export ---------------------------------------------------------
-
     private fun startChatExport() {
-        // this screen serves both protocols, so the file name has to say which
-        // one the conversation came from
         val proto = getString(if (Tg.isTgId(chatId)) R.string.telegram else R.string.whatsapp)
-        // shared sanitizer (Files.kt), so this and the staging-file naming can't
-        // drift on which characters are considered unsafe
         createExportFile.launch(
             getString(R.string.export_file_name, proto, safeDisplayFileName(chatDisplayName))
         )
     }
 
-    // The bridge owns the export (fetch, merge, file write); this activity
-    // only observes progress/completion via the listener, so leaving the chat
-    // or rotating mid-export neither leaks the activity nor loses the result.
     private fun writeChatExport(uri: Uri) {
         // the export runs in the Bridge singleton and may outlive this activity
         // (rotation / backing out mid-export), so promote the one-shot
@@ -1615,8 +1387,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         try {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         } catch (e: SecurityException) {
-            // provider offered no persistable grant; the transient one lasts as
-            // long as this activity, which still covers a quick foreground export
         }
         if (!Bridge.exportChat(chatId, uri)) {
             Toast.makeText(this, R.string.export_failed, Toast.LENGTH_SHORT).show()
@@ -1649,12 +1419,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // --- presence ------------------------------------------------------------
-
     private fun updateSubtitle() {
-        // single owner of the subtitle line: a running export, then sync-all,
-        // then transient activity (typing/recording) take precedence over the
-        // base presence line, shown in accent; it reverts cleanly as they clear
         val exportCount = Bridge.exportProgress(chatId)
         val syncPct = Bridge.syncAllProgress(chatId)
         val state = Bridge.chatState(chatId)
@@ -1671,8 +1436,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             Bridge.isOnline(chatId) -> getString(R.string.online)
             Bridge.lastSeenOf(chatId) > 0 ->
                 getString(R.string.last_seen, TimeFormat.compactWithTime(this, Bridge.lastSeenOf(chatId)))
-            // no exact time: Telegram only reports a bucket unless both sides
-            // share their last-seen
             Bridge.lastSeenApproxOf(chatId) != 0 -> getString(Bridge.lastSeenApproxOf(chatId))
             else -> null
         }
@@ -1684,9 +1447,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             if (subtitle.isNullOrEmpty()) android.view.View.GONE else android.view.View.VISIBLE
     }
 
-    // In groups the actor is ambiguous, so name them: "Alice is typing…", or
-    // "Alice, Bob are typing…" when several are active at once. One-to-one
-    // chats already imply who it is, so the bare activity stands.
     private fun activityLine(activity: String): String {
         if (!isGroup) return activity
         val name = Bridge.chatStateName(chatId)
@@ -1717,14 +1477,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (userId == chatId) updateSubtitle()
     }
 
-    // --- compose --------------------------------------------------------------
-
     private fun updateActionButton() {
         if (recorder != null || pendingAudio != null) return // recording/pending UI owns the buttons meanwhile
         val sends = input.text.isNotBlank()
         actionButton.setImageResource(if (sends) R.drawable.ic_send else R.drawable.ic_mic)
-        // the button's job swaps with the input, so its label has to follow the
-        // icon — a fixed "Send" announced the mic as a send button
         actionButton.contentDescription =
             getString(if (sends) R.string.send else R.string.record_voice)
     }
@@ -1750,11 +1506,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         clearComposeContext()
     }
 
-    // --- attach (file picker) -------------------------------------------------
-
     private fun onFilePicked(uri: Uri) {
-        // capture the reply target now and clear the compose bar; the file may
-        // be attached as a reply to that message
         val quoted = replyTarget
         clearComposeContext()
         io.execute {
@@ -1766,21 +1518,16 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
                     return@runOnUiThread
                 }
-                // one owner of the mime→sender mapping (shared with the share flow)
                 Bridge.sendFile(chatId, local.absolutePath, name, mime, quoted = quoted)
             }
         }
     }
-
-    // --- voice recording -------------------------------------------------------
 
     private fun startRecording() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 2)
             return
         }
-        // a STAGING_PREFIXES name via the shared helper, so the startup sweep and
-        // this producer can't drift apart on the naming contract
         val file = stagingFile("rec", "voice.ogg")
         var fresh: MediaRecorder? = null
         try {
@@ -1802,7 +1549,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             recordAmps.clear()
             acquireRecordWakeLock()
             main.post(ampTicker)
-            // swap the input for a live timer; attach becomes cancel, action sends
             input.visibility = android.view.View.GONE
             recordTimer.visibility = android.view.View.VISIBLE
             recordTimer.text = "●  0:00"
@@ -1826,8 +1572,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             @Suppress("DEPRECATION")
             val wl = getSystemService(PowerManager::class.java)
                 .newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK, "unichat:recording")
-            // timeout as a backstop only: a lock leaked by an unforeseen path
-            // would otherwise keep the screen on until the battery died
             wl.acquire(RECORD_WAKE_LOCK_MS)
             recordWakeLock = wl
         } catch (e: Exception) {
@@ -1860,9 +1604,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // Stops the live MediaRecorder (if any) and returns the file it wrote plus
-    // its duration, without deciding whether to send, discard, or hold onto
-    // it — that choice belongs to the caller.
     private fun stopRecorder(): Pair<File, Int>? {
         val r = recorder ?: return null
         recorder = null
@@ -1882,11 +1623,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         return file?.let { it to duration }
     }
 
-    // Called whenever the app loses the foreground/focus mid-recording (an
-    // incoming call, switching apps, the screen turning off, an overlay
-    // stealing focus…): stops the mic immediately but keeps the captured
-    // audio as a pending voice message the user can still send or cancel —
-    // it must never be silently thrown away.
     private fun captureRecordingAsPending() {
         // stopRecorder() returns null both when nothing was recording (the
         // common no-op path — this is called from onPause/onStop/focus loss) and
@@ -1908,18 +1644,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         pendingAudio = file
         pendingDuration = duration
-        // survive this instance: re-entering the chat restores the send/cancel UI
-        // (amplitudes included, or the restored recording would be sent with an
-        // empty waveform and render as a flat line for the recipient)
         pendingRecordings[chatId] = PendingRecording(file, duration, recordAmps.toList())
         recordTimer.text = getString(R.string.recording_paused, TimeFormat.mmss(duration))
     }
 
-    /**
-     * Re-adopts a recording captured before this instance existed (Back pressed
-     * mid-recording, or the activity recreated), so the user can still send or
-     * discard it instead of losing it silently.
-     */
     private fun restorePendingRecording() {
         if (recorder != null || pendingAudio != null) return
         val pending = pendingRecordings[chatId] ?: return
@@ -1938,8 +1666,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         showRecordingButtons()
     }
 
-    // While a recording is live or pending, both compose buttons take on another
-    // job — attach cancels, action sends — so their labels move with their icons.
     private fun showRecordingButtons() {
         attachButton.setImageResource(R.drawable.ic_close)
         attachButton.contentDescription = getString(R.string.cancel_recording)
@@ -1971,7 +1697,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         resetRecordingUi()
         if (send && duration >= 1) {
-            // a voice note can be a reply; attach the quote then clear the bar
             val quoted = replyTarget
             clearComposeContext()
             Bridge.sendAudio(chatId, file.absolutePath, duration, quoted, buildWaveform(recordAmps))
@@ -1983,8 +1708,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             file.delete()
         }
     }
-
-    // --- attach menu / location ---------------------------------------------
 
     private fun showAttachMenu() {
         val items = arrayOf(getString(R.string.attach_file), getString(R.string.attach_location))
@@ -2013,9 +1736,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         acquireAndSendLocation(preciseAllowed = fine)
     }
 
-    // Framework-only location: a fresh last-known fix is used directly,
-    // otherwise a one-shot fix is requested from every enabled provider (GPS
-    // works without any Google services; network location is opportunistic).
     private fun acquireAndSendLocation(preciseAllowed: Boolean) {
         // Drop any previous attempt first. locationTimeout used to be
         // overwritten without removing the Runnable already posted for it, so
@@ -2113,7 +1833,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /** Opens a location message's coordinates in whatever maps app is installed. */
     private fun openLocation(msg: MessageRow) {
         val coords = msg.coordinates()
         if (coords.isEmpty()) return
@@ -2124,8 +1843,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             Toast.makeText(this, R.string.no_app_for_file, Toast.LENGTH_SHORT).show()
         }
     }
-
-    // --- documents -------------------------------------------------------------
 
     private fun openDocument(msg: MessageRow) {
         if (!mediaOnDisk(msg)) {
@@ -2141,8 +1858,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun mediaOnDisk(msg: MessageRow): Boolean =
         msg.filePath.isNotEmpty() && File(msg.filePath).exists()
 
-    // Video tapped outside its download icon: open now if it's here, otherwise
-    // download and open automatically once the file lands (see reload()).
     private fun openVideo(msg: MessageRow) {
         if (mediaOnDisk(msg)) {
             openMediaFile(msg)
@@ -2152,7 +1867,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         downloadWithToast(msg)
     }
 
-    // Hands a downloaded file to an external viewer (video player, doc reader…).
     private fun openMediaFile(msg: MessageRow) {
         val (uri, mime) = providedFile(File(msg.filePath), "*/*")
         val intent = Intent(Intent.ACTION_VIEW)
@@ -2165,7 +1879,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // A user-asked download plus the "Downloading…" acknowledgement toast.
     private fun downloadWithToast(msg: MessageRow) {
         // a search window's rows have no DB row for the transfer to report on
         if (windowMode) {
@@ -2176,8 +1889,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         Toast.makeText(this, R.string.downloading, Toast.LENGTH_SHORT).show()
     }
-
-    // --- forward -----------------------------------------------------------
 
     /**
      * A list dialog whose entries carry their own action, so dispatch is by
@@ -2203,7 +1914,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             .show()
     }
 
-    // Message-action dialog.
     private fun showMessageActions(msg: MessageRow) {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         fun add(res: Int, action: () -> Unit) = actions.add(getString(res) to action)
@@ -2215,7 +1925,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
         add(R.string.reply) { startReply(msg) }
         if (!labelOnly) add(R.string.forward) { pickForwardTarget(msg) }
-        // the protocol only allows editing for a limited window after sending
         if (msg.fromMe && msg.msgType == "" && Bridge.canEdit(msg)) add(R.string.edit) { startEdit(msg) }
         add(R.string.delete) { confirmDelete(listOf(msg)) }
         if (msg.text.isNotEmpty() && msg.msgType != "audio") add(R.string.copy) { copyText(msg.text) }
@@ -2225,8 +1934,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         showActionDialog(actions)
     }
 
-    // WhatsApp's quick-reaction set in a horizontal row; tapping one sends it,
-    // the neutral button clears an earlier reaction.
     private fun showReactionPicker(msg: MessageRow) {
         val row = android.widget.LinearLayout(this)
         row.orientation = android.widget.LinearLayout.HORIZONTAL
@@ -2251,8 +1958,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         dialog.show()
     }
 
-    // --- reply / edit compose context --------------------------------------
-
     private fun startReply(msg: MessageRow) {
         editTarget = null
         replyTarget = msg
@@ -2263,10 +1968,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             contextText.text = getString(R.string.replying_to, getString(R.string.you), preview)
             return
         }
-        // Resolve the author off the main thread (this runs from a dialog click)
-        // and through senderLabel, the single owner of the name fallback chain —
-        // falling back to the CHAT name here labelled a group reply with the
-        // group's own name while the bubble above showed the push name.
         contextText.text = getString(
             R.string.replying_to, senderLabel(emptyMap(), msg.senderId, msg.senderName), preview
         )
@@ -2291,10 +1992,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         focusComposer()
     }
 
-    // Focuses the message input and opens the virtual keyboard. Reply/edit is
-    // picked from the actions dialog, which still owns window focus while it
-    // dismisses — showSoftInput is ignored then. If our window isn't focused
-    // yet, defer the request to onWindowFocusChanged.
     private var pendingShowKeyboard = false
 
     private fun focusComposer() {
@@ -2314,8 +2011,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (!hasFocus) captureRecordingAsPending()
     }
 
-    // one place that knows the SHOW_IMPLICIT flag and the window-focus caveat
-    // documented above; the search bar goes through it too
     private fun showKeyboard(target: android.view.View = input) {
         val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
         imm.showSoftInput(target, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
@@ -2332,10 +2027,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         contextBar.visibility = android.view.View.GONE
     }
 
-    // Delete-confirmation dialog shared by the single-message action and the
-    // multi-select bar. "Delete for everyone" is offered only when EVERY
-    // message is ours and still within WhatsApp's revoke window — the server
-    // would reject the too-old ones.
     private fun confirmDelete(msgs: List<MessageRow>, onDone: () -> Unit = {}) {
         val options = ArrayList<Pair<String, () -> Unit>>()
         if (msgs.all { Bridge.canDeleteForEveryone(it) }) {
@@ -2349,12 +2040,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         showActionDialog(options, R.string.delete_message, cancellable = true, onChosen = onDone)
     }
 
-    /** Share a message out to any other app via the system share sheet. */
     private fun shareMessage(msg: MessageRow) {
         val intent = Intent(Intent.ACTION_SEND)
         if (msg.msgType == "location") {
-            // nothing to download: share the raw coordinates (any maps app
-            // accepts them) plus a clickable maps link
             val coords = msg.coordinates()
             val link = "https://maps.google.com/?q=$coords"
             intent.type = "text/plain"
@@ -2392,26 +2080,16 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         copyToClipboard("message", text, R.string.copied)
     }
 
-    // Single-message forward: same picker and same ordered Bridge batch path
-    // as the multi-select forward, so the type mapping lives only in
-    // Bridge.forwardOneBlocking.
     private fun pickForwardTarget(msg: MessageRow) {
         showForwardPicker { targets -> forwardMessagesToTargets(listOf(msg), targets) }
     }
 
-    // Builds the forward-target picker: every chat, with "You (yourself)"
-    // pinned first, labels falling back to the phone number for unknown
-    // contacts. Shared by the single-message and multi-select forwards.
     private fun showForwardPicker(onPick: (List<String>) -> Unit) {
         io.execute {
             val (labels, ids) = targetChoices()
             runOnUiThread {
-                // the chats query runs on the shared serial io thread and can be
-                // queued behind other DB work, so this screen may be gone by now;
-                // AlertDialog.show() on a dead window throws BadTokenException
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (ids.isEmpty()) {
-                    // don't just do nothing: Forward would look broken
                     Toast.makeText(this, R.string.no_chats, Toast.LENGTH_SHORT).show()
                     return@runOnUiThread
                 }
@@ -2426,14 +2104,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun isStillSending(msg: MessageRow): Boolean =
         msg.fromMe && Bridge.isStagingPath(msg.filePath)
 
-    // --- multi-select --------------------------------------------------------
-    // Long-pressing a message enters selection mode (driven by the adapter); a
-    // contextual action bar then offers forward/copy/delete over the whole set.
-
     private var actionMode: androidx.appcompat.view.ActionMode? = null
 
-    // Opens/updates/closes the contextual bar as the selection changes. Delete
-    // is offered only when every selected message is our own.
     private fun onSelectionChanged() {
         val count = adapter.selectedCount()
         if (count == 0) {
@@ -2464,7 +2136,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
         override fun onPrepareActionMode(mode: androidx.appcompat.view.ActionMode, menu: android.view.Menu): Boolean {
             val msgs = adapter.selectedMessages()
-            // hide delete if any selected message isn't ours
             menu.findItem(M_DELETE)?.isVisible = msgs.isNotEmpty() && msgs.all { it.fromMe }
             return true
         }
@@ -2486,8 +2157,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // Copies the text of the selected messages (media rows contribute their
-    // caption; audio has none), newest-last, joined by newlines.
     private fun copySelected(msgs: List<MessageRow>) {
         val text = msgs.filter { it.text.isNotEmpty() && it.msgType != "audio" }
             .joinToString("\n") { it.text }
@@ -2502,18 +2171,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    // Forwards the selected messages to every chosen chat. Media that is still
-    // uploading, or not yet downloaded, is skipped (and a download is kicked
-    // off); the rest are handed to the bridge as one ordered batch so they
-    // arrive in the same order they were originally sent.
     private fun forwardMessagesToTargets(msgs: List<MessageRow>, targets: List<String>) {
         if (targets.isEmpty() || msgs.isEmpty()) return
-        // preserve chronological order (msgs already is) so the batch is ordered
         val ready = ArrayList<MessageRow>()
         var stillSending = false
         var downloading = false
         for (msg in msgs) {
-            // nothing of a label-only message exists on this device to send on
             if (msg.msgType in LABEL_ONLY_TYPES) continue
             val isFileMedia = msg.msgType in FILE_MEDIA_TYPES
             if (isFileMedia && isStillSending(msg)) { stillSending = true; continue }

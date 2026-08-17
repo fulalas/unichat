@@ -9,7 +9,6 @@
         android:orientation="vertical"
         android:paddingBottom="24dp">
 
-        <!-- Avatar header -->
         <ImageView
             android:id="@+id/avatar"
             android:layout_width="200dp"
@@ -44,7 +43,6 @@
             android:layout_marginTop="16dp"
             android:background="@color/divider" />
 
-        <!-- Name (editable — the profile name shown to everyone) -->
         <LinearLayout
             android:id="@+id/rowName"
             android:layout_width="match_parent"
@@ -79,7 +77,6 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- About (editable) -->
         <LinearLayout
             android:id="@+id/rowAbout"
             android:layout_width="match_parent"
@@ -114,7 +111,6 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- Phone (read-only) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

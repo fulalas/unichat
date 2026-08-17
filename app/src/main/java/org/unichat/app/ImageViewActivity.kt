@@ -14,31 +14,17 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import java.io.File
 
-/**
- * Fullscreen image viewer: swipe left/right for the chat's other images, pinch
- * to zoom, tap to close, share the one on screen.
- *
- * Opened either on a chat message (the whole chat's images become the album) or
- * on a single picture with no chat behind it — an avatar — which stays a
- * one-page pager rather than a special case.
- */
 class ImageViewActivity : BaseActivity(), Bridge.UiListener {
 
-    // fullscreen by design: it hides the system bars and the image should fill
-    // the whole window
     override val padForSystemBars: Boolean = false
 
     private lateinit var pager: ViewPager2
     private var chatId: String = ""
     private var images: List<MessageRow> = emptyList()
-    // the standalone picture (an avatar), when there is no chat to page through
     private var singlePath: String = ""
-    // decode target: the display, with headroom for pinch zoom
     private var decodeTarget = 2160
 
     private companion object {
-        // history pages pulled per swipe against the oldest image before the
-        // user has to ask again
         private const val OLDER_ROUNDS = 8
     }
     // Pulling older history: a fetched page often holds no images at all, so
@@ -51,8 +37,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         chatId = intent.getStringExtra("chatId").orEmpty()
-        // the picture belongs to a chat, and its controls take that chat's
-        // accent; unknown (no chat passed) keeps the app's own colours
         if (chatId.isNotEmpty()) applyProtocolTheme(Tg.isTgId(chatId))
         supportActionBar?.hide()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -90,8 +74,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
             pager.adapter?.notifyDataSetChanged()
             return
         }
-        // the album is a DB read, so the tapped picture is shown first and the
-        // rest of the chat's images slot in around it once they are known
         singlePath = path
         Io.executor.execute {
             val all = Bridge.db.chatImages(chatId)
@@ -99,7 +81,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 val start = all.indexOfFirst { it.filePath == path }
                 if (start < 0) {
-                    // not in the album (an avatar opened from a chat screen)
                     return@runOnUiThread
                 }
                 images = all
@@ -116,13 +97,8 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         Bridge.removeListener(this)
     }
 
-    /** A page's download finished: rebind it so the picture replaces the spinner. */
     override fun onMessagesChanged(chatId: String, rowIds: Set<String>?) {
         if (chatId != this.chatId || images.isEmpty()) return
-        // Named rows and nothing structural: the album can't have gained or lost
-        // a page, so re-read just those instead of rescanning the whole chat's
-        // images (an unbounded scan that ran on every message event while the
-        // viewer was open — download progress included).
         if (rowIds != null) {
             refreshPages(rowIds)
             return
@@ -133,7 +109,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 awaitingOlder = false
                 if (fresh.size == images.size) {
-                    // that page held no images: keep walking back
                     pullOlder()
                 }
                 if (fresh.size != images.size) {
@@ -164,7 +139,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /** Re-reads [ids] and rebinds only the pages whose file actually arrived. */
     private fun refreshPages(ids: Set<String>) {
         Io.executor.execute {
             val fresh = Bridge.db.messagesByIds(chatId, ids).associateBy { it.id }
@@ -173,9 +147,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
                 val landed = ArrayList<String>()
                 images = images.map { old ->
                     val now = fresh[old.id] ?: return@map old
-                    // only a file appearing matters here; a tick or a reaction
-                    // changes nothing the viewer draws, and rebinding would
-                    // restart the decode and drop the current page's zoom
                     if (now.filePath == old.filePath) old else { landed.add(old.id); now }
                 }
                 for (id in landed) {
@@ -188,17 +159,9 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
 
     private fun count(): Int = if (images.isEmpty()) 1 else images.size
 
-    /**
-     * The album holds the images of the history fetched so far, oldest first,
-     * so page 0 is the oldest one KNOWN — not necessarily the oldest there is.
-     * Swiping against it pulls history backwards until an older image turns up
-     * or the chat's start is reached.
-     */
     private fun loadOlderIfAtStart() {
         if (chatId.isEmpty() || images.isEmpty() || pager.currentItem > 0) return
         if (Bridge.isHistoryExhausted(chatId)) return
-        // each swipe against the edge refills the budget, so a long run of
-        // image-less history is walked by swiping again rather than by waiting
         olderRoundsLeft = OLDER_ROUNDS
         pullOlder()
     }
@@ -218,7 +181,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         }, Bridge.historyTimeoutMs)
     }
 
-    /** File backing the page currently on screen, "" when it is not local yet. */
     private fun currentPath(): String =
         if (images.isEmpty()) singlePath
         else images.getOrNull(pager.currentItem)?.filePath.orEmpty()
@@ -242,7 +204,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
             holder.image.setImageDrawable(null)
             holder.image.tag = path
             if (path.isEmpty()) {
-                // not downloaded yet: ask for it and wait for onMessagesChanged
                 holder.progress.visibility = View.VISIBLE
                 if (msg != null) Bridge.downloadFile(msg, userInitiated = true)
                 return
@@ -281,7 +242,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
 
     private fun currentMsg(): MessageRow? = images.getOrNull(pager.currentItem)
 
-    /** Closes the viewer and asks the chat behind it to scroll to this message. */
     private fun goToMessage() {
         val msg = currentMsg() ?: return
         setResult(RESULT_OK, Intent().putExtra("jumpTo", msg.id))

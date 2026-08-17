@@ -3,7 +3,6 @@ package org.unichat.app
 import android.content.Context
 import androidx.appcompat.app.AppCompatDelegate
 
-/** Small persisted UI preferences: theme mode and font scale. */
 object Prefs {
     private const val FILE = "unichat_prefs"
     private const val KEY_NIGHT = "night_mode"
@@ -44,7 +43,6 @@ object Prefs {
         return raw.substring(0, at) to offset
     }
 
-    /** Passing a null [msgId] forgets the chat's anchor (it is back at the end). */
     fun setScrollAnchor(ctx: Context, chatId: String, msgId: String?, offset: Int) {
         val e = prefs(ctx).edit()
         if (msgId.isNullOrEmpty()) e.remove(KEY_SCROLL + chatId)
@@ -76,8 +74,6 @@ object Prefs {
         e.apply()
     }
 
-    // whether a Telegram account is linked (mirrors TDLib's async auth state so
-    // startup routing has a synchronous answer)
     fun tgLinked(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_TG_LINKED, false)
 
     fun setTgLinked(ctx: Context, linked: Boolean) =

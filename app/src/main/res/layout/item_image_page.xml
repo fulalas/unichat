@@ -9,7 +9,6 @@
         android:layout_height="match_parent"
         android:contentDescription="@null" />
 
-    <!-- shown while the page's file is still being fetched -->
     <ProgressBar
         android:id="@+id/pageProgress"
         android:layout_width="48dp"

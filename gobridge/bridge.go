@@ -1,7 +1,3 @@
-// bridge.go
-//
-// gomobile-friendly wrapper around whatsmeow for the unichat Android app.
-// Adapted from nchat's lib/unichat/go/gowm.go (MIT license).
 
 package wmbridge
 
@@ -45,65 +41,23 @@ type EventListener interface {
 	OnStateChanged(state string) // connecting, connected, disconnected, logged_out, outdated
 	OnQrCode(code string)
 	OnPairCode(code string)
-	// a code from pairErrorCode, not prose: the app owns the wording
 	OnPairError(code string)
-	// isSaved is true only for address-book contacts (a name saved on the
-	// phone), not for chat partners known merely by their WhatsApp push name.
 	OnContact(id string, name string, phone string, isSelf bool, isGroup bool, isSaved bool)
 	OnChat(chatId string, name string, unreadCount int, isArchived bool, lastMessageTime int64)
-	// OnContactsSynced fires once requestContacts has emitted every contact, i.e.
-	// after a sync-complete when the LID→phone mapping is warm. The app uses it to
-	// reconcile any chat mistakenly keyed by a contact's LID (see ResolveChatId).
 	OnContactsSynced()
-	// msgType is "" for plain text, else a content kind; fileId is an opaque token for
-	// DownloadFile when msgType is a media type. isHistory is true for messages
-	// delivered by a history sync (backfill) rather than arriving live.
-	// isEdited is true when this delivery is an edit of an existing message.
-	// quotedId/quotedText describe the message this one replies to ("" if none);
-	// quotedType is that message's msgType, so a quote with no body of its own
-	// (a photo, a voice note) is labelled by the app's own localized strings
-	// rather than by a fixed English word chosen here.
-	// senderName is the sender's WhatsApp push name (public name), used as a
-	// fallback for group participants not in the address book.
-	// latitude/longitude are meaningful only for msgType "location"; they used
-	// to be smuggled through fileId as "lat,lng", so that one field meant either
-	// a media reference or a pair of coordinates depending on the type.
 	OnMessage(chatId string, msgId string, senderId string, text string, fromMe bool, timeSent int64, isRead bool, msgType string, fileId string, latitude float64, longitude float64, isHistory bool, isEdited bool, quotedId string, quotedText string, quotedType string, senderName string, isForwarded bool)
-	// OnMessageDeleted fires when a message is revoked (by anyone).
 	OnMessageDeleted(chatId string, msgId string)
-	// OnReaction fires when someone reacts to a message; an empty emoji
-	// removes that sender's earlier reaction.
 	OnReaction(chatId string, msgId string, senderId string, emoji string)
-	// status: 2 = downloaded (filePath set), 3 = failed
 	OnFileDownloaded(chatId string, msgId string, filePath string, status int)
-	// OnDownloadProgress reports 0..99 while a download streams; the final
-	// state arrives via OnFileDownloaded. Only fired when the percentage
-	// advances, so at most ~100 calls per download.
 	OnDownloadProgress(chatId string, msgId string, pct int)
 	OnMessageRead(chatId string, msgId string)
-	// OnMessagePlayed fires when a voice note is played: our outgoing one by the
-	// recipient, or an incoming one we played on another device.
 	OnMessagePlayed(chatId string, msgId string)
-	// OnChatReadSelf fires when the chat was read on another of our devices
-	// (e.g. the phone's WhatsApp), so its notification can be cleared here.
 	OnChatReadSelf(chatId string)
-	// OnMute fires when a chat's mute setting changes (via app-state sync from
-	// this or another device). muted is the chat's current muted status.
 	OnMute(chatId string, muted bool)
-	// state: "typing", "recording" (voice message) or "paused"
 	OnChatState(chatId string, userId string, state string)
-	// lastSeen is unix seconds, 0 if hidden/unknown
 	OnPresence(userId string, isOnline bool, lastSeen int64)
 	OnSyncProgress(progress int)
-	// OnChatHistoryDelivered fires when the phone answers an on-demand
-	// history request (RequestChatHistory): count messages arrived for the
-	// chat, 0 meaning the start of the chat's history was reached. forExport
-	// mirrors the request's flag. oldestId/oldestTime/oldestFromMe identify
-	// the oldest message of the page (including non-displayable entries), so
-	// the app can anchor the next page without guessing ("" when count is 0).
 	OnChatHistoryDelivered(chatId string, count int, forExport bool, oldestId string, oldestTime int64, oldestFromMe bool)
-	// OnExportMessage delivers one message of an on-demand history page that
-	// was requested with forExport; such pages are NOT stored locally.
 	OnExportMessage(chatId string, msgId string, senderId string, text string, fromMe bool, timeSent int64, msgType string, fileId string, senderName string, isEdited bool)
 	OnLog(level int, message string)
 }
@@ -130,14 +84,9 @@ type conn struct {
 	listener  EventListener
 	state     string
 	timeReads map[string]time.Time
-	// state transitions waiting to be handed to the listener, plus the flag
-	// naming the goroutine draining them; see setState
 	statePending    []string
 	stateDelivering bool
 	loginActive     bool
-	// identifies the loginLoop that owns loginActive/qrReady. StopLogin clears
-	// loginActive without waiting for the loop to drain, so a superseded loop
-	// must never clean up after the one that replaced it.
 	loginGen int
 	qrReady  bool
 	// pairing codes die with the login socket (~160s), so the login loop
@@ -155,12 +104,7 @@ type conn struct {
 	historyChat      string
 	historyForExport bool
 	historyActive    bool
-	// media awaiting a re-upload from the primary phone (history media whose
-	// server copy expired), keyed by message id; see DownloadFile.
 	mediaRetries map[string]*pendingMediaRetry
-	// a contact/group sweep is running (see requestContactsAsync): the events
-	// that trigger it fire on every reconnect, and two overlapping sweeps just
-	// interleave duplicate callbacks
 	contactsSyncing bool
 }
 
@@ -171,8 +115,6 @@ type conn struct {
 // mediaRetries map can't accumulate entries for requests that go unanswered.
 const mediaRetryTimeout = 60 * time.Second
 
-// pendingMediaRetry holds what's needed to finish a download once the phone
-// answers a media retry request with a fresh DirectPath.
 type pendingMediaRetry struct {
 	chatId        string
 	downloadable  whatsmeow.DownloadableMessage
@@ -195,9 +137,6 @@ func (c *conn) hasPendingMediaRetry(msgId string) bool {
 	return ok
 }
 
-// takeAllPendingMediaRetries removes and returns every outstanding entry, so a
-// session teardown can stop their timers instead of letting them fire into the
-// next session (reporting a failed download for a chat that no longer exists).
 func (c *conn) takeAllPendingMediaRetries() []*pendingMediaRetry {
 	mx.Lock()
 	defer mx.Unlock()
@@ -219,7 +158,6 @@ func (c *conn) takePendingMediaRetry(msgId string) (*pendingMediaRetry, bool) {
 	return r, ok
 }
 
-// setPendingHistory records the outstanding request before it is sent.
 func (c *conn) setPendingHistory(chatId string, forExport bool) {
 	mx.Lock()
 	c.historyChat = chatId
@@ -228,25 +166,18 @@ func (c *conn) setPendingHistory(chatId string, forExport bool) {
 	mx.Unlock()
 }
 
-// clearPendingActive drops the "awaiting a response" flag (send failed, or the
-// response has been delivered) without changing the sticky routing mode.
 func (c *conn) clearPendingActive() {
 	mx.Lock()
 	c.historyActive = false
 	mx.Unlock()
 }
 
-// exportRouted reports whether an on-demand response for chatId must be
-// delivered out-of-band (export) instead of stored, per the current request's
-// mode; sticky so duplicate pages are never mis-stored mid-export.
 func (c *conn) exportRouted(chatId string) bool {
 	mx.Lock()
 	defer mx.Unlock()
 	return c.historyForExport && c.historyChat == chatId
 }
 
-// takePendingHistory consumes the outstanding request for the empty-response
-// path (the sync named no conversation), returning its chat and mode.
 func (c *conn) takePendingHistory() (chatId string, forExport bool, ok bool) {
 	mx.Lock()
 	defer mx.Unlock()
@@ -330,7 +261,6 @@ func (c *conn) setTimeRead(chatId string, t time.Time) {
 	}
 }
 
-// bridgeLogger adapts whatsmeow logging to the EventListener.
 type bridgeLogger struct {
 	c   *conn
 	mod string
@@ -354,8 +284,6 @@ func (l *bridgeLogger) Sub(mod string) waLog.Logger {
 	return &bridgeLogger{c: l.c, mod: l.mod + "/" + mod}
 }
 
-// Init opens (or creates) the session database under dataDir and returns a
-// connection id, or -1 on failure.
 func Init(dataDir string, listener EventListener) int {
 	c := &conn{
 		path:         dataDir,
@@ -386,13 +314,6 @@ func Init(dataDir string, listener EventListener) int {
 		return -1
 	}
 
-	// light initial sync: recent messages only; older history is fetched per
-	// chat on demand via RequestChatHistory. Mutate whatsmeow's default
-	// HistorySyncConfig instead of replacing it — the defaults carry
-	// capability flags the phone checks. OnDemandReady in particular gates
-	// whether the phone answers on-demand history requests at all.
-	// NOTE: these props are only transmitted while pairing; changing them
-	// requires unlinking and re-pairing the device to take effect.
 	store.DeviceProps.RequireFullSync = proto.Bool(false)
 	store.DeviceProps.HistorySyncConfig.SupportCallLogHistory = proto.Bool(false)
 	store.DeviceProps.HistorySyncConfig.SupportRecentSyncChunkMessageCountTuning = proto.Bool(true)
@@ -424,9 +345,6 @@ func Init(dataDir string, listener EventListener) int {
 	return connId
 }
 
-// newDeviceClient builds a whatsmeow client on the given device store and
-// hooks it to the event dispatcher. Used at Init and again after Logout: a
-// logged-out device's stores are unusable, so relogin needs a fresh client.
 func newDeviceClient(connId int, c *conn, deviceStore *store.Device) *whatsmeow.Client {
 	clientLog := &bridgeLogger{c: c, mod: "client"}
 	client := whatsmeow.NewClient(deviceStore, clientLog)
@@ -436,15 +354,11 @@ func newDeviceClient(connId int, c *conn, deviceStore *store.Device) *whatsmeow.
 	return client
 }
 
-// HasSession reports whether the session database contains a paired device,
-// i.e. whether Connect() can be used instead of StartLogin().
 func HasSession(connId int) bool {
 	c := getConn(connId)
 	return c != nil && c.getClient().Store.ID != nil
 }
 
-// Connect connects using the existing session. Asynchronous; progress is
-// reported via OnStateChanged.
 func Connect(connId int) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -459,12 +373,6 @@ func Connect(connId int) bool {
 	return true
 }
 
-// StartLogin begins pairing of this app as a new linked device using the QR
-// flow; codes arrive via OnQrCode, one per rotation. WhatsApp closes the
-// login socket after ~160s of unscanned QR codes, so the flow automatically
-// restarts until StopLogin is called, pairing succeeds, or the restart budget
-// runs out. Completion is signalled by OnStateChanged("connected"). While the
-// flow is active, RequestPairCode can be used to pair with a code instead.
 func StartLogin(connId int) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -485,8 +393,6 @@ func StartLogin(connId int) bool {
 	return true
 }
 
-// StopLogin aborts an active QR login flow (e.g. when the login screen is
-// closed without pairing).
 func StopLogin(connId int) {
 	c := getConn(connId)
 	if c == nil {
@@ -501,10 +407,6 @@ func StopLogin(connId int) {
 	}
 }
 
-// beginLoginRound records the round number of the loop identified by gen and
-// reports whether it may run it: a loop that has been stopped, or superseded by
-// a newer one, must neither continue nor touch the shared round counter (which
-// pairRequestDue uses to decide whether this socket still needs a pair code).
 func (c *conn) beginLoginRound(gen int, round int) bool {
 	mx.Lock()
 	defer mx.Unlock()
@@ -515,9 +417,6 @@ func (c *conn) beginLoginRound(gen int, round int) bool {
 	return true
 }
 
-// setLoginQrReady publishes login readiness for the loop identified by gen,
-// ignoring a loop that no longer owns the flow so it cannot wipe the readiness
-// its successor published (RequestPairCode polls it).
 func (c *conn) setLoginQrReady(gen int, ready bool) {
 	mx.Lock()
 	if c.loginGen == gen {
@@ -532,15 +431,6 @@ func (c *conn) isQrReady() bool {
 	return c.qrReady
 }
 
-// loginLoop runs QR pairing rounds until success, abort or restart budget
-// exhaustion (each round lasts ~160s before the server closes the socket).
-//
-// gen is this loop's claim on the single-flight guard. StopLogin clears
-// loginActive and returns without waiting for the loop to drain, so reopening
-// the login screen in that window starts a second loop while this one is still
-// unwinding. Unconditional cleanup then broke the guard: the older loop cleared
-// the flag again (letting a third loop start) and wiped the newer loop's
-// qrReady, and both loops shared loginRound/pairSentRound.
 func loginLoop(c *conn, gen int) {
 	defer func() {
 		mx.Lock()
@@ -560,7 +450,6 @@ func loginLoop(c *conn, gen int) {
 		ch, err := c.getClient().GetQRChannel(context.Background())
 		if err != nil {
 			if errors.Is(err, whatsmeow.ErrQRStoreContainsID) {
-				// already logged in; just connect
 				_ = c.getClient().Connect()
 				return
 			}
@@ -612,7 +501,6 @@ func loginLoop(c *conn, gen int) {
 
 		c.setLoginQrReady(gen, false)
 		if !timedOut {
-			// channel closed without an explicit result (e.g. pairing done)
 			return
 		}
 		c.getClient().Disconnect()
@@ -621,8 +509,6 @@ func loginLoop(c *conn, gen int) {
 	c.setState("disconnected")
 }
 
-// pairRequestDue returns the pending pair phone number if no pairing code has
-// been requested yet on the current login round, marking the round as done.
 func (c *conn) pairRequestDue() (string, int) {
 	mx.Lock()
 	defer mx.Unlock()
@@ -644,7 +530,6 @@ func sendPairCode(c *conn, phoneNumber string, round int) bool {
 		whatsmeow.PairClientFirefox, "Firefox (Linux)")
 	if err != nil {
 		c.log(LogError, fmt.Sprintf("pair phone error %v", err))
-		// allow a retry on this round
 		mx.Lock()
 		if c.pairSentRound == round {
 			c.pairSentRound = 0
@@ -657,21 +542,12 @@ func sendPairCode(c *conn, phoneNumber string, round int) bool {
 	return true
 }
 
-// RequestPairCode requests a pairing code for the given phone number (digits
-// only, international format). If the login socket has been closed by the
-// server (QR timeout), the login flow is restarted first. Because codes die
-// with their login socket, a fresh code is automatically re-requested (and
-// re-emitted via OnPairCode) every time the login flow starts a new socket
-// round. Failures arrive via OnPairError. Blocking; call from a background
-// thread.
 func RequestPairCode(connId int, phoneNumber string) bool {
 	c := getConn(connId)
 	if c == nil {
 		return false
 	}
 
-	// basic validation first for clear error messages; reuse pairErrorMessage's
-	// wording so each user-facing string exists exactly once
 	if len(phoneNumber) <= 6 {
 		c.listener.OnPairError(pairErrorCode(whatsmeow.ErrPhoneNumberTooShort))
 		return false
@@ -686,8 +562,6 @@ func RequestPairCode(connId int, phoneNumber string) bool {
 	c.pairSentRound = 0
 	mx.Unlock()
 
-	// (re)start the login flow if needed and wait for the connection to be
-	// ready (first QR code emitted means the socket is fully established)
 	if !c.getClient().IsConnected() || !c.isQrReady() {
 		StartLogin(c.id)
 		for i := 0; i < 150; i++ {
@@ -704,18 +578,11 @@ func RequestPairCode(connId int, phoneNumber string) bool {
 
 	phone, round := c.pairRequestDue()
 	if phone == "" {
-		// the login loop already sent it for this round
 		return true
 	}
 	return sendPairCode(c, phone, round)
 }
 
-// pairErrorCode maps a pairing failure to a STABLE code the app renders from
-// strings.xml, not to English prose. OnPairError's text is shown to the user
-// verbatim (LoginActivity puts it in the status line and a toast), so building
-// it here made the one screen a user sees before choosing a language the only
-// untranslatable one. "other:" carries the library's own detail for the cases
-// that have no code of their own.
 func pairErrorCode(err error) string {
 	switch {
 	case errors.Is(err, whatsmeow.ErrPhoneNumberTooShort):
@@ -729,7 +596,6 @@ func pairErrorCode(err error) string {
 	}
 }
 
-// Logout unlinks this device and clears the session.
 func Logout(connId int) {
 	c := getConn(connId)
 	if c == nil {
@@ -779,17 +645,11 @@ func (c *conn) resetDevice() {
 		c.log(LogError, fmt.Sprintf("dev store error after logout %v", err))
 		return
 	}
-	// setClient is atomic on its own; the readers never take mx for it
 	if client := newDeviceClient(c.id, c, deviceStore); client != nil {
 		c.setClient(client)
 	}
 }
 
-// requestContactsAsync runs the contact/group sweep off the caller's goroutine,
-// with at most one in flight. It is triggered from whatsmeow's serialized
-// node-handler queue, where it used to run inline: a network IQ plus one DB
-// lookup and one JNI callback per contact, stalling every queued message and
-// receipt behind it — and re-running in full on every reconnect.
 func requestContactsAsync(connId int) {
 	c := getConn(connId)
 	if c == nil {
@@ -812,14 +672,6 @@ func requestContactsAsync(connId int) {
 	}()
 }
 
-// GetSelfId returns our own user id, or "" if not logged in.
-//
-// Store.ID is checked and dereferenced through ONE client load, as everywhere
-// else that touches it: resetDevice (from Logout on a Kotlin thread, and from
-// the *events.LoggedOut handler on whatsmeow's event goroutine) installs a
-// client whose device store is a fresh, unpaired one, so two separate
-// c.getClient() calls can observe different clients and dereference a nil ID —
-// a Go panic that crosses the gomobile/JNI boundary and kills the app.
 func GetSelfId(connId int) string {
 	c := getConn(connId)
 	if c == nil {
@@ -832,10 +684,6 @@ func GetSelfId(connId int) string {
 	return strFromJid(*client.Store.ID)
 }
 
-// sendWithEcho runs the optimistic-echo protocol shared by every non-media
-// sender: persist a local echo, send with the same pre-generated id, roll the
-// echo back on failure and reconcile it with the server's response on success.
-// Returns the new message id, or "" on failure.
 func sendWithEcho(c *conn, chatJid types.JID, message *waE2E.Message, what string) string {
 	msgID := c.getClient().GenerateMessageID()
 	echoLocal(c, chatJid, msgID, message)
@@ -850,8 +698,6 @@ func sendWithEcho(c *conn, chatJid types.JID, message *waE2E.Message, what strin
 	return resp.ID
 }
 
-// SendTextMessage sends a plain text message and returns the new message id,
-// or "" on failure. The sent message is also delivered back via OnMessage.
 func SendTextMessage(connId int, chatId string, text string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -865,8 +711,6 @@ func SendTextMessage(connId int, chatId string, text string) string {
 	return sendWithEcho(c, chatJid, &waE2E.Message{Conversation: &text}, "send")
 }
 
-// SendLocation sends the given coordinates as a location message and returns
-// the new message id, or "" on failure.
 func SendLocation(connId int, chatId string, latitude float64, longitude float64) string {
 	c := getConn(connId)
 	if c == nil {
@@ -884,8 +728,6 @@ func SendLocation(connId int, chatId string, latitude float64, longitude float64
 	return sendWithEcho(c, chatJid, &message, "send location")
 }
 
-// SendTextReply sends a text message quoting an existing one. quotedSender is
-// the JID of the quoted message's author. Returns the new message id or "".
 func SendTextReply(connId int, chatId string, text string, quotedId string, quotedText string, quotedSender string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -904,9 +746,6 @@ func SendTextReply(connId int, chatId string, text string, quotedId string, quot
 	return sendWithEcho(c, chatJid, &message, "send reply")
 }
 
-// SendReaction reacts to a message with an emoji; an empty emoji removes the
-// previous reaction. msgSenderId/msgFromMe identify the target message's
-// sender (part of the protocol's reaction key).
 func SendReaction(connId int, chatId string, msgId string, msgSenderId string, msgFromMe bool, emoji string) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -933,22 +772,14 @@ func SendReaction(connId int, chatId string, msgId string, msgSenderId string, m
 		c.log(LogWarning, fmt.Sprintf("send reaction error %v", err))
 		return false
 	}
-	// reflect locally right away instead of waiting for the device echo
 	c.listener.OnReaction(chatId, msgId, strFromJid(self), emoji)
 	return true
 }
 
-// EditWindowSeconds returns how long after sending a message may still be
-// edited, straight from the protocol library's constant (currently 20min).
-// The server rejects later edits, so the UI hides the action beyond this.
 func EditWindowSeconds() int64 {
 	return int64(whatsmeow.EditWindow / time.Second)
 }
 
-// EditMessage edits an existing outgoing text message. origTimeSent is the
-// message's original send time (unix seconds); edits outside the protocol's
-// edit window are refused here so the local copy never diverges from what
-// recipients see (the server silently drops late edits).
 func EditMessage(connId int, chatId string, msgId string, newText string, origTimeSent int64) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -981,7 +812,6 @@ func EditMessage(connId int, chatId string, msgId string, newText string, origTi
 	return true
 }
 
-// DeleteMessageForEveryone revokes a message for all participants.
 func DeleteMessageForEveryone(connId int, chatId string, msgId string) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -1004,27 +834,14 @@ func DeleteMessageForEveryone(connId int, chatId string, msgId string) bool {
 	return true
 }
 
-// echoSentMessage re-upserts a just-sent message with the server's
-// authoritative data, correcting what the optimistic pre-send echo could only
-// guess: the ack timestamp (replacing the device-clock time, so ordering
-// cannot drift on a skewed clock) and, for media, the upload's download
-// reference (fileId), keeping the media re-downloadable after the local copy
-// is gone.
 func echoSentMessage(c *conn, chatJid types.JID, resp whatsmeow.SendResponse, message *waE2E.Message) {
 	echoMessage(c, chatJid, resp.ID, resp.Timestamp, message)
 }
 
-// echoLocal persists an optimistic local copy of a message about to be sent,
-// so it renders instantly instead of after the network round trip. The send
-// reuses the same pre-generated id; a failed send revokes the copy again via
-// OnMessageDeleted.
 func echoLocal(c *conn, chatJid types.JID, msgID string, message *waE2E.Message) {
 	echoMessage(c, chatJid, msgID, time.Now(), message)
 }
 
-// echoMessage stores a message of ours as if it had just arrived. The two
-// callers above differ only in where the id and timestamp come from — the
-// server's ack, or the local guess made before sending.
 func echoMessage(c *conn, chatJid types.JID, msgID string, ts time.Time, message *waE2E.Message) {
 	var messageInfo types.MessageInfo
 	messageInfo.Chat = chatJid
@@ -1037,11 +854,6 @@ func echoMessage(c *conn, chatJid types.JID, msgID string, ts time.Time, message
 	handleMessageFull(c, messageInfo, message, false, false, false, false)
 }
 
-// echoLocalMedia is echoLocal for media messages, emitted before the (slow)
-// upload even starts: the bubble appears instantly and renders straight from
-// the local source file. fileId stays empty on purpose — the copy never needs
-// downloading, and the permanent media copy replaces the source path right
-// after the send. A failure revokes the copy via OnMessageDeleted.
 func echoLocalMedia(c *conn, chatJid types.JID, msgID string, text string, msgType string,
 	localPath string, quotedId string, quotedText string) {
 	chatId := getChatId(c.getClient(), &chatJid, nil)
@@ -1050,21 +862,16 @@ func echoLocalMedia(c *conn, chatJid types.JID, msgID string, text string, msgTy
 		senderId = strFromJid(*c.getClient().Store.ID)
 	}
 	c.listener.OnMessage(chatId, msgID, senderId, text, true, time.Now().Unix(), c.isSelfChat(chatId),
-		// the local echo carries the quote's body but not its type; the server's
-		// own delivery of this message reconciles the row and fills it in
 		msgType, "", 0, 0, false, false, quotedId, quotedText, "", "", false)
 	if localPath != "" {
 		c.listener.OnFileDownloaded(chatId, msgID, localPath, 2)
 	}
 }
 
-// revokeEcho rolls a failed send's optimistic copy back out of the app.
 func revokeEcho(c *conn, chatJid types.JID, msgID string) {
 	c.listener.OnMessageDeleted(getChatId(c.getClient(), &chatJid, nil), msgID)
 }
 
-// buildQuoteContext returns a ContextInfo quoting a message, or nil when
-// quotedId is empty (i.e. not a reply).
 func buildQuoteContext(quotedId string, quotedText string, quotedSender string) *waE2E.ContextInfo {
 	if quotedId == "" {
 		return nil
@@ -1077,12 +884,6 @@ func buildQuoteContext(quotedId string, quotedText string, quotedSender string) 
 	}
 }
 
-// sendMedia runs the media-send pipeline shared by all four media senders:
-// optimistic echo rendered straight from the local file, upload, type-specific
-// message construction (build, which also names the media-copy extension),
-// send, echo rollback on any failure, then reconciliation with the server
-// response and the permanent media copy.
-// Returns the new message id, or "" on failure.
 func sendMedia(c *conn, chatId string, filePath string, echoText string, msgType string,
 	quotedId string, quotedText string, mediaType whatsmeow.MediaType,
 	build func(uploaded whatsmeow.UploadResponse) (*waE2E.Message, string)) string {
@@ -1109,7 +910,6 @@ func sendMedia(c *conn, chatId string, filePath string, echoText string, msgType
 		revokeEcho(c, chatJid, msgID)
 		return ""
 	}
-	// record the server timestamp and the upload's fileId over the echo
 	echoSentMessage(c, chatJid, resp, message)
 	finishMediaSend(c, chatJid, resp.ID, ext, filePath)
 	return resp.ID
@@ -1147,9 +947,6 @@ func uploadFile(c *conn, client *whatsmeow.Client, msgId string, filePath string
 	return client.UploadReader(context.Background(), src, tmp, mediaType)
 }
 
-// SendImageMessage uploads an image file and sends it with an optional
-// caption. Returns the new message id or "" on failure. Blocking; call from a
-// background thread.
 func SendImageMessage(connId int, chatId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1181,9 +978,6 @@ func SendImageMessage(connId int, chatId string, filePath string, caption string
 		})
 }
 
-// SendVideoMessage uploads a video file and sends it as a real (playable) video
-// with an optional caption. Returns the new message id or "" on failure.
-// Blocking; call from a background thread.
 func SendVideoMessage(connId int, chatId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1226,9 +1020,6 @@ func finishMediaSend(c *conn, chatJid types.JID, msgId string, ext string, srcPa
 	}
 }
 
-// SendAudioMessage sends an ogg/opus file as a voice message (push-to-talk).
-// Returns the new message id or "" on failure. Blocking; call from a
-// background thread.
 func SendAudioMessage(connId int, chatId string, filePath string, durationSeconds int, quotedId string, quotedText string, quotedSender string, waveform []byte) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1247,8 +1038,6 @@ func SendAudioMessage(connId int, chatId string, filePath string, durationSecond
 				Seconds:       proto.Uint32(uint32(durationSeconds)),
 				PTT:           proto.Bool(true),
 			}
-			// amplitude envelope (64 bars, 0..100) recorded by the app; official
-			// clients render it as the voice note's waveform
 			if len(waveform) > 0 {
 				audioMessage.Waveform = waveform
 			}
@@ -1257,8 +1046,6 @@ func SendAudioMessage(connId int, chatId string, filePath string, durationSecond
 		})
 }
 
-// SendDocumentMessage sends an arbitrary file as a document. Returns the new
-// message id or "" on failure. Blocking; call from a background thread.
 func SendDocumentMessage(connId int, chatId string, filePath string, fileName string, mimeType string, quotedId string, quotedText string, quotedSender string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1295,12 +1082,6 @@ func encodeFileId(kind string, m proto.Message) string {
 	return kind + ":" + base64.StdEncoding.EncodeToString(raw)
 }
 
-// DownloadFile downloads the media of a message previously delivered with a
-// fileId token. fromMe/senderId identify the message (needed only to build a
-// media retry request, see below). Emits OnFileDownloaded and returns the
-// local path, or "" on failure — including when a retry request was sent but
-// the phone's answer is still pending; in that case OnFileDownloaded arrives
-// later, from handleMediaRetryEvent. Blocking; call from a background thread.
 func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe bool, senderId string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1328,9 +1109,6 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 	var downloadable whatsmeow.DownloadableMessage
 	var setDirectPath func(string)
 	ext := ""
-	// progress is only surfaced for video (its download is the one the user
-	// waits on); a zero total keeps progressFile quiet for other media, which
-	// also auto-download in bulk while scrolling
 	var total int64
 	switch kind {
 	case "img":
@@ -1442,17 +1220,12 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 	return ""
 }
 
-// isExpiredMediaErr reports whether err is the "media no longer on WhatsApp's
-// servers" case (404/410), the trigger for a media retry request.
 func isExpiredMediaErr(err error) bool {
 	return errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith403) ||
 		errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith404) ||
 		errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith410)
 }
 
-// downloadToPath streams downloadable's media to its on-disk path, reporting
-// progress along the way. Used both for a message's first download attempt
-// and to retry after a media retry response supplies a fresh DirectPath.
 func downloadToPath(c *conn, chatId string, msgId string, downloadable whatsmeow.DownloadableMessage, ext string, total int64) (string, error) {
 	path, err := mediaPath(c, msgId, ext)
 	if err != nil {
@@ -1469,8 +1242,6 @@ func downloadToPath(c *conn, chatId string, msgId string, downloadable whatsmeow
 	if err != nil {
 		return "", err
 	}
-	// stream straight to disk so the transfer can report progress; decryption
-	// happens in place inside DownloadToFile
 	pf := &progressFile{f: f, c: c, chatId: chatId, msgId: msgId, total: total}
 	err = c.getClient().DownloadToFile(context.Background(), downloadable, pf)
 	if cerr := f.Close(); cerr != nil && err == nil {
@@ -1487,12 +1258,6 @@ func downloadToPath(c *conn, chatId string, msgId string, downloadable whatsmeow
 	return path, nil
 }
 
-// sweepPartialMedia removes "<msgid>.part<nanos>" leftovers from downloads that
-// were interrupted by a process kill or a reboot: downloadToPath only unlinks
-// its temp file on its own error paths, so nothing else ever reclaimed them and
-// a long backfill over a flaky connection accumulated them indefinitely.
-// Anything younger than an hour is left alone so a transfer in flight is never
-// pulled out from under itself.
 func sweepPartialMedia(c *conn) {
 	dir := c.path + "/media"
 	entries, err := os.ReadDir(dir)
@@ -1509,7 +1274,6 @@ func sweepPartialMedia(c *conn) {
 		if i < 0 {
 			continue
 		}
-		// only our own suffix: ".part" followed by the nanosecond stamp
 		suffix := name[i+len(".part"):]
 		if suffix == "" || strings.TrimLeft(suffix, "0123456789") != "" {
 			continue
@@ -1521,20 +1285,10 @@ func sweepPartialMedia(c *conn) {
 	}
 }
 
-// formatDuration renders whole seconds in the "m:ss" voice-note duration
-// format the app stores and parses back (TimeFormat.mmss / parseSeconds).
 func formatDuration(seconds int) string {
 	return fmt.Sprintf("%d:%02d", seconds/60, seconds%60)
 }
 
-// extFromFileName returns name's extension (with the dot), or fallback when it
-// has none or it isn't usable as one.
-//
-// The name comes straight from the sender's protobuf, and the result is
-// concatenated onto an on-disk path: an extension containing a '/' (a document
-// named "report.tar/gz") made os.Create fail with ENOENT — reported as a
-// permanent download failure — or, worse, escaped the media directory. An
-// over-long one hit ENAMETOOLONG the same way.
 func extFromFileName(name string, fallback string) string {
 	i := strings.LastIndex(name, ".")
 	if i < 0 {
@@ -1573,8 +1327,6 @@ func extFromMime(mimeType string, fallback string) string {
 	return fallback
 }
 
-// mediaPath builds (and ensures the directory for) the on-disk path a message's
-// media is stored at, deriving a filesystem-safe name from the message id.
 func mediaPath(c *conn, msgId string, ext string) (string, error) {
 	dir := c.path + "/media"
 	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
@@ -1605,10 +1357,6 @@ func safeName(s string, allowDot bool) string {
 	}, s)
 }
 
-// copyToMedia copies a just-sent source file to its permanent media path. It
-// streams the copy rather than taking the bytes: the sender no longer holds the
-// file in memory, and a large document must not have to fit there just to be
-// archived. Returns "" on failure.
 func copyToMedia(c *conn, msgId string, ext string, srcPath string) string {
 	path, err := mediaPath(c, msgId, ext)
 	if err != nil {
@@ -1640,12 +1388,6 @@ func copyToMedia(c *conn, msgId string, ext string, srcPath string) string {
 	return path
 }
 
-// progressFile implements whatsmeow's File interface, delegating to a real file
-// but counting bytes as they stream in (Write) to report download progress.
-// Decryption writes back through WriteAt, which is deliberately NOT counted, so
-// the percentage tracks only the network transfer. A field (not an embedded
-// *os.File) is used so io.Copy can't take a ReaderFrom fast-path that would
-// bypass Write and skip the counting.
 type progressFile struct {
 	f       *os.File
 	c       *conn
@@ -1689,10 +1431,6 @@ func (p *progressFile) WriteAt(b []byte, off int64) (int, error) { return p.f.Wr
 func (p *progressFile) Truncate(size int64) error                { return p.f.Truncate(size) }
 func (p *progressFile) Stat() (os.FileInfo, error)               { return p.f.Stat() }
 
-// RequestChatHistory asks the primary phone for older messages of a chat
-// (delivered later as an ON_DEMAND history sync). oldestMsgId/oldestTimeSent/
-// oldestFromMe identify the oldest message currently known locally. The
-// primary phone must be online for this to be answered.
 func RequestChatHistory(connId int, chatId string, oldestMsgId string, oldestTimeSent int64, oldestFromMe bool, count int, forExport bool) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -1732,10 +1470,6 @@ func RequestChatHistory(connId int, chatId string, oldestMsgId string, oldestTim
 	return true
 }
 
-// GetPrivacySettings fetches the account's privacy settings fresh from the
-// server and returns them as newline-separated "name=value" pairs (empty on
-// failure). Names/values follow the protocol: last/online/profile/status/
-// readreceipts and all/contacts/contact_blacklist/none/match_last_seen.
 func GetPrivacySettings(connId int) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1750,8 +1484,6 @@ func GetPrivacySettings(connId int) string {
 		s.LastSeen, s.Online, s.Profile, s.Status, s.ReadReceipts)
 }
 
-// SetPrivacySetting updates one privacy setting on the account (affects all
-// devices). Blocking; call from a background thread.
 func SetPrivacySetting(connId int, name string, value string) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -1766,8 +1498,6 @@ func SetPrivacySetting(connId int, name string, value string) bool {
 	return true
 }
 
-// GetMyAbout fetches the logged-in account's own "About" text fresh from the
-// server, or "" if unset/unavailable. Blocking; call from a background thread.
 func GetMyAbout(connId int) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1793,15 +1523,6 @@ func GetMyAbout(connId int) string {
 // their contact is not on WhatsApp when the network merely dropped.
 const ResolveNumberFailed = "failed"
 
-// ResolveNumber asks the server whether a phone number is on WhatsApp and
-// returns the chat id to use for it, "" when it is not registered, or
-// ResolveNumberFailed when the question could not be asked. The number must be
-// in international form, e.g. "+5521999...".
-//
-// Contacts reach a linked device only through WhatsApp's own synced contact
-// list, which lags behind the phone's address book; this lets a number read
-// straight from the address book be messaged without waiting for that.
-// Blocking; call from a background thread.
 func ResolveNumber(connId int, phone string) string {
 	c := getConn(connId)
 	if c == nil || phone == "" {
@@ -1828,8 +1549,6 @@ func ResolveNumber(connId int, phone string) string {
 	return ""
 }
 
-// GetMyName returns the account's own profile (push) name — the name shown to
-// everyone who hasn't saved the number — or "" if unset.
 func GetMyName(connId int) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1838,10 +1557,6 @@ func GetMyName(connId int) string {
 	return c.getClient().Store.PushName
 }
 
-// SetMyName updates the account's own profile (push) name and re-announces it
-// via presence so contacts see the change. Persisted locally, so it also
-// survives restarts and re-announces on the next connect. Blocking; call from a
-// background thread.
 func SetMyName(connId int, name string) bool {
 	c := getConn(connId)
 	if c == nil || name == "" {
@@ -1856,16 +1571,12 @@ func SetMyName(connId int, name string) bool {
 		c.log(LogWarning, fmt.Sprintf("save push name error %v", err))
 		return false
 	}
-	// announce it now; a failure (e.g. offline) is non-fatal — the saved name is
-	// re-announced on the next connect (see the Connected handler's presence).
 	if err := client.SendPresence(context.TODO(), types.PresenceAvailable); err != nil {
 		c.log(LogWarning, fmt.Sprintf("announce push name error %v", err))
 	}
 	return true
 }
 
-// SetAbout updates the logged-in account's own "About" text (affects all
-// devices). Blocking; call from a background thread.
 func SetAbout(connId int, text string) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -1893,9 +1604,6 @@ func SetAbout(connId int, text string) bool {
 	return true
 }
 
-// SetProfilePicture sets the logged-in account's own profile picture from a
-// JPEG file (already cropped square by the caller). Returns false on failure.
-// Blocking; call from a background thread.
 func SetProfilePicture(connId int, jpegPath string) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -1905,8 +1613,6 @@ func SetProfilePicture(connId int, jpegPath string) bool {
 	if client.Store.ID == nil {
 		return false
 	}
-	// bounded by construction: the caller hands us a square JPEG it cropped
-	// itself, and the IQ below takes the picture as one in-memory blob
 	data, err := os.ReadFile(jpegPath)
 	if err != nil {
 		c.log(LogWarning, fmt.Sprintf("read avatar error %v", err))
@@ -1919,15 +1625,12 @@ func SetProfilePicture(connId int, jpegPath string) bool {
 		c.log(LogWarning, fmt.Sprintf("set profile picture error %v", err))
 		return false
 	}
-	// drop the stale cached copies so the UI re-fetches the new picture
 	selfId := strFromJid(self)
 	os.Remove(avatarFilePath(c, selfId, true))
 	os.Remove(avatarFilePath(c, selfId, false))
 	return true
 }
 
-// markReceipt sends one receipt for a message, with the shared "sender falls
-// back to the chat JID" convention for 1:1 chats.
 func markReceipt(c *conn, chatId string, senderId string, msgId string, ts time.Time, receiptType ...types.ReceiptType) {
 	chatJid, err := types.ParseJID(chatId)
 	if err != nil {
@@ -1943,7 +1646,6 @@ func markReceipt(c *conn, chatId string, senderId string, msgId string, ts time.
 	}
 }
 
-// MarkRead sends a read receipt for a message.
 func MarkRead(connId int, chatId string, senderId string, msgId string, timeSent int64) {
 	c := getConn(connId)
 	if c == nil {
@@ -1954,8 +1656,6 @@ func MarkRead(connId int, chatId string, senderId string, msgId string, timeSent
 	markReceipt(c, chatId, senderId, msgId, sent)
 }
 
-// MarkVoicePlayed sends a "played" receipt for a received voice note, so the
-// sender's WhatsApp shows it as played (distinct from delivered/read).
 func MarkVoicePlayed(connId int, chatId string, senderId string, msgId string) {
 	c := getConn(connId)
 	if c == nil {
@@ -1980,8 +1680,6 @@ func SubscribePresence(connId int, userId string) {
 	}
 }
 
-// isMuteActive reports whether a mute action leaves the chat muted right now:
-// muted with either an indefinite (<= 0, i.e. forever) or still-future end.
 func isMuteActive(act *waSyncAction.MuteAction) bool {
 	if act == nil || !act.GetMuted() {
 		return false
@@ -1990,9 +1688,6 @@ func isMuteActive(act *waSyncAction.MuteAction) bool {
 	return end <= 0 || time.UnixMilli(end).After(time.Now())
 }
 
-// chatMuted reports whether a chat is currently muted per the synced app state.
-// A 1:1 chat's mute may be indexed under either the phone JID or its LID alias,
-// so check both; groups (@g.us) have a single stable JID.
 func chatMuted(c *conn, chatId string) bool {
 	jid, err := types.ParseJID(chatId)
 	if err != nil {
@@ -2021,12 +1716,6 @@ func chatMuted(c *conn, chatId string) bool {
 	return false
 }
 
-// MutedChats returns, from the newline-separated chatIds, the subset that are
-// currently muted per the synced app state (also newline-separated). Reads the
-// persisted ChatSettings store, so it is correct immediately on connect (no
-// live sync needed) — this is how pre-existing server-side mutes are picked up.
-// Batched into one call so reconciliation costs a single JNI hop, not one per
-// chat.
 func MutedChats(connId int, chatIds string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -2041,9 +1730,6 @@ func MutedChats(connId int, chatIds string) string {
 	return strings.Join(muted, "\n")
 }
 
-// SetMute mutes or unmutes a chat and syncs the change to WhatsApp so it lands
-// on the phone and other linked devices. Muting is indefinite (until turned
-// off), matching the app's single mute toggle.
 func SetMute(connId int, chatId string, muted bool) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -2082,8 +1768,6 @@ func contactName(info types.ContactInfo) string {
 	return info.PushName
 }
 
-// requestContacts emits OnContact for self, all address book contacts and all
-// joined groups.
 func requestContacts(connId int) {
 	c := getConn(connId)
 	if c == nil {
@@ -2123,7 +1807,6 @@ func requestContacts(connId int) {
 			return info.FullName != "" || info.FirstName != ""
 		}
 
-		// pass 1: address-book (phone) contacts, plus their LID alias
 		for jid, info := range contacts {
 			if jid.Server == types.HiddenUserServer {
 				continue
@@ -2141,7 +1824,6 @@ func requestContacts(connId int) {
 			}
 		}
 
-		// pass 2: LID-based contacts; prefer the phone contact's name if known
 		for jid, info := range contacts {
 			if jid.Server != types.HiddenUserServer {
 				continue
@@ -2184,14 +1866,9 @@ func requestContacts(connId int) {
 		}
 	}
 
-	// the LID→phone mapping is now warm; let the app heal any LID-keyed duplicate
 	c.listener.OnContactsSynced()
 }
 
-// ResolveChatId returns the canonical chat id for chatId: a 1:1 chat keyed by a
-// contact's LID resolves to its phone-JID id once the mapping is known; anything
-// else (a group, a phone-JID chat, or an unresolvable LID) is returned unchanged.
-// Lets the app fold a duplicate LID-keyed chat into the phone-JID chat.
 func ResolveChatId(connId int, chatId string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -2204,22 +1881,14 @@ func ResolveChatId(connId int, chatId string) string {
 	return getChatId(c.getClient(), &jid, nil)
 }
 
-// GetAvatarPath downloads (or reuses a cached copy of) the profile picture
-// preview for a chat/user and returns the local file path, or "" if none.
-// Blocking; call from a background thread.
 func GetAvatarPath(connId int, chatId string) string {
 	return fetchAvatar(connId, chatId, true)
 }
 
-// GetAvatarFullPath is like GetAvatarPath but fetches the full-resolution
-// picture, suitable for a fullscreen view. Blocking; call from a background
-// thread.
 func GetAvatarFullPath(connId int, chatId string) string {
 	return fetchAvatar(connId, chatId, false)
 }
 
-// avatarFilePath is the on-disk cache path for a chat/user's avatar (preview
-// or full-resolution), so fetches and cache invalidation agree on the name.
 func avatarFilePath(c *conn, chatId string, preview bool) string {
 	sanitized := safeName(chatId, true)
 	suffix := ".jpg"
@@ -2235,7 +1904,6 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 		return ""
 	}
 	avatarPath := avatarFilePath(c, chatId, preview)
-	// serve the disk copy if it is fresh (refreshed at most hourly)
 	cached := ""
 	if info, err := os.Stat(avatarPath); err == nil {
 		cached = avatarPath
@@ -2298,10 +1966,6 @@ var avatarHTTP = &http.Client{Timeout: 20 * time.Second}
 
 const maxAvatarBytes = 8 << 20 // 8 MiB is far beyond any profile picture
 
-// GetCachedAvatarPath returns the on-disk avatar copy if there is one, WITHOUT
-// any network fetch — for callers that must not block (the notification path is
-// a single serialized worker, where a stalled fetch delays every later alert and
-// the cancel that fires when a chat is opened).
 func GetCachedAvatarPath(connId int, chatId string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -2313,8 +1977,6 @@ func GetCachedAvatarPath(connId int, chatId string) string {
 	}
 	return path
 }
-
-// --- event handling -------------------------------------------------------
 
 func handleEvent(connId int, c *conn, rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
@@ -2404,9 +2066,6 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 	}
 }
 
-// handleMediaRetryEvent finishes a download that was deferred to a media
-// retry request (see DownloadFile): decrypts the phone's response, applies
-// the fresh DirectPath it carries, and retries the download.
 func handleMediaRetryEvent(c *conn, evt *events.MediaRetry) {
 	pending, ok := c.takePendingMediaRetry(evt.MessageID)
 	if !ok {
@@ -2452,25 +2111,18 @@ func handleReceipt(c *conn, receipt *events.Receipt) {
 	chatId := getChatId(c.getClient(), &receipt.Chat, &receipt.Sender)
 	switch receipt.Type {
 	case events.ReceiptTypeReadSelf:
-		// we read this chat on another device: mark it read here and let the
-		// app clear its notification
 		c.listener.OnChatReadSelf(chatId)
 	case events.ReceiptTypeRead:
-		// the peer read our outgoing message(s): drives the read tick
 		for _, msgId := range receipt.MessageIDs {
 			c.listener.OnMessageRead(chatId, msgId)
 		}
 	case events.ReceiptTypePlayed, types.ReceiptTypePlayedSelf:
-		// a voice note was played: our sent one by the peer, or a received one
-		// we played on another device
 		for _, msgId := range receipt.MessageIDs {
 			c.listener.OnMessagePlayed(chatId, msgId)
 		}
 	}
 }
 
-// initialSyncMessageCap limits messages processed per chat during the initial
-// history sync; older messages are fetched on demand when a chat is opened.
 const initialSyncMessageCap = 20
 
 func handleHistorySync(c *conn, historySync *events.HistorySync) {
@@ -2480,7 +2132,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 	}
 	selfJid := *client.Store.ID
 
-	// ON_DEMAND syncs answer RequestChatHistory: deliver everything they hold
 	onDemand := historySync.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND
 
 	progress := int(historySync.Data.GetProgress())
@@ -2489,8 +2140,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 	c.log(LogDebug, fmt.Sprintf("history sync: type=%s conversations=%d progress=%d",
 		historySync.Data.GetSyncType(), len(historySync.Data.GetConversations()), progress))
 
-	// whether any on-demand conversation answered an outstanding request; an
-	// exhausted chat answers with an empty sync that names no conversation
 	answeredPending := false
 	for _, conversation := range historySync.Data.GetConversations() {
 		chatJid, err := types.ParseJID(conversation.GetID())
@@ -2523,12 +2172,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 				webMessageInfo.GetReactions()})
 		}
 
-		// newest first, so the cap keeps the most recent messages and the
-		// unread marking below can walk back from the latest one
-		// SliceStable: whatsapp timestamps are second-resolution, so a bulk
-		// backfill has ties. With an unstable sort the "oldest of this page"
-		// anchor (parsed[len-1]) was an arbitrary tie-mate, so the next request
-		// could skip its siblings or declare history exhausted early.
 		sort.SliceStable(parsed, func(i, j int) bool {
 			return parsed[i].info.Timestamp.After(parsed[j].info.Timestamp)
 		})
@@ -2536,10 +2179,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 			parsed = parsed[:initialSyncMessageCap]
 		}
 
-		// an on-demand page answers the outstanding request; its sticky mode
-		// (set when the request was sent) decides routing, so export pages are
-		// delivered out-of-band and NOT stored — even a duplicate/late page,
-		// keeping the chat's sync state intact
 		convChatId := getChatId(client, &chatJid, nil)
 		forExport := onDemand && c.exportRouted(convChatId)
 		// answers the request AFTER the page's messages are delivered below;
@@ -2575,10 +2214,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 			continue
 		}
 
-		// The conversation carries WhatsApp's real unread count; mark exactly
-		// the newest unreadCount incoming messages unread instead of flagging
-		// every synced message (which inflated the unread badge). On-demand
-		// backfill is older than anything already stored, hence always read.
 		unreadLeft := int(conversation.GetUnreadCount())
 		if onDemand {
 			unreadLeft = 0
@@ -2596,12 +2231,9 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 				unreadLeft--
 			}
 			handleMessageFull(c, *p.info, p.msg, isRead, p.peerRead, true, false)
-			// history carries the delivery status; a PLAYED voice note marks
-			// its played state (works retroactively when history is re-synced)
 			if p.played {
 				c.listener.OnMessagePlayed(getChatId(client, &p.info.Chat, &p.info.Sender), p.info.ID)
 			}
-			// history also carries the message's accumulated reactions
 			for _, reaction := range p.reactions {
 				sender := reactionSender(c, chatJid, reaction.GetKey())
 				if sender == "" || reaction.GetText() == "" {
@@ -2636,9 +2268,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 	}
 }
 
-// isDisplayable reports whether handleMessageFull stores this message as a
-// chat row; reactions, protocol messages and unparseable payloads are not
-// rows and must not consume a chat's unread budget.
 func isDisplayable(msg *waE2E.Message) bool {
 	if msg == nil || msg.GetReactionMessage() != nil || msg.GetProtocolMessage() != nil {
 		return false
@@ -2661,8 +2290,6 @@ func reactionUserId(c *conn, jid types.JID) string {
 	return strFromJid(jid)
 }
 
-// reactionSender resolves who sent a reaction from its raw message key:
-// ourselves, a group participant, or (in a direct chat) the peer.
 func reactionSender(c *conn, chatJid types.JID, key *waCommon.MessageKey) string {
 	if key == nil {
 		return ""
@@ -2681,14 +2308,10 @@ func reactionSender(c *conn, chatJid types.JID, key *waCommon.MessageKey) string
 	return getChatId(c.getClient(), &chatJid, nil)
 }
 
-// isSelfChat reports whether chatId is our own "note to self" chat.
 func (c *conn) isSelfChat(chatId string) bool {
 	return c.getClient().Store.ID != nil && chatId == strFromJid(*c.getClient().Store.ID)
 }
 
-// messageIsRead derives a message's stored read state: for outgoing messages
-// it means "the peer read it" (the seen tick), for incoming "we read it"
-// (unread counts); the self chat is always read.
 func (c *conn) messageIsRead(chatId string, fromMe bool, timeSent time.Time, isSyncRead bool, peerRead bool) bool {
 	isSelf := c.isSelfChat(chatId)
 	if fromMe {
@@ -2701,16 +2324,10 @@ func (c *conn) messageIsRead(chatId string, fromMe bool, timeSent time.Time, isS
 	return isSyncRead || isSelf || timeSent.Before(c.getTimeRead(chatId))
 }
 
-// For incoming messages isRead means "we read it" (drives unread counts); for
-// outgoing messages it means "the peer read it" (drives the seen tick),
-// initially false and flipped by read receipts.
 func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool, peerRead bool, isHistory bool, isViewOnce bool) {
-	// ignore Status/Stories broadcasts entirely (no store, download, or notify)
 	if isStatusBroadcast(messageInfo.Chat) {
 		return
 	}
-	// reactions arrive as their own message targeting the original id; an
-	// empty text means the sender removed their reaction
 	if r := msg.GetReactionMessage(); r != nil {
 		if key := r.GetKey(); key != nil && key.GetID() != "" {
 			chatId := getChatId(c.getClient(), &messageInfo.Chat, &messageInfo.Sender)
@@ -2725,7 +2342,6 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 	// the row's stored timestamp (which would reorder the chat), so its
 	// delivery carries timeSent 0 and the app keeps the original order
 	editInPlace := false
-	// edits and deletes arrive as protocol messages targeting the original id
 	if pm := msg.GetProtocolMessage(); pm != nil {
 		switch pm.GetType() {
 		case waE2E.ProtocolMessage_MESSAGE_EDIT:
@@ -2776,8 +2392,6 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 	timeSent := messageInfo.Timestamp
 	isRead := c.messageIsRead(chatId, fromMe, timeSent, isSyncRead, peerRead)
 
-	// 0 for an in-place edit so the stored row keeps its original time_sent
-	// (matching the local EditMessage path); a real time for everything else
 	emitTime := timeSent.Unix()
 	if editInPlace {
 		emitTime = 0
@@ -2817,25 +2431,12 @@ type msgContent struct {
 	fileId     string
 	quotedId   string
 	quotedText string
-	// msg_type of the quoted message, so a bodyless quote (a photo, a voice
-	// note) can be labelled by previewLabel on the app side instead of by a
-	// fixed English word here
 	quotedType string
 	forwarded  bool
-	// only set for msgType "location"
 	latitude  float64
 	longitude float64
 }
 
-// extractQuote returns the replied-to message id, a short text preview, and the
-// quoted message's type.
-//
-// The type is what the app labels a bodyless quote with. This used to return
-// hardcoded English ("Photo", "Video", "Location", "Voice message"), which the
-// app rendered verbatim in the quote strip — so a quoted photo read as the
-// localized label everywhere else and as English there. Db.kt's previewLabel is
-// the single owner of that mapping and reads it from strings.xml; hand it the
-// raw type and let it render.
 func extractQuote(ci *waE2E.ContextInfo) (id string, text string, msgType string) {
 	if ci == nil {
 		return "", "", ""
@@ -2852,19 +2453,12 @@ func extractQuote(ci *waE2E.ContextInfo) (id string, text string, msgType string
 	if !ok {
 		return id, "", ""
 	}
-	// a voice note's "text" is its duration, not a body worth previewing
 	if qc.msgType == "audio" {
 		return id, "", qc.msgType
 	}
 	return id, qc.text, qc.msgType
 }
 
-// fromContext returns a msgContent with the fields every content kind derives
-// from its ContextInfo already filled: the quote triple and the forwarded flag.
-// Each branch of getMessageContent used to spell those four out itself, calling
-// GetContextInfo twice on the way, so adding a context-derived field meant
-// editing nine near-identical struct literals and a single missed one was
-// invisible.
 func fromContext(ci *waE2E.ContextInfo) msgContent {
 	id, text, msgType := extractQuote(ci)
 	return msgContent{
@@ -2881,9 +2475,6 @@ func fromContext(ci *waE2E.ContextInfo) msgContent {
 // than a canned English body so previewLabel owns (and translates) the label.
 const viewOnceType = "viewonce"
 
-// getMessageContent extracts displayable content from a message, using
-// placeholders for unsupported media types. Returns ok=false for
-// non-displayable messages (reactions, protocol messages, etc.).
 func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 	if msg == nil {
 		return msgContent{}, false
@@ -2932,19 +2523,11 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 		return m, true
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
-		// an empty name stays empty: previewLabel supplies the localized
-		// fallback, the way it does for every other bodyless media kind
 		m := fromContext(doc.GetContextInfo())
 		m.text, m.msgType, m.fileId = doc.GetFileName(), "document", encodeFileId("doc", doc)
 		return m, true
 	}
 	if stk := msg.GetStickerMessage(); stk != nil {
-		// A kind of its own, not "image": the app sizes a sticker to its
-		// intrinsic bounds and skips the caption/timestamp overlay a photo
-		// gets. That difference used to be recovered by sniffing the "stk:"
-		// prefix off fileId — a Go-internal token format — which also meant a
-		// Telegram sticker (its fileId is a plain number) could never be
-		// recognised as one.
 		m := fromContext(stk.GetContextInfo())
 		m.msgType, m.fileId = "sticker", encodeFileId("stk", stk)
 		return m, true
@@ -2997,8 +2580,6 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 	}
 	return msgContent{}, false
 }
-
-// --- helpers adapted from gowm.go ------------------------------------------
 
 func strFromJid(jid types.JID) string {
 	return jid.User + "@" + jid.Server

@@ -1,16 +1,4 @@
 #!/bin/bash
-# Build UniChat: Go bridge -> wmbridge.aar -> release APK.
-# Usage: ./build.sh [--apk-only] [--no-install]
-#   --apk-only    skip the Go/aar step
-#   --no-install  don't install onto a connected device afterwards
-# When a device is connected (adb, in "device" state), the built APK is
-# installed automatically (adb install -r); pass --no-install to skip.
-#
-# Toolchain resolution, in order:
-#   1. $UNICHAT_ENV pointing at an env script to source
-#   2. ../toolchain/env.sh (the layout described in the README)
-#   3. otherwise assume go, gomobile, gradle and the Android SDK are already on
-#      PATH (with ANDROID_HOME / a local.properties sdk.dir set)
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -24,8 +12,6 @@ for arg in "$@"; do
     esac
 done
 
-# Resolves adb (prefer the toolchain copy) and reports whether at least one
-# device is connected and ready ("device" state — not unauthorized/offline).
 adb_bin() {
     local sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
     local adb="${sdk:+$sdk/platform-tools/adb}"
@@ -72,7 +58,6 @@ ensure_whatsmeow() {
             exit 1
         fi
     else
-        # offline: fall back to whatever is already checked out
         [ -d "$dest" ] && { echo "== whatsmeow: upstream unreachable; using existing checkout =="; return; }
         echo "whatsmeow: upstream unreachable and nothing fetched yet" >&2
         exit 1
@@ -81,8 +66,6 @@ ensure_whatsmeow() {
         echo "== whatsmeow up to date @ ${latest:0:12} =="
         return
     fi
-    # the checkout is disposable, gitignored content; announce the replacement so
-    # a refetch (triggered whenever main moves) doesn't discard it silently
     if [ -d "$dest" ]; then
         echo "== Updating whatsmeow -> ${latest:0:12} (replacing existing checkout) =="
     else
@@ -156,8 +139,6 @@ if [ "$APK_ONLY" != 1 ]; then
     MIN_SDK=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*\([0-9]*\).*/\1/p' \
         "$DIR/app/build.gradle" | head -1)
     : "${MIN_SDK:?could not read minSdk from app/build.gradle}"
-    # app/libs holds no tracked files (both artifacts are gitignored), so it does
-    # not exist after a fresh clone and gomobile bind failed with ENOENT
     mkdir -p "$DIR/app/libs"
     # write to a temp path and move on success: an interrupted bind used to leave
     # a truncated aar that --apk-only would then happily build against
@@ -169,21 +150,12 @@ if [ "$APK_ONLY" != 1 ]; then
     gomobile bind -target=android/arm64 -androidapi "$MIN_SDK" \
         -ldflags="-extldflags=-Wl,-z,max-page-size=16384" \
         -javapkg=org.unichat -o "$DIR/app/libs/wmbridge-new.aar" .
-    # gomobile also emits a sources jar named after the output; move both so the
-    # final names (the ones .gitignore knows) are always the current build
     mv "$DIR/app/libs/wmbridge-new.aar" "$DIR/app/libs/wmbridge.aar"
     if [ -f "$DIR/app/libs/wmbridge-new-sources.jar" ]; then
         mv -f "$DIR/app/libs/wmbridge-new-sources.jar" "$DIR/app/libs/wmbridge-sources.jar"
     fi
 fi
 
-# TDLib native libs (Telegram) are built separately by build-tdlib.sh and land
-# in app/src/main/jniLibs; build the ones that are missing.
-# Every ABI in app/build.gradle's abiFilters needs BOTH libs — checking only
-# arm64-v8a meant a partial run (./build-tdlib.sh arm64-v8a is documented usage)
-# looked complete, and the APK shipped without libtdjson/libtdjni for the other
-# ABIs: those devices install fine and then die in TdJson's init.
-# keep in step with app/build.gradle's abiFilters
 TD_ABIS=(arm64-v8a)
 TD_MISSING=()
 for abi in "${TD_ABIS[@]}"; do
@@ -203,10 +175,6 @@ echo "== Building release APK =="
 cd "$DIR"
 "$GRADLE" assembleRelease --no-daemon
 
-# Drop the release APK in the repo root, named after the current version.
-# Accepts either quote style (both are valid Groovy) and is non-greedy, so a
-# single-quoted versionName no longer silently produced "unichat-unknown.apk",
-# overwriting the previous build.
 VERSION=$(sed -n "s/^[[:space:]]*versionName[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" \
     "$DIR/app/build.gradle" | head -1)
 if [ -z "$VERSION" ]; then

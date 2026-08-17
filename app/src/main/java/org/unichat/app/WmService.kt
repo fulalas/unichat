@@ -20,11 +20,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 
-/**
- * Foreground service that keeps the WhatsApp connection alive, exposes a
- * media-session notification for voice playback (lock-screen controls + a
- * seekbar), and drives the proximity sensor for earpiece routing.
- */
 class WmService : Service() {
 
     companion object {
@@ -129,14 +124,10 @@ class WmService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // --- foreground connection notification --------------------------------
-
     private fun ensureForeground() {
         val contentIntent = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
         )
-        // transparent icon so the mandatory foreground-service notification
-        // does not show a status-bar icon (it still lives in the shade)
         val notification = Notification.Builder(this, CHANNEL_CONN)
             .setSmallIcon(R.drawable.ic_transparent)
             .setContentTitle(getString(R.string.service_notification))
@@ -152,8 +143,6 @@ class WmService : Service() {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
         )
     }
-
-    // --- media session & notification --------------------------------------
 
     private fun setupMediaSession() {
         val session = MediaSession(this, "unichat")
@@ -187,7 +176,6 @@ class WmService : Service() {
         val chatId = AudioPlayer.currentChatId
         val title = mediaTitle(chatId)
         if (title == null) {
-            // resolve the name off the main thread, then redo this pass
             Io.executor.execute {
                 val name = Bridge.db.displayName(chatId)
                 main.post {
@@ -234,9 +222,6 @@ class WmService : Service() {
         )
     }
 
-    // Title of the media notification / lock-screen session: the chat's name,
-    // resolved from the DB off the main thread (onPlaybackChanged runs on it)
-    // and cached for the duration of one clip. null = not resolved yet.
     private var mediaTitleChatId: String? = null
     private var mediaTitleCache: String = ""
 
@@ -285,8 +270,6 @@ class WmService : Service() {
         return PendingIntent.getService(this, action.hashCode(), intent, PendingIntent.FLAG_IMMUTABLE)
     }
 
-    // --- notification position ticker (seekbar) ----------------------------
-
     private var ticking = false
     private val ticker = object : Runnable {
         override fun run() {
@@ -306,8 +289,6 @@ class WmService : Service() {
         ticking = false
         main.removeCallbacks(ticker)
     }
-
-    // --- proximity ---------------------------------------------------------
 
     private val proximityListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
