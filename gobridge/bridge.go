@@ -728,6 +728,26 @@ func SendLocation(connId int, chatId string, latitude float64, longitude float64
 	return sendWithEcho(c, chatJid, &message, "send location")
 }
 
+// The vcard is built by the app (see ChatActivity.sendContactCard). The echo
+// path parses it straight back through contactText, so a sent card renders
+// exactly like a received one with no separate local-echo shape.
+func SendContactMessage(connId int, chatId string, displayName string, vcard string) string {
+	c := getConn(connId)
+	if c == nil {
+		return ""
+	}
+	chatJid, err := types.ParseJID(chatId)
+	if err != nil {
+		c.log(LogWarning, fmt.Sprintf("jid error %v", err))
+		return ""
+	}
+	message := waE2E.Message{ContactMessage: &waE2E.ContactMessage{
+		DisplayName: proto.String(displayName),
+		Vcard:       proto.String(vcard),
+	}}
+	return sendWithEcho(c, chatJid, &message, "send contact")
+}
+
 func SendTextReply(connId int, chatId string, text string, quotedId string, quotedText string, quotedSender string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1546,6 +1566,26 @@ func GetMyAbout(connId int) string {
 		return ""
 	}
 	return infos[self].Status
+}
+
+// GetUserAbout answers "" both for a contact with no About and for one whose
+// privacy settings hide it — the two are indistinguishable to a client, so the
+// screen simply shows nothing rather than claiming either.
+func GetUserAbout(connId int, userId string) string {
+	c := getConn(connId)
+	if c == nil {
+		return ""
+	}
+	jid, err := types.ParseJID(userId)
+	if err != nil {
+		return ""
+	}
+	infos, err := c.getClient().GetUserInfo(context.TODO(), []types.JID{jid})
+	if err != nil {
+		c.log(LogWarning, fmt.Sprintf("peer about fetch error %v", err))
+		return ""
+	}
+	return infos[jid].Status
 }
 
 // ResolveNumberFailed is what ResolveNumber answers when it could not ask at

@@ -951,6 +951,28 @@ object Tg {
             ),
     )
 
+    /**
+     * TDLib takes the card's fields directly, so only the first number travels
+     * as the contact's own — the rest ride along in the vCard, which is what
+     * Telegram itself does with a multi-number card.
+     */
+    fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean {
+        val parts = name.trim().split(" ", limit = 2)
+        return sendMessage(
+            chatId,
+            JSONObject().put("@type", "inputMessageContact")
+                .put(
+                    "contact",
+                    JSONObject().put("@type", "contact")
+                        .put("phone_number", numbers.firstOrNull().orEmpty())
+                        .put("first_name", parts[0])
+                        .put("last_name", parts.getOrElse(1) { "" })
+                        .put("vcard", PhoneBook.vcard(name, numbers))
+                        .put("user_id", 0)
+                ),
+        )
+    }
+
     fun editMessageText(chatId: String, msgId: String, newText: String): Boolean {
         val res = request(
             JSONObject().put("@type", "editMessageText")
@@ -1168,6 +1190,48 @@ object Tg {
             if (id > 0) ids.add(id.toString())
         }
         return SearchPage(ids, res.optInt("total_count"), res.optLong("next_from_message_id"))
+    }
+
+    /**
+     * The chat's own pictures around [fromMsgId], asked of the server with a
+     * photo filter rather than sifted out of a slice of history: a search
+     * window holds ~50 messages, of which only a handful are pictures, so an
+     * album built from it ran out after a swipe or two.
+     *
+     * [newer] null centres the answer on the anchor; true walks forwards from
+     * it, false backwards. Blocking; worker threads only.
+     */
+    fun chatPhotos(chatId: String, fromMsgId: String, newer: Boolean?, limit: Int = 49): List<MessageRow> {
+        val id = fromMsgId.toLongOrNull() ?: return emptyList()
+        // TDLib's bounds, as in contextWindow: the offset may not pass -99, the
+        // limit not 100, and the limit has to cover the offset
+        val n = limit.coerceIn(1, 49)
+        val offset = when (newer) {
+            null -> -n
+            true -> -n
+            false -> 0
+        }
+        val count = if (newer == false) n else n * 2 + 1
+        val res = request(
+            JSONObject().put("@type", "searchChatMessages")
+                .put("chat_id", chatIdOf(chatId))
+                .put("topic_id", JSONObject.NULL)
+                .put("query", "")
+                .put("sender_id", JSONObject.NULL)
+                .put("from_message_id", id)
+                .put("offset", offset)
+                .put("limit", count.coerceIn(1, 100))
+                .put("filter", JSONObject().put("@type", "searchMessagesFilterPhoto")),
+            timeoutMs = 30_000,
+        ) ?: return emptyList()
+        val arr = res.optJSONArray("messages") ?: return emptyList()
+        val rows = ArrayList<MessageRow>(arr.length())
+        for (i in 0 until arr.length()) parseMessage(arr.getJSONObject(i))?.let { rows.add(it.row) }
+        // prefer the stored row: it knows about a file already on this phone,
+        // which the parsed one only does when TDLib still holds it locally
+        val stored = Bridge.db.messagesByIds(chatId, rows.mapTo(HashSet()) { it.id }).associateBy { it.id }
+        return rows.map { stored[it.id] ?: it }
+            .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
     }
 
     fun contextWindow(chatId: String, msgId: String, radius: Int = 25): List<MessageRow> {
@@ -1454,6 +1518,33 @@ object Tg {
         val path = downloaded.optJSONObject("local")?.optString("path") ?: ""
         if (path.isNotEmpty() && !big) avatarPaths[key] = path
         return path
+    }
+
+    class PeerInfo(val phone: String, val username: String, val bio: String)
+
+    /** Blocking; worker threads only. Null for anything that is not a user —
+     *  a group's or channel's raw id is negative. */
+    fun peerInfo(chatId: String): PeerInfo? {
+        val uid = chatIdOf(chatId)
+        if (uid <= 0) return null
+        val user = request(JSONObject().put("@type", "getUser").put("user_id", uid))
+        val full = request(JSONObject().put("@type", "getUserFullInfo").put("user_id", uid))
+        return PeerInfo(
+            phone = user?.optString("phone_number").orEmpty(),
+            username = usernameOf(user),
+            bio = full?.optJSONObject("bio")?.optString("text").orEmpty(),
+        )
+    }
+
+    // TDLib moved a user's handle into a `usernames` object (a user can hold
+    // several) and kept the old flat `username` for older schemas; read both so
+    // the field doesn't silently go blank on a TDLib bump either way.
+    private fun usernameOf(user: JSONObject?): String {
+        if (user == null) return ""
+        user.optJSONObject("usernames")?.optJSONArray("active_usernames")?.let {
+            if (it.length() > 0) return it.optString(0)
+        }
+        return user.optString("username")
     }
 
     fun myName(): String =

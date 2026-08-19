@@ -14,8 +14,8 @@ import java.util.concurrent.CopyOnWriteArrayList
  * silently left the other at the old ceiling.
  *
  * [heapDivisor] splits the budget explicitly: avatars are small and many
- * (1/32), chat images are large and few (1/12), so together they stay under
- * ~12% of the heap.
+ * (1/32), chat images are large and few (1/12), link-preview pictures are few
+ * and small (1/48), so together they stay under ~15% of the heap.
  */
 fun newBitmapCache(heapDivisor: Int): LruCache<String, Bitmap> {
     val sizeKb = (Runtime.getRuntime().maxMemory() / 1024 / heapDivisor).toInt().coerceAtLeast(4096)

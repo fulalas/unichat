@@ -14,5 +14,8 @@ class App : Application() {
         // Every screen still calls Bridge.init(); it is idempotent and now just
         // waits for this to land.
         Bridge.warmUp(this)
+        // The accent-folding table is built on first use, and its first user is
+        // usually a keystroke in a search box — on the main thread, mid-typing.
+        Io.files.execute { Search.fold('á') }
     }
 }

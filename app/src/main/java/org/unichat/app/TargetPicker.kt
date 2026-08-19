@@ -11,14 +11,23 @@ import androidx.appcompat.app.AlertDialog
 fun Activity.targetChoices(): Pair<List<String>, List<String>> {
     val ids = ArrayList<String>()
     val labels = ArrayList<String>()
-    // resolved once, not per comparison: each is a JNI hop into the Go bridge
-    // plus a preferences read
-    for (self in listOf(Bridge.selfId(), if (Tg.hasSession()) Tg.selfId() else "")) {
-        if (self.isEmpty() || self in ids) continue
+    val chats = Bridge.db.chats()
+    val lastTime = chats.associate { it.id to it.lastTime }
+    // Both notes-to-self stay pinned above the chats, but between themselves
+    // they follow the same rule as everything below — most recently used first.
+    // They used to be listed in a fixed order with WhatsApp always ahead, so an
+    // account someone never writes to sat above the one they use daily.
+    // Resolved once, not per comparison: each is a JNI hop into the Go bridge
+    // plus a preferences read.
+    val selves = listOf(Bridge.selfId(), if (Tg.hasSession()) Tg.selfId() else "")
+        .filter { it.isNotEmpty() }
+        .distinct()
+        .sortedByDescending { lastTime[it] ?: 0L }
+    for (self in selves) {
         ids.add(self)
         labels.add(selfPickerLabel(this, self))
     }
-    for (chat in Bridge.db.chats()) {
+    for (chat in chats) {
         if (chat.id in ids) continue
         ids.add(chat.id)
         labels.add(chat.displayLabelWithProto(this))
@@ -66,10 +75,10 @@ fun Activity.showTargetPicker(
 
     search.addTextChangedListener(object : TextWatcher {
         override fun afterTextChanged(s: Editable?) {
-            val q = s?.toString()?.trim().orEmpty()
+            val q = Search.fold(s?.toString()?.trim().orEmpty())
             visible.clear()
             labels.indices.filterTo(visible) {
-                q.isEmpty() || labels[it].contains(q, ignoreCase = true)
+                q.isEmpty() || Search.contains(labels[it], q)
             }
             adapter.clear()
             adapter.addAll(visible.map { labels[it] })

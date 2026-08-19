@@ -108,7 +108,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 24) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
 
     private val ctx: Context = context.applicationContext
 
@@ -166,6 +166,22 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 24) {
 
         private const val CREATE_ID_INDEX =
             "CREATE INDEX IF NOT EXISTS idx_msg_id ON messages(id)"
+
+        // One row per link, not per message: the same URL shared in ten chats is
+        // fetched once. `status` also records a link that has no preview at all
+        // (0 unknown, 1 has one, 2 none), so a page that answers with nothing is
+        // not re-fetched on every single bind of that bubble.
+        // How long "this link has no preview" is trusted before the page is
+        // asked again. Positive answers never expire — a page's own metadata is
+        // what it is — but a negative one can be our fault.
+        private const val NEGATIVE_TTL_SECONDS = 7L * 24 * 60 * 60
+
+        private const val CREATE_LINK_PREVIEWS =
+            "CREATE TABLE IF NOT EXISTS link_previews(" +
+                "url TEXT PRIMARY KEY, site TEXT NOT NULL DEFAULT ''," +
+                "title TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT ''," +
+                "image_path TEXT NOT NULL DEFAULT ''," +
+                "status INTEGER NOT NULL DEFAULT 0, fetched_at INTEGER NOT NULL DEFAULT 0)"
     }
 
     private inline fun SQLiteDatabase.transact(body: SQLiteDatabase.() -> Unit) {
@@ -216,6 +232,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 24) {
         db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
         db.execSQL(CREATE_PLACEHOLDER_INDEX)
         db.execSQL(CREATE_EMPTY_CONTACT_INDEX)
+        db.execSQL(CREATE_LINK_PREVIEWS)
     }
 
     /**
@@ -226,6 +243,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 24) {
      * launch with no way out.
      */
     override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        db.execSQL("DROP TABLE IF EXISTS link_previews")
         db.execSQL("DROP TABLE IF EXISTS deleted_chats")
         db.execSQL("DROP TABLE IF EXISTS reactions")
         db.execSQL("DROP TABLE IF EXISTS messages")
@@ -235,6 +253,27 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 24) {
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 25) {
+            db.execSQL(CREATE_LINK_PREVIEWS)
+        }
+        if (oldVersion < 26) {
+            // v25 read only the first 512 KB of a page, so every link that
+            // buries its Open Graph tags past that (YouTube) was recorded as
+            // having no preview. Those verdicts are wrong, not stale.
+            db.execSQL("DELETE FROM link_previews WHERE status=2")
+        }
+        if (oldVersion < 27) {
+            // The whole table is a cache of parsed pages, so a change to the
+            // parser invalidates it: v26 and earlier folded a description's line
+            // breaks into nothing, running its words together.
+            db.execSQL("DELETE FROM link_previews")
+        }
+        if (oldVersion < 28) {
+            // Same reason again: previews stored before this were fetched as an
+            // ordinary client, which several sites answer with a bot check
+            // instead of their metadata (see LinkPreview.USER_AGENT).
+            db.execSQL("DELETE FROM link_previews")
+        }
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE messages ADD COLUMN msg_type TEXT NOT NULL DEFAULT ''")
             db.execSQL("ALTER TABLE messages ADD COLUMN file_id TEXT NOT NULL DEFAULT ''")
@@ -824,27 +863,39 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 24) {
     }
 
     fun searchContacts(query: String, limit: Int = 60): List<ChatRow> {
-        // '%' and '_' typed in the search box are literal characters to the
-        // user, not wildcards — unescaped, a single "_" matched every contact
-        // and silently returned the whole address book
-        val like = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        return queryList(
-            // saved contacts and joined groups; @lid alias rows of phone-JID
-            // contacts are stored with is_saved=0, so a LID row only shows up
-            // here when it is the contact's sole (saved) identity
+        val folded = Search.fold(query)
+        if (folded.isEmpty()) return emptyList()
+        val out = ArrayList<ChatRow>(limit)
+        // Matched in Kotlin rather than with SQL LIKE: SQLite folds neither case
+        // outside ASCII nor accents, so "sao" never found "São" — and LIKE also
+        // needed '%'/'_' escaping, which a missed escape turned into "every
+        // contact matches". Only saved contacts and joined groups; @lid alias
+        // rows of phone-JID contacts are stored with is_saved=0, so a LID row
+        // shows up only when it is the contact's sole (saved) identity.
+        readableDatabase.rawQuery(
             "SELECT id, name, phone, is_group FROM contacts " +
-                "WHERE is_self=0 AND (is_saved=1 OR is_group=1) " +
-                "AND (name LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\') " +
-                "ORDER BY name COLLATE NOCASE LIMIT ?",
-            arrayOf(like, like, like, limit.toString())
-        ) {
-            val phone = it.getString(2)
-            ChatRow(
-                id = it.getString(0), name = it.getString(1),
-                lastText = if (phone.isNotEmpty()) "+$phone" else "",
-                lastTime = 0, unread = 0, isGroup = it.getInt(3) != 0
-            )
+                "WHERE is_self=0 AND (is_saved=1 OR is_group=1) ORDER BY name COLLATE NOCASE",
+            null
+        ).use { c ->
+            while (c.moveToNext() && out.size < limit) {
+                val id = c.getString(0)
+                val name = c.getString(1)
+                val phone = c.getString(2)
+                if (!Search.contains(name, folded) && !Search.contains(phone, folded) &&
+                    !Search.contains(id, folded)
+                ) {
+                    continue
+                }
+                out.add(
+                    ChatRow(
+                        id = id, name = name,
+                        lastText = if (phone.isNotEmpty()) "+$phone" else "",
+                        lastTime = 0, unread = 0, isGroup = c.getInt(3) != 0
+                    )
+                )
+            }
         }
+        return out
     }
 
     fun nextAudioMessage(chatId: String, afterMsgId: String): MessageRow? {
@@ -937,4 +988,50 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 24) {
     fun contactName(id: String): String? = queryFirst(
         "SELECT name FROM contacts WHERE id=?", arrayOf(id)
     ) { if (it.isNull(0)) null else it.getString(0) }
+
+    /** Null both for a link never looked up and for one whose "has no preview"
+     *  verdict has expired: a site can gain preview tags, and a parser of ours
+     *  that reads a page wrongly today must not silence that link forever. */
+    fun linkPreview(url: String): LinkPreview.Row? = queryFirst(
+        "SELECT site, title, description, image_path, status, fetched_at " +
+            "FROM link_previews WHERE url=?",
+        arrayOf(url)
+    ) {
+        val hasPreview = it.getInt(4) == 1
+        val age = System.currentTimeMillis() / 1000 - it.getLong(5)
+        if (!hasPreview && age > NEGATIVE_TTL_SECONDS) return@queryFirst null
+        LinkPreview.Row(
+            url = url, site = it.getString(0), title = it.getString(1),
+            description = it.getString(2), imagePath = it.getString(3),
+            hasPreview = hasPreview,
+        )
+    }
+
+    fun putLinkPreview(row: LinkPreview.Row) {
+        writableDatabase.execSQL(
+            "INSERT INTO link_previews(url, site, title, description, image_path, status, fetched_at) " +
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET " +
+                "site=excluded.site, title=excluded.title, description=excluded.description," +
+                "image_path=excluded.image_path, status=excluded.status, fetched_at=excluded.fetched_at",
+            arrayOf(
+                row.url, row.site, row.title, row.description, row.imagePath,
+                if (row.hasPreview) 1 else 2, System.currentTimeMillis() / 1000
+            )
+        )
+    }
+
+    /** Previews whose cached image the cache sweep has since reclaimed, so the
+     *  next bind fetches them again instead of rendering a card with a hole. */
+    fun forgetLinkPreviewImages(paths: Collection<String>) {
+        if (paths.isEmpty()) return
+        writableDatabase.transact {
+            for (path in paths) {
+                execSQL("UPDATE link_previews SET image_path='' WHERE image_path=?", arrayOf(path))
+            }
+        }
+    }
+
+    fun contactPhone(id: String): String = queryFirst(
+        "SELECT phone FROM contacts WHERE id=?", arrayOf(id)
+    ) { if (it.isNull(0)) "" else it.getString(0) } ?: ""
 }

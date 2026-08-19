@@ -39,6 +39,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // seeks and toast "message not loaded" while pages were still arriving.
         private val SEEK_TIMEOUT_MS = MAX_SEEK_PAGES * Bridge.historyTimeoutMs + 30_000L
         private const val SEEK_CONTEXT_ROWS = 20
+        private const val WINDOW_ALBUM_SPAN = 60
         private const val PRESENCE_RESUBSCRIBE_MS = 30_000L
         private val scrollStates =
             object : LinkedHashMap<String, android.os.Parcelable?>(16, 0.75f, true) {
@@ -70,6 +71,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private val pickFile = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent()
     ) { uri -> uri?.let { onFilePicked(it) } }
+    private val pickContact = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result -> result.data?.data?.let { onContactPicked(it) } }
     private val createExportFile = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("text/plain")
     ) { uri -> uri?.let { writeChatExport(it) } }
@@ -245,6 +249,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         chatDisplayName = extraName ?: chatId
         toolbarTitle.text = chatDisplayName
         toolbarAvatar.setOnClickListener { Bridge.openAvatar(this, chatId) }
+        val openInfo = android.view.View.OnClickListener { openContactInfo() }
+        toolbarTitle.setOnClickListener(openInfo)
+        toolbarSubtitle.setOnClickListener(openInfo)
         io.execute {
             // Always from the STORED name, never from the intent's: the chat
             // list hands over a label it has already decorated, so re-decorating
@@ -297,12 +304,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 if (windowMode) fetchWindowMedia(msg)
                 else Bridge.downloadFile(msg, userInitiated)
             },
-            onImageClick = { msg ->
-                val intent = Intent(this, ImageViewActivity::class.java)
-                intent.putExtra("path", msg.filePath)
-                intent.putExtra("chatId", chatId)
-                openImage.launch(intent)
-            },
+            onImageClick = { msg -> openImageViewer(msg) },
             onDocumentClick = { msg -> openDocument(msg) },
             onVideoOpen = { msg -> openVideo(msg) },
             onLocationClick = { msg -> openLocation(msg) },
@@ -310,6 +312,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             onContactMessage = { msg -> messageContact(msg) },
             onMessageActions = { msg -> showMessageActions(msg) },
             onQuoteClick = { msg -> onQuoteTapped(msg) },
+            onNeedLinkPreview = { url -> requestLinkPreview(url) },
+            onLinkPreviewClick = { url -> openLink(url) },
             onSelectionChanged = { onSelectionChanged() },
             onDragArm = { dragSelect?.arm() },
         )
@@ -993,10 +997,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun runLocalSearch(q: String) {
         val msgs = adapter.messagesSnapshot()
+        val folded = Search.fold(q)
         io.execute {
             val matches = msgs.indices.filter { i ->
                 val m = msgs[i]
-                m.msgType != "audio" && m.text.contains(q, ignoreCase = true)
+                m.msgType != "audio" && Search.contains(m.text, folded)
             }
             runOnUiThread {
                 if (adapter.highlightQuery != q) return@runOnUiThread
@@ -1139,6 +1144,34 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 }
             }
         }
+    }
+
+    /**
+     * The viewer pages through an album. Normally it reads that album from the
+     * stored history itself, but a search window's rows are deliberately never
+     * stored (see showHit), so a picture opened from search results had no album
+     * at all and could not be swiped — the whole point of opening it there. Hand
+     * the window's own pictures over instead.
+     */
+    private fun openImageViewer(msg: MessageRow) {
+        val intent = Intent(this, ImageViewActivity::class.java)
+        intent.putExtra("path", msg.filePath)
+        intent.putExtra("chatId", chatId)
+        if (windowMode) {
+            val all = adapter.messagesSnapshot().filter { it.msgType in PICTURE_TYPES }
+            // A slice around the tapped picture, not the whole window: scrolling
+            // grows the window without bound, and the two lists travel through a
+            // binder transaction that a long enough album would blow past.
+            val at = all.indexOfFirst { it.id == msg.id }.coerceAtLeast(0)
+            val pictures = all.subList(
+                (at - WINDOW_ALBUM_SPAN).coerceAtLeast(0),
+                (at + WINDOW_ALBUM_SPAN + 1).coerceAtMost(all.size)
+            )
+            intent.putExtra("windowStartId", msg.id)
+            intent.putStringArrayListExtra("windowIds", ArrayList(pictures.map { it.id }))
+            intent.putStringArrayListExtra("windowPaths", ArrayList(pictures.map { it.filePath }))
+        }
+        openImage.launch(intent)
     }
 
     private fun stepHit(delta: Int) {
@@ -1557,6 +1590,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             recordTimer.text = "●  0:00"
             showRecordingButtons()
             main.post(recordTicker)
+            buzz() // only once the mic is actually live, never on a failed start
         } catch (e: Exception) {
             // prepare()/start() failed (the mic is held by a call or another
             // app, or the codec config was rejected): release the recorder we
@@ -1567,6 +1601,18 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             recorder = null
             file.delete()
         }
+    }
+
+    /**
+     * Marks the two ends of a voice note by touch. Those are the only moments
+     * in this app where something starts and stops without the user watching
+     * the screen — a message being typed and sent is its own confirmation.
+     *
+     * Through the view's haptic feedback rather than the vibrator: it needs no
+     * permission and obeys the phone's own haptics setting.
+     */
+    private fun buzz() {
+        actionButton.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
     }
 
     private fun acquireRecordWakeLock() {
@@ -1703,6 +1749,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             val quoted = replyTarget
             clearComposeContext()
             Bridge.sendAudio(chatId, file.absolutePath, duration, quoted, buildWaveform(recordAmps))
+            buzz() // it really went out: not for a cancel, nor for a too-short clip
         } else {
             // Tapping mic then send within a second gives duration 0. Silently
             // deleting it left the user believing a voice note had been sent,
@@ -1713,15 +1760,40 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun showAttachMenu() {
-        val items = arrayOf(getString(R.string.attach_file), getString(R.string.attach_location))
+        val items = arrayOf(
+            getString(R.string.attach_file),
+            getString(R.string.attach_location),
+            getString(R.string.attach_contact),
+        )
         AlertDialog.Builder(this)
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> pickFile.launch("*/*")
                     1 -> sendCurrentLocation()
+                    2 -> try {
+                        pickContact.launch(PhoneBook.pickIntent())
+                    } catch (e: Exception) {
+                        // a device with no contacts app at all: the throw would
+                        // otherwise take the whole screen down
+                        Toast.makeText(this, R.string.contact_read_failed, Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
             .show()
+    }
+
+    private fun onContactPicked(uri: Uri) {
+        io.execute {
+            val picked = PhoneBook.read(this, uri)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (picked == null || picked.numbers.isEmpty()) {
+                    Toast.makeText(this, R.string.contact_read_failed, Toast.LENGTH_SHORT).show()
+                    return@runOnUiThread
+                }
+                Bridge.sendContact(chatId, picked.name, picked.numbers)
+            }
+        }
     }
 
     private fun sendCurrentLocation() {
@@ -1844,6 +1916,22 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
+    private fun requestLinkPreview(url: String) {
+        LinkPreview.request(this, url) {
+            // Posted, never applied inline: this can answer synchronously (the
+            // fetch that another bubble started landed in between), and that
+            // call arrives from inside onBindViewHolder — where a notify is
+            // rejected outright.
+            main.post {
+                if (!isFinishing && !isDestroyed) adapter.onLinkPreviewReady(url)
+            }
+        }
+    }
+
+    private fun openLink(url: String) {
+        startActivitySafely(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+
     private fun openLocation(msg: MessageRow) {
         val coords = msg.coordinates()
         if (coords.isEmpty()) return
@@ -1899,6 +1987,14 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         Bridge.rememberContact("$waid@s.whatsapp.net", name)
         openContactChat("$waid@s.whatsapp.net", name)
+    }
+
+    private fun openContactInfo() {
+        startActivity(
+            Intent(this, ContactInfoActivity::class.java)
+                .putExtra("chatId", chatId)
+                .putExtra("chatName", chatDisplayName)
+        )
     }
 
     private fun openContactChat(id: String, name: String) {

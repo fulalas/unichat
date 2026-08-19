@@ -188,6 +188,7 @@ object Bridge : EventListener {
             chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
         ): Boolean
         fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean
+        fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean
 
         fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean
         val editWindowSeconds: Long
@@ -259,6 +260,11 @@ object Bridge : EventListener {
 
         override fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
             Wmbridge.sendLocation(connId, chatId, latitude, longitude).isNotEmpty()
+
+        override fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean =
+            Wmbridge.sendContactMessage(
+                connId, chatId, name, PhoneBook.vcard(name, numbers)
+            ).isNotEmpty()
 
         override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean =
             Wmbridge.editMessage(connId, chatId, msgId, newText, origTimeSent)
@@ -385,6 +391,9 @@ object Bridge : EventListener {
 
         override fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
             Tg.sendLocation(chatId, latitude, longitude)
+
+        override fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean =
+            Tg.sendContact(chatId, name, numbers)
 
         override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean =
             Tg.editMessageText(chatId, msgId, newText)
@@ -668,12 +677,26 @@ object Bridge : EventListener {
         java.io.File(ctx.cacheDir, "tgdoc").listFiles()?.forEach { dir ->
             if (dir.lastModified() < cutoff) dir.deleteRecursively()
         }
+        // Link-preview pictures live far longer than a day — a chat scrolled
+        // back to would re-fetch every card otherwise — but not forever. The
+        // stored rows are deliberately left pointing at the deleted files:
+        // LinkPreview.stored() re-fetches a preview whose picture is missing,
+        // and blanking the path here instead made the row a valid "has a
+        // preview, has no picture", which nothing ever fetches again.
+        val previewCutoff = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
+        java.io.File(ctx.cacheDir, LinkPreview.IMAGE_DIR).listFiles()?.forEach { f ->
+            if (f.lastModified() < previewCutoff) f.delete()
+        }
     }
 
     fun sendLocation(chatId: String, latitude: Double, longitude: Double) = executor.execute {
         if (!proto(chatId).sendLocation(chatId, latitude, longitude)) {
             Log.w(TAG, "location send failed for chat $chatId")
         }
+    }
+
+    fun sendContact(chatId: String, name: String, numbers: List<String>) = executor.execute {
+        if (!proto(chatId).sendContact(chatId, name, numbers)) onSendFailed("contact", chatId)
     }
 
     // A dedicated single thread for forwarding a batch: each message (media
@@ -842,6 +865,15 @@ object Bridge : EventListener {
 
     fun searchSlice(chatId: String, msgId: String, newer: Boolean): List<MessageRow> =
         if (isTg(chatId)) Tg.historySlice(chatId, msgId, newer) else emptyList()
+
+    /**
+     * The chat's pictures around a message, for the viewer opened from a search
+     * result — whose rows are not stored, so the stored album is no help.
+     * [newer] null centres on the anchor. Blocking; worker threads only.
+     * Empty for WhatsApp, whose server holds nothing searchable.
+     */
+    fun chatPhotos(chatId: String, msgId: String, newer: Boolean?): List<MessageRow> =
+        if (isTg(chatId)) Tg.chatPhotos(chatId, msgId, newer) else emptyList()
 
     /**
      * Fetches the file of a message shown in a search window. Those rows are not
@@ -1261,6 +1293,32 @@ object Bridge : EventListener {
     fun setProfilePicture(jpegPath: String, onResult: (Boolean) -> Unit) = mediaExecutor.execute {
         val ok = connId >= 0 && Wmbridge.setProfilePicture(connId, jpegPath)
         main.post { onResult(ok) }
+    }
+
+    class PeerInfo(val phone: String, val nickname: String, val about: String)
+
+    /**
+     * What the contact-info screen shows about the person on the other side.
+     * Blocking (both protocols ask their server); worker threads only. Every
+     * field is optional — an empty About is indistinguishable from one the
+     * contact's privacy settings hide, so the row is simply left out.
+     */
+    fun peerInfo(chatId: String): PeerInfo {
+        if (isTg(chatId)) {
+            val info = Tg.peerInfo(chatId) ?: return PeerInfo("", "", "")
+            return PeerInfo(
+                phone = if (info.phone.isEmpty()) "" else "+" + info.phone.removePrefix("+"),
+                nickname = if (info.username.isEmpty()) "" else "@" + info.username,
+                about = info.bio,
+            )
+        }
+        // only a phone JID holds a real number; a @lid's digits are not one, so
+        // fall back to the number the contact row carries rather than inventing
+        // a plausible-looking "+<lid>"
+        val phone = if (isPhoneId(chatId)) phoneLabel(chatId)
+            else db.contactPhone(chatId).takeIf { it.isNotEmpty() }?.let { "+$it" }.orEmpty()
+        val about = if (connId < 0) "" else Wmbridge.getUserAbout(connId, chatId)
+        return PeerInfo(phone, "", about)
     }
 
     fun getAvatarPath(chatId: String): String =

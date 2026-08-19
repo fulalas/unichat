@@ -220,6 +220,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         io.execute {
             val contacts = Bridge.db.searchContacts(q)
             val fromPhone = PhoneBook.search(this, q)
+            val folded = Search.fold(q)
             runOnUiThread {
                 if (query != q) return@runOnUiThread // a newer query superseded this one
                 // match what the row actually SHOWS: an unresolved chat renders
@@ -227,9 +228,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 // (neither of which has the '+') made the visible row vanish
                 // from its own search results
                 val chatMatches = allChats.filter {
-                    it.displayLabel().contains(q, ignoreCase = true) ||
-                        it.name.contains(q, ignoreCase = true) ||
-                        it.id.contains(q, ignoreCase = true)
+                    Search.contains(it.displayLabel(), folded) ||
+                        Search.contains(it.name, folded) ||
+                        Search.contains(it.id, folded)
                 }
                 // a saved contact who also has a chat matches in both lists;
                 // keep the chat row (it carries recency/unread) and drop the

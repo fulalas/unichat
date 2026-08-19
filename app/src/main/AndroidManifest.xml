@@ -59,6 +59,12 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
 
         <activity
+            android:name=".ContactInfoActivity"
+            android:exported="false"
+            android:parentActivityName=".ChatActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
+
+        <activity
             android:name=".PrivacyActivity"
             android:exported="false"
             android:parentActivityName=".MainActivity"

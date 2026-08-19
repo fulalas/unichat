@@ -120,6 +120,11 @@
     <string name="remove_reaction">Remove reaction</string>
     <string name="attach_file">File</string>
     <string name="attach_location">Current location</string>
+    <string name="attach_contact">Contact</string>
+    <string name="contact_read_failed">Could not read that contact</string>
+    <string name="contact_info">Contact info</string>
+    <string name="group_info">Group info</string>
+    <string name="contact_nickname">Nickname</string>
     <string name="location_label">Location</string>
     <string name="getting_location">Getting location…</string>
     <string name="location_failed">Could not get your location</string>

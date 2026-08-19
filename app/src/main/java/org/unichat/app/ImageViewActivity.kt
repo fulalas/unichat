@@ -27,6 +27,16 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
     private companion object {
         private const val OLDER_ROUNDS = 8
     }
+
+    // Album handed over by a search window instead of read from the history:
+    // those rows are not stored, so their files must be fetched one at a time
+    // and there is no older history to page into. See ChatActivity.openImageViewer.
+    private var windowAlbum = false
+    private val windowFetching = HashSet<String>()
+    // one automatic try per picture: a failed page binds again on every swipe
+    // past it, and each attempt is a blocking fetch that would never stop
+    private val windowFailed = HashSet<String>()
+    private val windowMedia = java.util.concurrent.Executors.newFixedThreadPool(2)
     // Pulling older history: a fetched page often holds no images at all, so
     // one request is rarely enough. This counts the pages still worth pulling
     // before giving up, and is refilled time the user swipes at the oldest
@@ -65,7 +75,8 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
             // so once you are sitting on the oldest image every further swipe
             // was silent and nothing more was ever fetched.
             override fun onPageScrollStateChanged(state: Int) {
-                if (state == ViewPager2.SCROLL_STATE_IDLE) loadOlderIfAtStart()
+                if (state != ViewPager2.SCROLL_STATE_IDLE) return
+                if (windowAlbum) extendWindowAlbum() else loadOlderIfAtStart()
             }
         })
 
@@ -75,6 +86,7 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
             return
         }
         singlePath = path
+        if (adoptWindowAlbum(path)) return
         Io.executor.execute {
             val all = Bridge.db.chatImages(chatId)
             runOnUiThread {
@@ -92,9 +104,138 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
+    private fun adoptWindowAlbum(path: String): Boolean {
+        val ids = intent.getStringArrayListExtra("windowIds") ?: return false
+        val paths = intent.getStringArrayListExtra("windowPaths") ?: return false
+        if (ids.size != paths.size || ids.isEmpty()) return false
+        windowAlbum = true
+        images = ids.indices.map { i ->
+            MessageRow(
+                id = ids[i], chatId = chatId, senderId = "", text = "", fromMe = false,
+                timeSent = 0, isRead = true, msgType = "image", filePath = paths[i],
+            )
+        }
+        singlePath = ""
+        pager.adapter?.notifyDataSetChanged()
+        // by message id, not by path: two rows can share one file (a re-sent
+        // photo), and matching the path would open a different one of them
+        val start = ids.indexOf(intent.getStringExtra("windowStartId").orEmpty())
+        if (start >= 0) pager.setCurrentItem(start, false)
+        // The handed-over slice only holds the pictures of the search window
+        // (~50 messages), which is a swipe or two; ask the server for the
+        // chat's real picture album around this one.
+        loadWindowAlbum(centreOn = ids.getOrElse(start) { ids.first() })
+        return true
+    }
+
+    private fun loadWindowAlbum(centreOn: String) {
+        if (centreOn.isEmpty()) return
+        windowMedia.execute {
+            val album = Bridge.chatPhotos(chatId, centreOn, null)
+            runOnUiThread {
+                if (isFinishing || isDestroyed || album.isEmpty()) return@runOnUiThread
+                mergeWindowAlbum(album, keepOn = centreOn)
+            }
+        }
+    }
+
+    /**
+     * Folds a server-fetched page of pictures into the album, keeping the one
+     * on screen under the finger.
+     *
+     * Ordered by message id alone, NOT by time: the rows handed over through
+     * the Intent carry no timestamp, so sorting by time would bunch them all
+     * before the fetched ones. Telegram ids grow with the chat, which is the
+     * same order — and this album only ever exists for Telegram.
+     */
+    private fun mergeWindowAlbum(fetched: List<MessageRow>, keepOn: String) {
+        if (fetched.isEmpty()) return
+        val known = images.associateBy { it.id }
+        val merged = (fetched + images) // fetched first: it carries the real metadata
+            .distinctBy { it.id }
+            .map { row ->
+                // but a file this phone already fetched is only known locally
+                val old = known[row.id]
+                if (row.filePath.isEmpty() && old != null && old.filePath.isNotEmpty()) {
+                    row.copy(filePath = old.filePath, fileStatus = old.fileStatus)
+                } else {
+                    row
+                }
+            }
+            .sortedBy { it.id.toLongOrNull() ?: 0L }
+        if (merged == images) return
+        val showing = keepOn.ifEmpty { currentMsg()?.id.orEmpty() }
+        images = merged
+        pager.adapter?.notifyDataSetChanged()
+        val at = merged.indexOfFirst { it.id == showing }
+        if (at >= 0) pager.setCurrentItem(at, false)
+    }
+
+    private var windowLoading = false
+    private var windowOlderDone = false
+    private var windowNewerDone = false
+
+    /** Grows the album when the user reaches either end of it. */
+    private fun extendWindowAlbum() {
+        if (!windowAlbum || windowLoading || images.isEmpty()) return
+        val at = pager.currentItem
+        val goOlder = at <= 1 && !windowOlderDone
+        val goNewer = at >= images.size - 2 && !windowNewerDone
+        if (!goOlder && !goNewer) return
+        val anchor = if (goOlder) images.first().id else images.last().id
+        val before = images.size
+        windowLoading = true
+        windowMedia.execute {
+            val more = Bridge.chatPhotos(chatId, anchor, newer = !goOlder)
+            runOnUiThread {
+                windowLoading = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                mergeWindowAlbum(more, keepOn = currentMsg()?.id.orEmpty())
+                // nothing new at that end means there is nothing more to fetch;
+                // without this every swipe against the end re-asks the server
+                if (images.size == before) {
+                    if (goOlder) windowOlderDone = true else windowNewerDone = true
+                }
+            }
+        }
+    }
+
+    /**
+     * Fetches one search-window picture. The normal download path records its
+     * progress on the message's stored row, and these rows have none — so it
+     * hands the path straight back, exactly as the chat screen does for the
+     * bubbles of the same window.
+     */
+    private fun fetchWindowImage(msg: MessageRow) {
+        if (msg.id in windowFailed) return
+        if (!windowFetching.add(msg.id)) return
+        windowMedia.execute {
+            val fetched = Bridge.searchMedia(msg.chatId, msg.id)
+            runOnUiThread {
+                windowFetching.remove(msg.id)
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (fetched.isEmpty()) {
+                    windowFailed.add(msg.id)
+                    // the page is stuck showing a spinner for something that is
+                    // never coming; let the bind clear it
+                    val gone = images.indexOfFirst { it.id == msg.id }
+                    if (gone >= 0) pager.adapter?.notifyItemChanged(gone)
+                    return@runOnUiThread
+                }
+                val at = images.indexOfFirst { it.id == msg.id }
+                if (at < 0) return@runOnUiThread
+                images = images.mapIndexed { i, m ->
+                    if (i == at) m.copy(filePath = fetched, fileStatus = 2) else m
+                }
+                pager.adapter?.notifyItemChanged(at)
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         Bridge.removeListener(this)
+        windowMedia.shutdownNow()
     }
 
     override fun onMessagesChanged(chatId: String, rowIds: Set<String>?) {
@@ -160,6 +301,8 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
     private fun count(): Int = if (images.isEmpty()) 1 else images.size
 
     private fun loadOlderIfAtStart() {
+        // a search window is a fixed slice the chat screen widens, not this one
+        if (windowAlbum) return
         if (chatId.isEmpty() || images.isEmpty() || pager.currentItem > 0) return
         if (Bridge.isHistoryExhausted(chatId)) return
         olderRoundsLeft = OLDER_ROUNDS
@@ -204,8 +347,15 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
             holder.image.setImageDrawable(null)
             holder.image.tag = path
             if (path.isEmpty()) {
-                holder.progress.visibility = View.VISIBLE
-                if (msg != null) Bridge.downloadFile(msg, userInitiated = true)
+                if (msg == null) return
+                if (windowAlbum) {
+                    holder.progress.visibility =
+                        if (msg.id in windowFailed) View.GONE else View.VISIBLE
+                    fetchWindowImage(msg)
+                } else {
+                    holder.progress.visibility = View.VISIBLE
+                    Bridge.downloadFile(msg, userInitiated = true)
+                }
                 return
             }
             holder.progress.visibility = View.VISIBLE

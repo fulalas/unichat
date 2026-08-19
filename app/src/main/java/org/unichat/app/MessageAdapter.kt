@@ -38,6 +38,8 @@ class MessageAdapter(
     private val onContactMessage: (MessageRow) -> Unit,
     private val onMessageActions: (MessageRow) -> Unit,
     private val onQuoteClick: (MessageRow) -> Unit,
+    private val onNeedLinkPreview: (String) -> Unit = {},
+    private val onLinkPreviewClick: (String) -> Unit = {},
     private val onSelectionChanged: () -> Unit = {},
     private val onDragArm: () -> Unit = {},
 ) : RecyclerView.Adapter<MessageAdapter.Holder>() {
@@ -130,7 +132,13 @@ class MessageAdapter(
 
     var seekDragging = false
         private set
+    // raw for the callers that hand it back to the server, folded for matching
     var highlightQuery: String = ""
+        set(value) {
+            field = value
+            foldedQuery = Search.fold(value)
+        }
+    private var foldedQuery: String = ""
     var flashMsgId: String = ""
         set(value) {
             field = value
@@ -290,6 +298,11 @@ class MessageAdapter(
         val contactActions: LinearLayout = view.findViewById(R.id.contactActions)
         val contactMessageBtn: TextView = view.findViewById(R.id.contactMessageBtn)
         val contactAddBtn: TextView = view.findViewById(R.id.contactAddBtn)
+        val linkPreview: LinearLayout = view.findViewById(R.id.linkPreview)
+        val linkSite: TextView = view.findViewById(R.id.linkSite)
+        val linkTitle: TextView = view.findViewById(R.id.linkTitle)
+        val linkDescription: TextView = view.findViewById(R.id.linkDescription)
+        val linkImage: ImageView = view.findViewById(R.id.linkImage)
         val reactionPill: TextView = view.findViewById(R.id.reactionPill)
         var flashFade: Runnable? = null
         var current: MessageRow? = null
@@ -323,6 +336,13 @@ class MessageAdapter(
         holder.quotePreview.maxWidth = maxWidth
         holder.image.maxWidth = maxWidth
         holder.image.maxHeight = (metrics.heightPixels * 0.5f).toInt()
+        // the card sits inside the padded bubble, so it caps slightly narrower
+        // than the bubble itself or a long title would push the bubble wider
+        // than every other one in the chat
+        val cardWidth = maxWidth - (24 * metrics.density).toInt()
+        holder.linkSite.maxWidth = cardWidth
+        holder.linkTitle.maxWidth = cardWidth
+        holder.linkDescription.maxWidth = cardWidth
     }
 
     override fun onAttachedToRecyclerView(recyclerView: RecyclerView) {
@@ -430,6 +450,11 @@ class MessageAdapter(
             holder.current?.let(onQuoteClick)
         }
         holder.quotePreview.setOnLongClickListener(longPress)
+        holder.linkPreview.setOnClickListener {
+            if (tapWhileSelecting()) return@setOnClickListener
+            (holder.linkPreview.tag as? String)?.let(onLinkPreviewClick)
+        }
+        holder.linkPreview.setOnLongClickListener(longPress)
         holder.bubble.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
             val quote = holder.quotePreview
             if (quote.visibility == View.VISIBLE) {
@@ -489,15 +514,15 @@ class MessageAdapter(
 
     private fun highlighted(ctx: android.content.Context, raw: String): CharSequence {
         val full = resolveMentions(raw, names)
-        val q = highlightQuery
+        val q = foldedQuery
         if (q.isEmpty() || q.length > full.length) return full
-        // Matches against the ORIGINAL string. Searching a full.lowercase() copy
-        // and applying the offsets to `full` breaks for any character whose
-        // lowercase form has a different length (Turkish 'İ' U+0130 lowercases to
-        // two chars), which shifted every later offset and pushed setSpan past
-        // the end of the Spannable — an IndexOutOfBoundsException inside
-        // onBindViewHolder, i.e. a crash while scrolling search results.
-        var idx = indexOfIgnoreCase(full, q, 0)
+        // Spans are set on the ORIGINAL string, and Search.fold is 1:1, so a
+        // match offset means the same character in both. Folding `full` into a
+        // lowercase copy and reusing those offsets breaks for any character
+        // whose lowercase form has a different length (Turkish 'İ' U+0130
+        // lowercases to two chars): every later offset shifted and setSpan ran
+        // past the end of the Spannable — a crash while scrolling results.
+        var idx = Search.indexOf(full, q)
         if (idx < 0) return full
         val sp = SpannableString(full)
         val bg = ctx.themeColor(R.attr.chatAccent)
@@ -507,19 +532,9 @@ class MessageAdapter(
                 Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
             sp.setSpan(ForegroundColorSpan(0xFFFFFFFF.toInt()), idx, end,
                 Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
-            idx = indexOfIgnoreCase(full, q, end)
+            idx = Search.indexOf(full, q, end)
         }
         return sp
-    }
-
-    private fun indexOfIgnoreCase(haystack: String, needle: String, from: Int): Int {
-        var i = from.coerceAtLeast(0)
-        val last = haystack.length - needle.length
-        while (i <= last) {
-            if (haystack.regionMatches(i, needle, 0, needle.length, ignoreCase = true)) return i
-            i++
-        }
-        return -1
     }
 
     private fun flashRow(holder: Holder, ctx: android.content.Context) {
@@ -819,9 +834,86 @@ class MessageAdapter(
         // Pre-checked: the WEB_URLS pattern is a large regex and this runs on
         // every bind of every visible text row, where the vast majority of
         // messages contain no URL at all.
-        if (holder.text.visibility == View.VISIBLE && mayContainUrl(holder.text.text)) {
+        val linkable = holder.text.visibility == View.VISIBLE && mayContainUrl(holder.text.text)
+        if (linkable) {
             android.text.util.Linkify.addLinks(holder.text, android.text.util.Linkify.WEB_URLS)
         }
+        bindLinkPreview(holder, msg, linkable)
+    }
+
+    // Only plain text rows: a caption under a photo already has its own picture
+    // above it, and a card under that reads as a second attachment.
+    private fun bindLinkPreview(holder: Holder, msg: MessageRow, linkable: Boolean) {
+        val url = if (linkable && msg.msgType.isEmpty()) urlOf(msg) else null
+        if (url == null) {
+            holder.linkPreview.visibility = View.GONE
+            holder.linkPreview.tag = null
+            return
+        }
+        val row = LinkPreview.cached(url)
+        if (row == null) {
+            holder.linkPreview.visibility = View.GONE
+            holder.linkPreview.tag = null
+            previewWaiters.getOrPut(url) { HashSet() }.add(msg.id)
+            onNeedLinkPreview(url)
+            return
+        }
+        // Only THIS row is no longer waiting. Dropping the whole set (which an
+        // earlier revision did) lost the other rows sharing this link: a
+        // routine rebind between the fetch landing and onLinkPreviewReady
+        // running left every one of them card-less until scrolled away and back.
+        previewWaiters[url]?.let {
+            it.remove(msg.id)
+            if (it.isEmpty()) previewWaiters.remove(url)
+        }
+        if (!row.hasPreview) {
+            holder.linkPreview.visibility = View.GONE
+            holder.linkPreview.tag = null
+            return
+        }
+        holder.linkPreview.visibility = View.VISIBLE
+        holder.linkPreview.tag = url
+        bindPreviewLine(holder.linkSite, row.site)
+        bindPreviewLine(holder.linkTitle, row.title)
+        bindPreviewLine(holder.linkDescription, row.description)
+        if (row.imagePath.isEmpty()) {
+            holder.linkImage.visibility = View.GONE
+            holder.linkImage.setImageDrawable(null)
+        } else {
+            holder.linkImage.visibility = View.VISIBLE
+            // The card's full width, with the height left to follow the
+            // picture's own proportions: no cap, because capping would either
+            // cut the picture or box it in — this app never crops an image.
+            LinkPreview.loadImage(row.imagePath, holder.linkImage, holder.linkTitle.maxWidth)
+        }
+    }
+
+    private fun bindPreviewLine(view: TextView, text: String) {
+        view.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+        if (text.isNotEmpty()) view.text = text
+    }
+
+    // Extracting a URL means running a large regex, so the answer is kept per
+    // message body: a row is re-bound on every scroll past it, and in search
+    // mode the loaded window holds thousands of them. Keyed on the text rather
+    // than the message id, so an edited message is re-read and two people
+    // sharing one link share the entry.
+    private val urlCache = LruCache<String, String>(512)
+
+    private fun urlOf(msg: MessageRow): String? {
+        urlCache.get(msg.text)?.let { return it.ifEmpty { null } }
+        val found = LinkPreview.firstUrl(msg.text)
+        urlCache.put(msg.text, found.orEmpty())
+        return found
+    }
+
+    // Which rows are waiting on which link, so an answer rebinds those rows
+    // instead of re-scanning the whole loaded window for the URL that arrived.
+    private val previewWaiters = HashMap<String, MutableSet<String>>()
+
+    fun onLinkPreviewReady(url: String) {
+        val waiting = previewWaiters.remove(url) ?: return
+        for (id in waiting) rebindRow(id)
     }
 
     // Cheap necessary-condition test for Patterns.AUTOLINK_WEB_URL: it only ever
