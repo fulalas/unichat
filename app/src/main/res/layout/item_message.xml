@@ -235,6 +235,32 @@
                 android:visibility="gone" />
         </FrameLayout>
 
+        <LinearLayout
+            android:id="@+id/contactCard"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingEnd="10dp"
+                android:text="👤"
+                android:textSize="26sp"
+                android:importantForAccessibility="no" />
+
+            <TextView
+                android:id="@+id/contactBody"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
+                android:textColor="@color/text_primary"
+                android:textSize="15sp" />
+        </LinearLayout>
+
         <TextView
             android:id="@+id/messageText"
             android:layout_width="wrap_content"
@@ -251,6 +277,56 @@
             android:textColor="@color/text_secondary"
             android:textSize="11sp"
             android:layout_marginTop="2dp" />
+
+        <!-- dividers via showDividers, not match_parent Views: a match_parent
+             child inflates the wrap_content bubble to full screen width -->
+        <LinearLayout
+            android:id="@+id/contactActions"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:orientation="vertical"
+            android:layout_marginTop="6dp"
+            android:divider="@drawable/contact_divider_h"
+            android:showDividers="beginning"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:divider="@drawable/contact_divider_v"
+                android:showDividers="middle">
+
+                <TextView
+                    android:id="@+id/contactMessageBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:paddingStart="18dp"
+                    android:paddingEnd="18dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="4dp"
+                    android:text="@string/message_contact"
+                    android:textColor="?attr/chatAccent"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/contactAddBtn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:paddingStart="18dp"
+                    android:paddingEnd="18dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="4dp"
+                    android:text="@string/add_to_contacts"
+                    android:textColor="?attr/chatAccent"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+            </LinearLayout>
+        </LinearLayout>
     </LinearLayout>
     </FrameLayout>
 

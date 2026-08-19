@@ -2,6 +2,13 @@
 
 UniChat is a dual-protocol messenger: WhatsApp (Go bridge / whatsmeow, like
 WMChat) plus Telegram (TDLib via `tdjson/`, JSON interface, see `Tg.kt`).
+
+## Comments (mandatory)
+
+Write a comment only when it records a real failure, or a rule from WhatsApp,
+Telegram or Android that would bring one back. Do not write file or function
+descriptions, section headers, field notes, layout labels, or anything that
+restates the code.
 Chat ids are namespaced: Telegram rows use a `tg:` prefix in the shared Db.
 `./build-tdlib.sh` builds libtdjson/libtdjni into `app/src/main/jniLibs`
 (cached; build.sh runs it automatically when the libs are missing).

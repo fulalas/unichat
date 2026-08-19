@@ -51,10 +51,10 @@ data class SenderInfo(val senderId: String, val fromMe: Boolean, val senderName:
 fun previewLabel(
     ctx: Context, msgType: String, text: String, emoji: Boolean, detail: String = "",
 ): String {
-    fun labeled(icon: String, labelRes: Int) = when {
-        text.isEmpty() -> if (emoji) "$icon ${ctx.getString(labelRes)}" else ctx.getString(labelRes)
-        emoji -> "$icon $text"
-        else -> text
+    fun labeled(icon: String, labelRes: Int, body: String = text) = when {
+        body.isEmpty() -> if (emoji) "$icon ${ctx.getString(labelRes)}" else ctx.getString(labelRes)
+        emoji -> "$icon $body"
+        else -> body
     }
     return when (msgType) {
         "image" -> labeled("📷", R.string.photo_label)
@@ -70,6 +70,9 @@ fun previewLabel(
             if (detail.isEmpty()) base else "$base ($detail)"
         }
         "document" -> labeled("📎", R.string.document_label)
+        // a contact card's body is "name\nphone..."; previews show just the name
+        "contact" -> labeled("👤", R.string.contact_label,
+            text.lineSequence().firstOrNull().orEmpty())
         in LABEL_ONLY_TYPES -> {
             val (icon, labelRes) = LABEL_ONLY_TYPES.getValue(msgType)
             val label = ctx.getString(labelRes)
@@ -105,7 +108,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 24) {
 
     private val ctx: Context = context.applicationContext
 
@@ -152,6 +155,14 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         private const val CREATE_PLACEHOLDER_INDEX =
             "CREATE INDEX IF NOT EXISTS idx_msg_placeholder ON messages(chat_id, time_sent) " +
                 "WHERE msg_type='' AND file_id=''"
+        // contact cards stored before the app kept their body (name/numbers);
+        // the repair sweep re-fetches them, and runs on every chat open. The
+        // predicate is wider than the sweep's (which uses text='' only, and a
+        // query condition may imply the index predicate) so v23/v24 databases
+        // need no rebuild.
+        private const val CREATE_EMPTY_CONTACT_INDEX =
+            "CREATE INDEX IF NOT EXISTS idx_msg_empty_contact ON messages(chat_id, time_sent) " +
+                "WHERE msg_type='contact' AND (text='' OR file_id='')"
 
         private const val CREATE_ID_INDEX =
             "CREATE INDEX IF NOT EXISTS idx_msg_id ON messages(id)"
@@ -204,6 +215,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         db.execSQL(CREATE_DELETED_CHATS)
         db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
         db.execSQL(CREATE_PLACEHOLDER_INDEX)
+        db.execSQL(CREATE_EMPTY_CONTACT_INDEX)
     }
 
     /**
@@ -286,6 +298,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
         }
         if (oldVersion < 18) {
             db.execSQL(CREATE_DELETED_CHATS)
+        }
+        if (oldVersion < 24) {
+            // v23 shipped this index on text='' only; replace with the wider
+            // predicate so the file_id backfill sweep is covered too
+            db.execSQL("DROP INDEX IF EXISTS idx_msg_empty_contact")
+            db.execSQL(CREATE_EMPTY_CONTACT_INDEX)
         }
         if (oldVersion < 22) {
             db.execSQL("ALTER TABLE messages ADD COLUMN latitude REAL NOT NULL DEFAULT 0")
@@ -557,6 +575,17 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 22) {
             "AND text LIKE '[%]' ORDER BY time_sent DESC LIMIT ?",
         arrayOf(chatId, limit.toString())
     ) { it.getString(0) }
+
+    // Contact cards from before the body was kept, so the repair can refill
+    // them. Deliberately text='' only: file_id (the messageable id) stays
+    // empty forever for cards that legitimately have none — a wider predicate
+    // would re-ask the phone for those on every run without end.
+    fun emptyContactSenders(chatId: String, limit: Int): List<Pair<String, String>> = queryList(
+        "SELECT id, sender_id FROM messages " +
+            "WHERE chat_id=? AND msg_type='contact' AND text='' " +
+            "ORDER BY time_sent DESC LIMIT ?",
+        arrayOf(chatId, limit.toString())
+    ) { Pair(it.getString(0), it.getString(1)) }
 
     fun setPlayed(chatId: String, msgId: String) {
         writableDatabase.execSQL(

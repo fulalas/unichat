@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.ContactsContract
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.Toast
@@ -305,6 +306,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             onDocumentClick = { msg -> openDocument(msg) },
             onVideoOpen = { msg -> openVideo(msg) },
             onLocationClick = { msg -> openLocation(msg) },
+            onContactClick = { msg -> addContact(msg) },
+            onContactMessage = { msg -> messageContact(msg) },
             onMessageActions = { msg -> showMessageActions(msg) },
             onQuoteClick = { msg -> onQuoteTapped(msg) },
             onSelectionChanged = { onSelectionChanged() },
@@ -1833,15 +1836,86 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    private fun openLocation(msg: MessageRow) {
-        val coords = msg.coordinates()
-        if (coords.isEmpty()) return
-        val uri = Uri.parse("geo:$coords?q=$coords")
+    private fun startActivitySafely(intent: Intent) {
         try {
-            startActivity(Intent(Intent.ACTION_VIEW, uri))
+            startActivity(intent)
         } catch (e: Exception) {
             Toast.makeText(this, R.string.no_app_for_file, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun openLocation(msg: MessageRow) {
+        val coords = msg.coordinates()
+        if (coords.isEmpty()) return
+        startActivitySafely(Intent(Intent.ACTION_VIEW, Uri.parse("geo:$coords?q=$coords")))
+    }
+
+    // A card's body is "name\nphone..." per person, people separated by a
+    // blank line; the buttons act on the first person. The digit filter only
+    // exists for rows stored by builds that interleaved several people's
+    // lines with no separator — new rows are structured by construction.
+    private fun cardLines(msg: MessageRow): List<String> =
+        msg.text.substringBefore("\n\n").lines().filter { it.isNotBlank() }
+
+    private fun cardPhones(msg: MessageRow): List<String> =
+        cardLines(msg).drop(1).filter { PhoneBook.digitsOf(it).length >= 5 }
+
+    private fun addContact(msg: MessageRow) {
+        val name = cardLines(msg).firstOrNull() ?: return
+        val intent = Intent(ContactsContract.Intents.Insert.ACTION)
+        intent.type = ContactsContract.RawContacts.CONTENT_TYPE
+        intent.putExtra(ContactsContract.Intents.Insert.NAME, name)
+        val slots = listOf(
+            ContactsContract.Intents.Insert.PHONE,
+            ContactsContract.Intents.Insert.SECONDARY_PHONE,
+            ContactsContract.Intents.Insert.TERTIARY_PHONE,
+        )
+        cardPhones(msg).take(slots.size).forEachIndexed { i, p -> intent.putExtra(slots[i], p) }
+        startActivitySafely(intent)
+    }
+
+    // A number without a country code is never guessed at — a wrong guess
+    // would open a chat with a stranger under the card's name.
+    private fun messageContact(msg: MessageRow) {
+        val name = cardLines(msg).firstOrNull().orEmpty()
+        if (Tg.isTgId(chatId)) {
+            val userId = msg.fileId.toLongOrNull()
+            if (userId == null) {
+                Toast.makeText(this, R.string.not_on_telegram, Toast.LENGTH_SHORT).show()
+                return
+            }
+            resolveThenOpen(R.string.opening_chat, {
+                Tg.createUserChat(userId).ifEmpty { R.string.chat_open_failed }
+            }) { id -> openContactChat(id, name) }
+            return
+        }
+        val waid = msg.fileId.ifEmpty {
+            cardPhones(msg).firstOrNull()
+                ?.let { PhoneBook.normalize(it).removePrefix("+") }.orEmpty()
+        }
+        if (waid.isEmpty()) {
+            Toast.makeText(this, R.string.number_check_failed, Toast.LENGTH_SHORT).show()
+            return
+        }
+        Bridge.rememberContact("$waid@s.whatsapp.net", name)
+        openContactChat("$waid@s.whatsapp.net", name)
+    }
+
+    private fun openContactChat(id: String, name: String) {
+        val intent = Intent(this, ChatActivity::class.java)
+        intent.putExtra("chatId", id)
+        intent.putExtra("chatName", name)
+        startActivity(intent) // singleTop routes to onNewIntent while on top
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // singleTop: opening another chat while this one is on top lands here
+        // (a card's "Message", a notification deep-link). Rebuild on the new
+        // intent in place — the task and Back stack stay intact.
+        if (intent.getStringExtra("chatId") == chatId) return
+        setIntent(intent)
+        recreate()
     }
 
     private fun openDocument(msg: MessageRow) {
@@ -1872,11 +1946,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val intent = Intent(Intent.ACTION_VIEW)
         intent.setDataAndType(uri, mime)
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        try {
-            startActivity(intent)
-        } catch (e: Exception) {
-            Toast.makeText(this, R.string.no_app_for_file, Toast.LENGTH_SHORT).show()
-        }
+        startActivitySafely(intent)
     }
 
     private fun downloadWithToast(msg: MessageRow) {
@@ -1918,12 +1988,16 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         fun add(res: Int, action: () -> Unit) = actions.add(getString(res) to action)
 
-        // A label-only row (view-once media, a poll, a contact card) has no body
-        // on this device — nothing to forward or share, so offering either would
-        // only fail.
-        val labelOnly = msg.msgType in LABEL_ONLY_TYPES
+        // A label-only row (view-once media, a poll) has no body on this
+        // device — nothing to forward or share, so offering either would only
+        // fail. A contact card with a body is the exception: its text forwards
+        // and shares like any text message.
+        val labelOnly = msg.msgType in LABEL_ONLY_TYPES && msg.text.isBlank()
 
         add(R.string.reply) { startReply(msg) }
+        if (msg.msgType == "contact" && msg.text.isNotBlank()) {
+            add(R.string.add_to_contacts) { addContact(msg) }
+        }
         if (!labelOnly) add(R.string.forward) { pickForwardTarget(msg) }
         if (msg.fromMe && msg.msgType == "" && Bridge.canEdit(msg)) add(R.string.edit) { startEdit(msg) }
         add(R.string.delete) { confirmDelete(listOf(msg)) }
@@ -2053,7 +2127,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             startActivity(Intent.createChooser(intent, getString(R.string.share)))
             return
         }
-        if (msg.msgType != "") {
+        // a contact card's body is text, not a file on disk
+        if (msg.msgType != "" && msg.msgType != "contact") {
             if (isStillSending(msg)) {
                 Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
                 return
@@ -2177,7 +2252,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         var stillSending = false
         var downloading = false
         for (msg in msgs) {
-            if (msg.msgType in LABEL_ONLY_TYPES) continue
+            if (msg.msgType in LABEL_ONLY_TYPES && msg.text.isBlank()) continue
             val isFileMedia = msg.msgType in FILE_MEDIA_TYPES
             if (isFileMedia && isStillSending(msg)) { stillSending = true; continue }
             if (isFileMedia && msg.filePath.isEmpty()) {

@@ -34,6 +34,8 @@ class MessageAdapter(
     private val onDocumentClick: (MessageRow) -> Unit,
     private val onVideoOpen: (MessageRow) -> Unit,
     private val onLocationClick: (MessageRow) -> Unit,
+    private val onContactClick: (MessageRow) -> Unit,
+    private val onContactMessage: (MessageRow) -> Unit,
     private val onMessageActions: (MessageRow) -> Unit,
     private val onQuoteClick: (MessageRow) -> Unit,
     private val onSelectionChanged: () -> Unit = {},
@@ -283,6 +285,11 @@ class MessageAdapter(
         val videoLabel: TextView = view.findViewById(R.id.videoLabel)
         val text: TextView = view.findViewById(R.id.messageText)
         val time: TextView = view.findViewById(R.id.messageTime)
+        val contactCard: LinearLayout = view.findViewById(R.id.contactCard)
+        val contactBody: TextView = view.findViewById(R.id.contactBody)
+        val contactActions: LinearLayout = view.findViewById(R.id.contactActions)
+        val contactMessageBtn: TextView = view.findViewById(R.id.contactMessageBtn)
+        val contactAddBtn: TextView = view.findViewById(R.id.contactAddBtn)
         val reactionPill: TextView = view.findViewById(R.id.reactionPill)
         var flashFade: Runnable? = null
         var current: MessageRow? = null
@@ -378,6 +385,14 @@ class MessageAdapter(
         holder.itemView.setOnClickListener(openActions)
         holder.itemView.setOnLongClickListener(longPress)
         holder.bubble.setOnClickListener(routeByType)
+        holder.contactMessageBtn.setOnClickListener {
+            if (!tapWhileSelecting()) holder.current?.let(onContactMessage)
+        }
+        holder.contactAddBtn.setOnClickListener {
+            if (!tapWhileSelecting()) holder.current?.let(onContactClick)
+        }
+        holder.contactMessageBtn.setOnLongClickListener(longPress)
+        holder.contactAddBtn.setOnLongClickListener(longPress)
         holder.bubble.setOnLongClickListener(longPress)
         val link = holder.linkMovement
         holder.text.movementMethod = link
@@ -678,6 +693,8 @@ class MessageAdapter(
         holder.audioRow.visibility = View.GONE
         holder.audioMeta.visibility = View.GONE
         holder.videoRow.visibility = View.GONE
+        holder.contactActions.visibility = View.GONE
+        holder.contactCard.visibility = View.GONE
         holder.text.visibility = View.VISIBLE
         holder.text.textSize = 15f // default; emoji-only messages enlarge below
         val density = ctx.resources.displayMetrics.density
@@ -769,6 +786,17 @@ class MessageAdapter(
             "location" -> {
                 val label = msg.text.ifEmpty { ctx.getString(R.string.location_label) }
                 holder.text.text = highlighted(ctx, "📍 $label")
+            }
+            // rows stored before contact cards carried a body keep the label
+            "contact" -> {
+                if (msg.text.isEmpty()) {
+                    holder.text.text = previewLabel(ctx, msg.msgType, "", emoji = true)
+                } else {
+                    holder.text.visibility = View.GONE
+                    holder.contactCard.visibility = View.VISIBLE
+                    holder.contactBody.text = highlighted(ctx, msg.text)
+                    holder.contactActions.visibility = View.VISIBLE
+                }
             }
             in LABEL_ONLY_TYPES -> holder.text.text =
                 previewLabel(ctx, msg.msgType, "", emoji = true)

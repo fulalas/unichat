@@ -532,7 +532,23 @@ object Tg {
                 longitude = loc.optDouble("longitude")
             }
             "messageCall" -> msgType = "call"
-            "messageContact" -> msgType = "contact"
+            "messageContact" -> {
+                msgType = "contact"
+                // same "name\nphone" body the WhatsApp bridge builds, so the
+                // renderer and add-to-contacts action are protocol-blind
+                content.optJSONObject("contact")?.let { c ->
+                    val phone = c.optString("phone_number")
+                        .let { if (it.isNotEmpty() && !it.startsWith("+")) "+$it" else it }
+                    // line 1 is always the name header (the number when there
+                    // is no name), so later lines are phones by construction
+                    val name = listOf(c.optString("first_name"), c.optString("last_name"))
+                        .filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { phone }
+                    text = listOf(name, phone).filter { it.isNotEmpty() }.joinToString("\n")
+                    // contact rows never download, so file_id is free to carry
+                    // the shared user's id — what "Message" opens a chat with
+                    c.optLong("user_id").takeIf { it != 0L }?.let { fileId = it.toString() }
+                }
+            }
             "messagePoll" -> msgType = "poll"
             "messageChatChangeTitle" -> text = "· " + content.optString("title")
             else -> text = placeholderFor(content)
@@ -985,6 +1001,16 @@ object Tg {
         }
     }
 
+    // TDLib requires a private chat to exist (createPrivateChat) before
+    // anything can be sent to it
+    fun createUserChat(userId: Long): String {
+        val chat = request(
+            JSONObject().put("@type", "createPrivateChat").put("user_id", userId)
+        ) ?: return ""
+        val id = chat.optLong("id")
+        return if (id != 0L) idFor(id) else ""
+    }
+
     /**
      * Tells TDLib the chat is on screen. Required, not an optimisation: for a
      * private chat DialogActionManager drops every incoming typing/recording
@@ -1231,9 +1257,11 @@ object Tg {
     private fun syncPlayedState(chatId: String) {
         // Two repairs share one round-trip (TDLib caps getMessages at 100):
         // voice notes whose listened flag we may have missed, and messages
-        // stored as a "[SomeType]" placeholder by an older build that did not
-        // understand their content type yet.
-        val stale = Bridge.db.placeholderMessageIds(chatId, 40)
+        // stored either as a "[SomeType]" placeholder or as a bodyless contact
+        // card by an older build that did not keep their content yet.
+        // split budget so 40 placeholders can never starve the contact repair
+        val stale = (Bridge.db.placeholderMessageIds(chatId, 30) +
+            Bridge.db.emptyContactSenders(chatId, 10).map { it.first })
             .filter { repairAttempted.add("$chatId/$it") }
         val ids = LinkedHashSet(Bridge.db.unplayedAudioIds(chatId, 60)) + stale
         if (ids.isEmpty()) return

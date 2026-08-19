@@ -97,6 +97,11 @@
     <string name="view_once_label">View once (open on your phone)</string>
     <string name="document_label">File</string>
     <string name="contact_label">Contact card</string>
+    <string name="add_to_contacts">Add contact</string>
+    <string name="message_contact">Message</string>
+    <string name="not_on_telegram">Not on Telegram</string>
+    <string name="opening_chat">Opening chat…</string>
+    <string name="chat_open_failed">Could not open the chat</string>
     <string name="poll_label">Poll</string>
     <string name="poll_vote_label">Poll vote</string>
     <string name="event_label">Event</string>

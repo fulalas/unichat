@@ -292,9 +292,22 @@ object Bridge : EventListener {
             executor.execute { Wmbridge.subscribePresence(connId, userId) }
         }
 
+        // Contact cards stored bodyless by older builds: too recent for the
+        // history walk (the phone skips the already-synced stretch), so ask the
+        // phone to re-send each one; the answer arrives as a live message and
+        // refills the row. Once per chat per app run — a phone that won't
+        // answer must not be re-asked on every open. Executor-confined.
+        private val contactSweepDone = HashSet<String>()
+
         override fun requestInitialHistory(chatId: String) {
             executor.execute {
                 if (db.messageCount(chatId) < INITIAL_HISTORY_MIN) requestHistoryPageWa(chatId)
+                if (contactSweepDone.add(chatId)) {
+                    for ((msgId, senderId) in db.emptyContactSenders(chatId, 5)) {
+                        resendPending.add(msgId)
+                        Wmbridge.requestMessageResend(connId, chatId, senderId, msgId)
+                    }
+                }
             }
         }
 
@@ -813,6 +826,9 @@ object Bridge : EventListener {
             // as an ordinary contact (is_self=0) would list you in your own
             // search results for good
             if (chatId == selfId()) return@execute
+            // never rename someone already known: the name here can come from
+            // a received contact card, i.e. the sender chose it
+            if (db.contactName(chatId) != null) return@execute
             db.upsertContact(
                 chatId, name,
                 // only a phone JID holds a real number; a @lid's digits are not
@@ -1496,6 +1512,11 @@ object Bridge : EventListener {
         }
     }
 
+    // message ids we asked the phone to re-send (contact-card repair): their
+    // answers arrive as normal live messages and must not notify — they are
+    // old messages the user has long seen
+    private val resendPending: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     override fun onMessage(
         chatId: String, msgId: String, senderId: String, text: String,
         fromMe: Boolean, timeSent: Long, isRead: Boolean, msgType: String, fileId: String,
@@ -1507,6 +1528,7 @@ object Bridge : EventListener {
         // a malformed edit/protocol message can carry an empty key; storing it
         // would create a row that can never be matched to a real message
         if (msgId.isEmpty()) { Log.w(TAG, "message with empty id for $chatId"); return }
+        val isResend = resendPending.remove(msgId)
         db.upsertMessage(
             MessageRow(
                 msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId,
@@ -1523,7 +1545,9 @@ object Bridge : EventListener {
         if (!isHistory && (msgType in PICTURE_TYPES || msgType == "audio") && fileId.isNotEmpty()) {
             downloadFile(MessageRow(msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId))
         }
-        if (!isHistory && !fromMe && !isRead && chatId != activeChatId && !db.isMuted(chatId)) {
+        if (!isHistory && !isResend && !fromMe && !isRead &&
+            chatId != activeChatId && !db.isMuted(chatId)
+        ) {
             postMessageNotification(chatId, senderId, text, msgType, timeSent)
         }
         notifyChat(chatId)

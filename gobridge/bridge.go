@@ -1431,6 +1431,38 @@ func (p *progressFile) WriteAt(b []byte, off int64) (int, error) { return p.f.Wr
 func (p *progressFile) Truncate(size int64) error                { return p.f.Truncate(size) }
 func (p *progressFile) Stat() (os.FileInfo, error)               { return p.f.Stat() }
 
+// PLACEHOLDER_MESSAGE_RESEND: the phone answers with the full message as a
+// normal live event. The only way to refill a bodyless contact card too
+// recent for on-demand history sync, which skips the stretch already synced
+// to companions.
+func RequestMessageResend(connId int, chatId, senderId, msgId string) bool {
+	c := getConn(connId)
+	if c == nil {
+		return false
+	}
+	client := c.getClient()
+	if client.Store.ID == nil {
+		return false
+	}
+	chatJid, err := types.ParseJID(chatId)
+	if err != nil {
+		return false
+	}
+	senderJid, err := types.ParseJID(senderId)
+	if err != nil {
+		return false
+	}
+	msg := client.BuildUnavailableMessageRequest(chatJid, senderJid, msgId)
+	_, err = client.SendMessage(context.Background(), client.Store.ID.ToNonAD(), msg,
+		whatsmeow.SendRequestExtra{Peer: true})
+	if err != nil {
+		c.log(LogWarning, fmt.Sprintf("resend request error %v", err))
+		return false
+	}
+	c.log(LogDebug, fmt.Sprintf("resend requested: chat=%s msg=%s", chatId, msgId))
+	return true
+}
+
 func RequestChatHistory(connId int, chatId string, oldestMsgId string, oldestTimeSent int64, oldestFromMe bool, count int, forExport bool) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -2459,6 +2491,48 @@ func extractQuote(ci *waE2E.ContextInfo) (id string, text string, msgType string
 	return id, qc.text, qc.msgType
 }
 
+// The first line is ALWAYS the header the app treats as the name (a nameless
+// card uses its number), so every following line is a phone by construction.
+// waid is the card's WhatsApp id when the vcard names one — the app's
+// "Message" button opens a chat with it directly, no server lookup.
+func contactText(name, vcard string) (text, waid string) {
+	phones := []string{}
+	seen := map[string]bool{}
+	for _, l := range strings.Split(vcard, "\n") {
+		l = strings.TrimRight(l, "\r")
+		u := strings.ToUpper(l)
+		if !strings.HasPrefix(u, "TEL") && !strings.Contains(u, ".TEL") {
+			continue
+		}
+		if waid == "" {
+			if i := strings.Index(l, "waid="); i >= 0 {
+				w := l[i+5:]
+				if j := strings.IndexAny(w, ";:"); j >= 0 {
+					w = w[:j]
+				}
+				waid = w
+			}
+		}
+		i := strings.LastIndex(l, ":")
+		if i < 0 {
+			continue
+		}
+		num := strings.TrimSpace(l[i+1:])
+		if num == "" || seen[num] {
+			continue
+		}
+		seen[num] = true
+		phones = append(phones, num)
+	}
+	if name == "" {
+		if len(phones) == 0 {
+			return "", waid
+		}
+		name = phones[0]
+	}
+	return strings.Join(append([]string{name}, phones...), "\n"), waid
+}
+
 func fromContext(ci *waE2E.ContextInfo) msgContent {
 	id, text, msgType := extractQuote(ci)
 	return msgContent{
@@ -2532,8 +2606,26 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 		m.msgType, m.fileId = "sticker", encodeFileId("stk", stk)
 		return m, true
 	}
-	if msg.GetContactMessage() != nil {
-		return msgContent{msgType: "contact"}, true
+	if con := msg.GetContactMessage(); con != nil {
+		m := fromContext(con.GetContextInfo())
+		m.msgType = "contact"
+		m.text, m.fileId = contactText(con.GetDisplayName(), con.GetVcard())
+		return m, true
+	}
+	if arr := msg.GetContactsArrayMessage(); arr != nil {
+		m := fromContext(arr.GetContextInfo())
+		m.msgType = "contact"
+		// several people on one card: no single id for "Message" to open.
+		// A blank line separates people so the app never mistakes the next
+		// person's name for another phone number of the first.
+		var parts []string
+		for _, con := range arr.GetContacts() {
+			if t, _ := contactText(con.GetDisplayName(), con.GetVcard()); t != "" {
+				parts = append(parts, t)
+			}
+		}
+		m.text = strings.Join(parts, "\n\n")
+		return m, true
 	}
 	if loc := msg.GetLocationMessage(); loc != nil {
 		m := fromContext(loc.GetContextInfo())

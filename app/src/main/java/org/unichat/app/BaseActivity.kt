@@ -11,6 +11,35 @@ open class BaseActivity : AppCompatActivity() {
 
     protected open val padForSystemBars: Boolean = true
 
+    // resolve returns the chat id to open (String) or a string resource to
+    // toast (Int); it runs on Io.lookup because it can block for up to 75s
+    protected fun resolveThenOpen(progressRes: Int, resolve: () -> Any, open: (String) -> Unit) {
+        android.widget.Toast
+            .makeText(this, progressRes, android.widget.Toast.LENGTH_SHORT).show()
+        Io.lookup.execute {
+            val out = resolve()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                when (out) {
+                    is String -> open(out)
+                    is Int -> android.widget.Toast
+                        .makeText(this, out, android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    protected fun resolveNumberThenOpen(number: String, open: (String) -> Unit) =
+        resolveThenOpen(R.string.checking_number, {
+            val jid = Bridge.resolveNumber(number)
+            when {
+                // never say someone is not on WhatsApp because we couldn't ask
+                jid == Bridge.NUMBER_LOOKUP_FAILED -> R.string.number_check_failed
+                jid.isEmpty() -> R.string.not_on_whatsapp
+                else -> jid
+            }
+        }, open)
+
     protected fun applyProtocolTheme(isTelegram: Boolean) {
         if (!isTelegram) theme.applyStyle(R.style.ThemeOverlay_UniChat_Wa, true)
     }

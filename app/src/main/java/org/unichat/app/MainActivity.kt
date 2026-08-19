@@ -33,9 +33,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     private lateinit var emptyText: TextView
     private lateinit var adapter: ChatListAdapter
     private val io = Io.executor
-    // number lookups only: they block on the network far longer than any list
-    // read, and sharing io would stall every screen behind one of them
-    private val lookup = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -138,7 +135,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     override fun onDestroy() {
         super.onDestroy()
         Bridge.removeListener(this)
-        lookup.shutdownNow()
     }
 
     private var allChats: List<ChatRow> = emptyList()
@@ -208,26 +204,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun openPhoneEntry(chat: ChatRow) {
-        val number = PhoneBook.numberOf(chat.id)
-        Toast.makeText(this, R.string.checking_number, Toast.LENGTH_SHORT).show()
-        // its own thread: the server has up to 75s to answer, and the shared io
-        // queue is what every screen reads its lists through
-        lookup.execute {
-            val jid = Bridge.resolveNumber(number)
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                when {
-                    // never say someone is not on WhatsApp because we couldn't ask
-                    jid == Bridge.NUMBER_LOOKUP_FAILED ->
-                        Toast.makeText(this, R.string.number_check_failed, Toast.LENGTH_SHORT).show()
-                    jid.isEmpty() ->
-                        Toast.makeText(this, R.string.not_on_whatsapp, Toast.LENGTH_SHORT).show()
-                    else -> {
-                        Bridge.rememberContact(jid, chat.name)
-                        openChat(jid, chat.name)
-                    }
-                }
-            }
+        resolveNumberThenOpen(PhoneBook.numberOf(chat.id)) { jid ->
+            Bridge.rememberContact(jid, chat.name)
+            openChat(jid, chat.name)
         }
     }
 
