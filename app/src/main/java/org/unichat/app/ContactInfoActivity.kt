@@ -8,6 +8,10 @@ import android.widget.TextView
 
 class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
 
+    companion object {
+        private const val MEMBER_ROWS = 200
+    }
+
     private lateinit var chatId: String
     private lateinit var avatar: ImageView
     private lateinit var nameView: TextView
@@ -41,6 +45,53 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
         loadName()
         loadAvatar()
         loadDetails()
+        loadMembers()
+    }
+
+    private fun loadMembers() {
+        if (!isGroup) return
+        // Io.lookup, not the shared worker: both protocols ask their server for
+        // the member list, and on Telegram every unnamed member costs another
+        // round trip — none of which may sit in front of a screen's DB reads.
+        Io.lookup.execute {
+            val members = Bridge.groupMembers(chatId)
+            runOnUiThread {
+                if (isFinishing || isDestroyed || members.isEmpty()) return@runOnUiThread
+                showMembers(members)
+            }
+        }
+    }
+
+    private fun showMembers(members: List<Bridge.Member>) {
+        val header = findViewById<TextView>(R.id.membersHeader)
+        header.text = getString(R.string.members_count, members.size)
+        header.visibility = View.VISIBLE
+        val list = findViewById<android.view.ViewGroup>(R.id.membersList)
+        list.removeAllViews()
+        // a WhatsApp group holds up to 1024, and every row here is inflated on
+        // the main thread: the count above stays honest, the list is cut short
+        for (member in members.take(MEMBER_ROWS)) {
+            val row = layoutInflater.inflate(R.layout.item_member, list, false)
+            val avatar = row.findViewById<ImageView>(R.id.memberAvatar)
+            row.findViewById<TextView>(R.id.memberName).text = member.name
+            AvatarLoader.load(member.chatId, member.name, avatar, AvatarLoader.dp(avatar, 40))
+            row.setOnClickListener { openMemberChat(member) }
+            list.addView(row)
+        }
+    }
+
+    /**
+     * Opens a chat with a member. CLEAR_TOP drops this screen and hands the new
+     * chat to the singleTop ChatActivity already in the task, so Back leaves for
+     * the chat list instead of walking back through the group's profile.
+     */
+    private fun openMemberChat(member: Bridge.Member) {
+        startActivity(
+            android.content.Intent(this, ChatActivity::class.java)
+                .putExtra("chatId", member.chatId)
+                .putExtra("chatName", member.name)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        )
     }
 
     override fun onStart() {

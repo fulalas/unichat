@@ -40,6 +40,57 @@ fun resolveMentions(text: String, lookup: (String) -> String?): String {
 fun resolveMentions(text: String, names: Map<String, String>): String =
     if (names.isEmpty()) text else resolveMentions(text) { names[it] }
 
+/** A mention as it was composed: the `@Name` in the text, and who it means. */
+class Mention(val label: String, val id: String)
+
+class MentionHit(val start: Int, val end: Int, val id: String)
+
+/**
+ * Where the mentions are in a composed message. The composer writes the
+ * member's name, not their id, so a draft that outlived the screen still
+ * resolves — longest name first, on word boundaries ("mail@Bob" is an address
+ * and "@Bobby" is someone else), and no name claimed inside another's.
+ *
+ * Matched through [Search], like every other name match in the app: "@joao"
+ * mentions João. Folding is one character in, one out, so an offset into the
+ * folded name still points at the same character of the raw text.
+ */
+fun mentionHits(text: String, members: List<Mention>): List<MentionHit> {
+    if (!text.contains('@')) return emptyList()
+    val hits = ArrayList<MentionHit>()
+    for (m in members.sortedByDescending { it.label.length }) {
+        if (m.label.length < 2) continue
+        val needle = Search.fold(m.label)
+        var at = Search.indexOf(text, needle)
+        while (at >= 0) {
+            val end = at + needle.length
+            val standsAlone = (at == 0 || !text[at - 1].isLetterOrDigit()) &&
+                (end >= text.length || !text[end].isLetterOrDigit())
+            if (standsAlone && hits.none { at < it.end && end > it.start }) {
+                hits.add(MentionHit(at, end, m.id))
+            }
+            at = Search.indexOf(text, needle, at + 1)
+        }
+    }
+    return hits.sortedBy { it.start }
+}
+
+/**
+ * The WhatsApp wire form: the body carries the mentioned person's own digits
+ * (its clients draw the chip by matching them against MentionedJID), so the
+ * composed names are spliced out — back to front, or every offset after the
+ * first splice would be wrong.
+ */
+fun waMentionText(text: String, members: List<Mention>): Pair<String, List<String>> {
+    val hits = mentionHits(text, members)
+    if (hits.isEmpty()) return text to emptyList()
+    val out = StringBuilder(text)
+    for (h in hits.sortedByDescending { it.start }) {
+        out.replace(h.start, h.end, "@" + h.id.substringBefore("@"))
+    }
+    return out.toString() to hits.map { it.id }.distinct()
+}
+
 fun selfProtocol(ctx: android.content.Context, chatId: String): String = when {
     chatId.isEmpty() -> ""
     Tg.hasSession() && chatId == Tg.selfId() -> ctx.getString(R.string.telegram)

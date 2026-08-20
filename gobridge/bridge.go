@@ -698,7 +698,7 @@ func sendWithEcho(c *conn, chatJid types.JID, message *waE2E.Message, what strin
 	return resp.ID
 }
 
-func SendTextMessage(connId int, chatId string, text string) string {
+func SendTextMessage(connId int, chatId string, text string, mentionedIds string) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -708,7 +708,62 @@ func SendTextMessage(connId int, chatId string, text string) string {
 		c.log(LogWarning, fmt.Sprintf("jid error %v", err))
 		return ""
 	}
-	return sendWithEcho(c, chatJid, &waE2E.Message{Conversation: &text}, "send")
+	message := &waE2E.Message{Conversation: &text}
+	// The @digits in the body are only decoration: what actually notifies the
+	// mentioned person is MentionedJID, and Conversation cannot carry a
+	// ContextInfo at all — so a mention forces the extended shape.
+	if mentions := splitIds(mentionedIds); len(mentions) > 0 {
+		message = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:        proto.String(text),
+			ContextInfo: &waE2E.ContextInfo{MentionedJID: mentions},
+		}}
+	}
+	return sendWithEcho(c, chatJid, message, "send")
+}
+
+func splitIds(ids string) []string {
+	out := []string{}
+	for _, id := range strings.Split(ids, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// One member per line, "<chat id>\t<mention jid>". They differ: a group
+// addresses its members by LID, which is what a mention's digits must match,
+// while a chat with that person belongs under their phone number — opening a
+// @lid chat would fork a second thread for someone already listed there.
+func GetGroupMembers(connId int, chatId string) string {
+	c := getConn(connId)
+	if c == nil {
+		return ""
+	}
+	groupJid, err := types.ParseJID(chatId)
+	if err != nil || groupJid.Server != types.GroupServer {
+		return ""
+	}
+	info, err := c.getClient().GetGroupInfo(context.Background(), groupJid)
+	if err != nil {
+		c.log(LogWarning, fmt.Sprintf("group info error %v", err))
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range info.Participants {
+		if p.Error != 0 || p.JID.IsEmpty() {
+			continue
+		}
+		chatJid := p.JID
+		if !p.PhoneNumber.IsEmpty() {
+			chatJid = p.PhoneNumber
+		}
+		b.WriteString(strFromJid(chatJid))
+		b.WriteString("\t")
+		b.WriteString(strFromJid(p.JID))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func SendLocation(connId int, chatId string, latitude float64, longitude float64) string {
@@ -748,7 +803,7 @@ func SendContactMessage(connId int, chatId string, displayName string, vcard str
 	return sendWithEcho(c, chatJid, &message, "send contact")
 }
 
-func SendTextReply(connId int, chatId string, text string, quotedId string, quotedText string, quotedSender string) string {
+func SendTextReply(connId int, chatId string, text string, quotedId string, quotedText string, quotedSender string, mentionedIds string) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -757,10 +812,17 @@ func SendTextReply(connId int, chatId string, text string, quotedId string, quot
 	if err != nil {
 		return ""
 	}
+	ctxInfo := buildQuoteContext(quotedId, quotedText, quotedSender)
+	if mentions := splitIds(mentionedIds); len(mentions) > 0 {
+		if ctxInfo == nil {
+			ctxInfo = &waE2E.ContextInfo{}
+		}
+		ctxInfo.MentionedJID = mentions
+	}
 	message := waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 			Text:        proto.String(text),
-			ContextInfo: buildQuoteContext(quotedId, quotedText, quotedSender),
+			ContextInfo: ctxInfo,
 		},
 	}
 	return sendWithEcho(c, chatJid, &message, "send reply")

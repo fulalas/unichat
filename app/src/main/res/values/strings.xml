@@ -78,6 +78,9 @@
     <string name="pause">Pause</string>
     <string name="next">Next</string>
     <string name="copy">Copy</string>
+    <string name="members_count">%1$d members</string>
+    <string name="format_bold">Bold</string>
+    <string name="format_italic">Italic</string>
     <string name="copied">Copied</string>
     <string name="nothing_to_copy">Nothing to copy</string>
     <string name="link_copied">Link copied</string>

@@ -178,7 +178,9 @@ object Bridge : EventListener {
     private fun isTg(chatId: String) = Tg.isTgId(chatId)
 
     private interface Protocol {
-        fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean
+        fun sendText(
+            chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
+        ): Boolean
         fun sendImage(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean
         fun sendVideo(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean
         fun sendAudio(
@@ -223,10 +225,16 @@ object Bridge : EventListener {
     private fun proto(chatId: String): Protocol = if (isTg(chatId)) TgTransport else WaTransport
 
     private object WaTransport : Protocol {
-        override fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean {
-            if (quoted == null) return Wmbridge.sendTextMessage(connId, chatId, text).isNotEmpty()
+        override fun sendText(
+            chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
+        ): Boolean {
+            val (body, jids) = waMentionText(text, mentions)
+            val mentioned = jids.joinToString(",")
+            if (quoted == null) {
+                return Wmbridge.sendTextMessage(connId, chatId, body, mentioned).isNotEmpty()
+            }
             return Wmbridge.sendTextReply(
-                connId, chatId, text, quoted.id, quotedPreview(quoted), quoted.senderId
+                connId, chatId, body, quoted.id, quotedPreview(quoted), quoted.senderId, mentioned
             ).isNotEmpty()
         }
 
@@ -372,8 +380,9 @@ object Bridge : EventListener {
     }
 
     private object TgTransport : Protocol {
-        override fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean =
-            Tg.sendText(chatId, text, quoted?.id ?: "")
+        override fun sendText(
+            chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
+        ): Boolean = Tg.sendText(chatId, text, quoted?.id ?: "", mentions)
 
         override fun sendImage(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean =
             Tg.sendImage(chatId, path, caption, quoted?.id ?: "")
@@ -470,12 +479,17 @@ object Bridge : EventListener {
         Wmbridge.requestPairCode(connId, phone)
     }.start()
 
-    fun sendText(chatId: String, text: String) = executor.execute {
-        if (!proto(chatId).sendText(chatId, text, quoted = null)) onSendFailed("text", chatId)
-    }
+    fun sendText(chatId: String, text: String, mentions: List<Mention> = emptyList()) =
+        executor.execute {
+            if (!proto(chatId).sendText(chatId, text, null, mentions)) onSendFailed("text", chatId)
+        }
 
-    fun sendReply(chatId: String, text: String, quoted: MessageRow) = executor.execute {
-        if (!proto(chatId).sendText(chatId, text, quoted)) Log.w(TAG, "reply failed for chat $chatId")
+    fun sendReply(
+        chatId: String, text: String, quoted: MessageRow, mentions: List<Mention> = emptyList(),
+    ) = executor.execute {
+        if (!proto(chatId).sendText(chatId, text, quoted, mentions)) {
+            Log.w(TAG, "reply failed for chat $chatId")
+        }
     }
 
     private val waEditWindowSeconds: Long by lazy { Wmbridge.editWindowSeconds() }
@@ -732,7 +746,7 @@ object Bridge : EventListener {
             // recipient a generic unopenable attachment)
             "document" -> p.sendDocument(target, m.filePath, m.text, mimeOfPath(m.filePath), null)
             "location" -> p.sendLocation(target, m.latitude, m.longitude)
-            else -> p.sendText(target, m.text, null)
+            else -> p.sendText(target, m.text, null, emptyList())
         }
         if (!ok) onSendFailed(m.msgType.ifEmpty { "text" }, target)
         return ok
@@ -1295,6 +1309,52 @@ object Bridge : EventListener {
         main.post { onResult(ok) }
     }
 
+    private const val TG_NAME_LOOKUPS = 50
+
+    /** chatId opens a chat with them, mentionId is how their group addresses
+     *  them — the same person, under two ids, on WhatsApp. */
+    class Member(val chatId: String, val mentionId: String, val name: String)
+
+    /**
+     * Who is in a group, for the profile screen and the @ picker. Blocking
+     * (both protocols ask their server); worker threads only. Empty for a
+     * group whose member list this account is not allowed to read.
+     */
+    fun groupMembers(chatId: String): List<Member> {
+        if (!isGroupId(chatId)) return emptyList()
+        val names = db.contactNames()
+        val members = if (isTg(chatId)) {
+            // the update stream names most of them on the way in; the leftovers
+            // cost a round trip each, so they are rationed — a TDLib that has
+            // stopped answering would otherwise hold this thread for a 15s
+            // timeout per member, and every other screen's lookups behind it
+            var budget = TG_NAME_LOOKUPS
+            Tg.groupMembers(chatId).map { id ->
+                var name = names[id].orEmpty()
+                if (name.isEmpty() && budget > 0) {
+                    val looked = Tg.cacheUser(id)
+                    budget = if (looked == null) 0 else budget - 1
+                    name = looked.orEmpty()
+                }
+                Member(id, id, name.ifEmpty { id.removePrefix(Tg.PREFIX) })
+            }
+        } else {
+            if (connId < 0) return emptyList()
+            Wmbridge.getGroupMembers(connId, chatId).lineSequence().mapNotNull { line ->
+                val parts = line.split('\t')
+                if (parts.size < 2 || parts[0].isEmpty()) return@mapNotNull null
+                // last resort is the bare digits, never "<lid>@lid": that is
+                // what a mention of an unnamed member ends up reading as
+                val name = names[parts[0]]?.takeIf { it.isNotEmpty() }
+                    ?: names[parts[1]]?.takeIf { it.isNotEmpty() }
+                    ?: if (isPhoneId(parts[0])) phoneLabel(parts[0])
+                    else parts[0].substringBefore("@")
+                Member(parts[0], parts[1], name)
+            }.toList()
+        }
+        return members.sortedBy { it.name.lowercase() }
+    }
+
     class PeerInfo(val phone: String, val nickname: String, val about: String)
 
     /**
@@ -1559,6 +1619,9 @@ object Bridge : EventListener {
         appContext?.let { ctx ->
             if (Prefs.historyComplete(ctx, fromId)) Prefs.setHistoryComplete(ctx, toId)
             Prefs.clearHistoryComplete(ctx, fromId)
+            Prefs.draft(ctx, fromId).takeIf { it.isNotEmpty() }
+                ?.let { Prefs.setDraft(ctx, toId, it) }
+            Prefs.setDraft(ctx, fromId, "")
         }
         if (syncAllChat == fromId) syncAllChat = toId
         if (pendingMute.remove(fromId)) pendingMute.add(toId)

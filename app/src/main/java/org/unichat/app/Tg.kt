@@ -15,6 +15,8 @@ object Tg {
 
     private const val TAG = "UniChatTg"
 
+    private const val MEMBER_PAGE = 200
+
     const val PREFIX = "tg:"
 
     fun isTgId(id: String): Boolean = id.startsWith(PREFIX)
@@ -478,19 +480,19 @@ object Tg {
         var latitude = 0.0
         var longitude = 0.0
         when (content.optString("@type")) {
-            "messageText" -> text = content.getJSONObject("text").optString("text")
+            "messageText" -> text = markedText(content.optJSONObject("text"))
             "messagePhoto" -> {
                 msgType = "image"
-                text = content.optJSONObject("caption")?.optString("text") ?: ""
+                text = markedText(content.optJSONObject("caption"))
             }
             "messageVideo" -> {
                 msgType = "video"
-                text = content.optJSONObject("caption")?.optString("text") ?: ""
+                text = markedText(content.optJSONObject("caption"))
             }
             "messageVideoNote" -> msgType = "video"
             "messageAnimation" -> {
                 msgType = "video"
-                text = content.optJSONObject("caption")?.optString("text") ?: ""
+                text = markedText(content.optJSONObject("caption"))
             }
             "messageVoiceNote" -> {
                 msgType = "audio"
@@ -846,15 +848,134 @@ object Tg {
         return request(req) != null
     }
 
-    private fun formattedText(text: String) =
-        JSONObject().put("@type", "formattedText").put("text", text)
+    // Telegram keeps bold/italic in entities beside the text, WhatsApp keeps
+    // them as markers inside it. One text is stored for both, in WhatsApp's
+    // form, so the markers turn into entities here and back in markedText —
+    // sending them as they are made other Telegram clients show the asterisks.
+    private fun formattedText(text: String, mentions: List<Mention> = emptyList()): JSONObject {
+        val (plain, marks) = Markup.parse(text)
+        val ft = JSONObject().put("@type", "formattedText").put("text", plain)
+        val spans = ArrayList<Triple<Int, Int, JSONObject>>()
+        for (m in marks) {
+            spans.add(
+                Triple(
+                    m.start, m.end - m.start,
+                    JSONObject().put(
+                        "@type",
+                        if (m.bold) "textEntityTypeBold" else "textEntityTypeItalic"
+                    )
+                )
+            )
+        }
+        // resolved against the text as it will be sent, markers already gone:
+        // an entity offset counts characters TDLib will see, not the ones typed
+        for (h in mentionHits(plain, mentions)) {
+            val uid = chatIdOf(h.id)
+            // TDLib rejects the whole message over entities that half-overlap
+            // each other, which a bold run ending inside a mention would
+            if (uid <= 0 || marks.any { half(it, h.start, h.end) }) continue
+            spans.add(
+                Triple(
+                    h.start, h.end - h.start,
+                    JSONObject().put("@type", "textEntityTypeMentionName")
+                        .put("user_id", uid)
+                )
+            )
+        }
+        if (spans.isEmpty()) return ft
+        // in reading order, outer run before the ones nested in it
+        spans.sortWith(compareBy({ it.first }, { -it.second }))
+        val entities = JSONArray()
+        for ((offset, length, type) in spans) {
+            entities.put(
+                JSONObject().put("@type", "textEntity")
+                    .put("offset", offset).put("length", length).put("type", type)
+            )
+        }
+        return ft.put("entities", entities)
+    }
+
+    private fun half(m: Markup.Mark, start: Int, end: Int): Boolean =
+        (m.start < start && m.end > start && m.end < end) ||
+            (m.start > start && m.start < end && m.end > end)
+
+    /**
+     * Group members, ids only. A supergroup only answers this for members
+     * allowed to see the list, and the answer is one page long — a channel with
+     * thousands of subscribers is not something to enumerate on a profile
+     * screen, and there is no use for the rest of it.
+     */
+    fun groupMembers(chatId: String): List<String> {
+        val chat = request(
+            JSONObject().put("@type", "getChat").put("chat_id", chatIdOf(chatId))
+        ) ?: return emptyList()
+        val type = chat.optJSONObject("type") ?: return emptyList()
+        val members = when (type.optString("@type")) {
+            "chatTypeBasicGroup" -> request(
+                JSONObject().put("@type", "getBasicGroupFullInfo")
+                    .put("basic_group_id", type.optLong("basic_group_id"))
+            )?.optJSONArray("members")
+            "chatTypeSupergroup" -> request(
+                JSONObject().put("@type", "getSupergroupMembers")
+                    .put("supergroup_id", type.optLong("supergroup_id"))
+                    .put("filter", JSONObject().put("@type", "supergroupMembersFilterRecent"))
+                    .put("offset", 0).put("limit", MEMBER_PAGE)
+            )?.optJSONArray("members")
+            else -> null
+        } ?: return emptyList()
+        val ids = ArrayList<String>()
+        for (i in 0 until members.length()) {
+            val sender = members.optJSONObject(i)?.optJSONObject("member_id") ?: continue
+            if (sender.optString("@type") != "messageSenderUser") continue
+            val uid = sender.optLong("user_id")
+            if (uid != 0L) ids.add(idFor(uid))
+        }
+        return ids
+    }
+
+    /** Blocking; only for a member the update stream has not named yet. Null
+     *  when the request itself failed, which the caller must not keep paying
+     *  for once per remaining member. */
+    fun cacheUser(userId: String): String? {
+        val user = request(
+            JSONObject().put("@type", "getUser").put("user_id", chatIdOf(userId))
+        ) ?: return null
+        onUser(user)
+        return listOf(user.optString("first_name"), user.optString("last_name"))
+            .filter { it.isNotEmpty() }.joinToString(" ")
+    }
+
+    private fun markedText(ft: JSONObject?): String {
+        val plain = ft?.optString("text") ?: return ""
+        val entities = ft.optJSONArray("entities") ?: return plain
+        val marks = ArrayList<Markup.Mark>()
+        for (i in 0 until entities.length()) {
+            val e = entities.optJSONObject(i) ?: continue
+            val bold = when (e.optJSONObject("type")?.optString("@type")) {
+                "textEntityTypeBold" -> true
+                "textEntityTypeItalic" -> false
+                else -> null
+            } ?: continue
+            // offsets are UTF-16 units, same as a Kotlin String's, but they
+            // describe the server's copy — a truncated one must not crash us
+            val start = e.optInt("offset")
+            val end = start + e.optInt("length")
+            if (start < 0 || end <= start || end > plain.length) continue
+            marks.add(Markup.Mark(start, end, bold))
+        }
+        return Markup.withMarkers(plain, marks)
+    }
 
     private fun inputLocalFile(path: String) =
         JSONObject().put("@type", "inputFileLocal").put("path", path)
 
-    fun sendText(chatId: String, text: String, quotedId: String = ""): Boolean = sendMessage(
+    fun sendText(
+        chatId: String, text: String, quotedId: String = "",
+        mentions: List<Mention> = emptyList(),
+    ): Boolean = sendMessage(
         chatId,
-        JSONObject().put("@type", "inputMessageText").put("text", formattedText(text)),
+        JSONObject().put("@type", "inputMessageText")
+            .put("text", formattedText(text, mentions)),
         quotedId,
     )
 

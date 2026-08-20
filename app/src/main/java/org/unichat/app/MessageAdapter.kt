@@ -513,9 +513,12 @@ class MessageAdapter(
     override fun getItemCount(): Int = messages.size
 
     private fun highlighted(ctx: android.content.Context, raw: String): CharSequence {
-        val full = resolveMentions(raw, names)
+        val styled = Markup.render(resolveMentions(raw, names))
+        // the markers are gone from the rendered text, so the search offsets
+        // have to be taken against it and not against the stored message
+        val full = styled.toString()
         val q = foldedQuery
-        if (q.isEmpty() || q.length > full.length) return full
+        if (q.isEmpty() || q.length > full.length) return styled
         // Spans are set on the ORIGINAL string, and Search.fold is 1:1, so a
         // match offset means the same character in both. Folding `full` into a
         // lowercase copy and reusing those offsets breaks for any character
@@ -523,8 +526,8 @@ class MessageAdapter(
         // lowercases to two chars): every later offset shifted and setSpan ran
         // past the end of the Spannable — a crash while scrolling results.
         var idx = Search.indexOf(full, q)
-        if (idx < 0) return full
-        val sp = SpannableString(full)
+        if (idx < 0) return styled
+        val sp = SpannableString(styled)
         val bg = ctx.themeColor(R.attr.chatAccent)
         while (idx >= 0) {
             val end = idx + q.length

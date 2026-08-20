@@ -80,7 +80,7 @@ class ChatListAdapter(
             holder.lastMessage.text = context.getString(transient)
             holder.lastMessage.setTextColor(context.protocolAccent(chat.id))
         } else {
-            holder.lastMessage.text = chat.lastText.replace(PREVIEW_WS, " ")
+            holder.lastMessage.text = Markup.render(chat.lastText.replace(PREVIEW_WS, " "))
             holder.lastMessage.setTextColor(context.getColor(R.color.text_secondary))
         }
         val time = TimeFormat.compact(context, chat.lastTime)

@@ -29,6 +29,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         private const val LOCAL_PAGE = 500
         private const val RECORD_WAKE_LOCK_MS = 30 * 60 * 1000L
         private val FILE_MEDIA_TYPES = PICTURE_TYPES + setOf("audio", "video", "document")
+        private const val MENTION_ROWS = 5
+        private const val MENU_BOLD = 1001
+        private const val MENU_ITALIC = 1002
         private const val M_FORWARD = 1
         private const val M_COPY = 2
         private const val M_DELETE = 3
@@ -62,6 +65,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private lateinit var fabDot: android.view.View
     private lateinit var floatingDate: android.widget.TextView
     private lateinit var input: EditText
+    private lateinit var mentionList: android.view.ViewGroup
     private lateinit var attachButton: ImageButton
     private lateinit var actionButton: ImageButton
     private lateinit var recordTimer: android.widget.TextView
@@ -281,7 +285,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchBar = findViewById(R.id.searchBar)
         searchInput = findViewById(R.id.searchInput)
         searchCount = findViewById(R.id.searchCount)
-        findViewById<ImageButton>(R.id.contextCancel).setOnClickListener { clearComposeContext() }
+        findViewById<ImageButton>(R.id.contextCancel)
+            .setOnClickListener { cancelComposeContext() }
         searchCoverageRow = findViewById(R.id.searchCoverageRow)
         searchCoverage = findViewById(R.id.searchCoverage)
         searchDeeper = findViewById(R.id.searchDeeper)
@@ -369,11 +374,24 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 else -> startRecording()
             }
         }
+        mentionList = findViewById(R.id.mentionList)
         input.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) = updateActionButton()
+            override fun afterTextChanged(s: android.text.Editable?) {
+                updateActionButton()
+                updateMentions()
+            }
         })
+        input.customSelectionActionModeCallback = formatMenu
+        val draft = Prefs.draft(this, chatId)
+        if (draft.isNotEmpty()) {
+            input.setText(draft)
+            input.setSelection(input.text.length)
+            // its @names still have to resolve on send, and the picker — the
+            // only other thing that asks for the members — never ran
+            if (draft.contains('@')) loadMembers()
+        }
         updateActionButton()
 
         Bridge.requestInitialHistory(chatId)
@@ -451,6 +469,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val atBottomNow = isAtBottom()
         scrollStates[chatId] = if (atBottomNow) null else lm.onSaveInstanceState()
         saveScrollAnchor(atBottomNow)
+        saveDraft()
         // drop the UI hook so the singleton AudioPlayer doesn't retain this
         // activity; playback itself continues in the background. Identity-checked:
         // a newer instance (share / notification deep-link into a chat while one
@@ -1513,6 +1532,161 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (userId == chatId) updateSubtitle()
     }
 
+    private var members: List<Bridge.Member> = emptyList()
+    private var membersLoading = false
+    private var membersTried = false
+
+    // Only when an @ is actually typed: the list costs a group-info request on
+    // WhatsApp and, on Telegram, one more for every member the update stream
+    // has not named yet — far too much to spend on opening a group chat.
+    private fun loadMembers() {
+        // once only: a group whose member list this account cannot read answers
+        // empty, and retrying on the next keystroke would spend a blocking
+        // request per character typed
+        if (!isGroup || membersLoading || membersTried) return
+        membersLoading = true
+        Io.lookup.execute {
+            val loaded = Bridge.groupMembers(chatId)
+            runOnUiThread {
+                membersLoading = false
+                membersTried = true
+                if (isFinishing) return@runOnUiThread
+                members = loaded
+                updateMentions()
+            }
+        }
+    }
+
+    /** The `@name` being typed at the caret, or null when the caret is not in
+     *  one. Digits and letters only: the query stops at the first space, so a
+     *  member whose name has one is still reached by its first word. */
+    private fun mentionQuery(): String? {
+        val caret = input.selectionStart
+        if (caret <= 0 || input.selectionEnd != caret) return null
+        val text = input.text
+        var i = caret
+        while (i > 0 && text[i - 1].isLetterOrDigit()) i--
+        if (i == 0 || text[i - 1] != '@') return null
+        // "mail@gmail" is an address being typed, not a mention
+        if (i >= 2 && text[i - 2].isLetterOrDigit()) return null
+        return text.subSequence(i, caret).toString()
+    }
+
+    private fun updateMentions() {
+        val query = mentionQuery()
+        if (query == null) {
+            mentionList.visibility = android.view.View.GONE
+            return
+        }
+        if (members.isEmpty()) {
+            loadMembers()
+            mentionList.visibility = android.view.View.GONE
+            return
+        }
+        val folded = Search.fold(query)
+        val matches = members
+            .filter { folded.isEmpty() || Search.contains(it.name, folded) }
+            .take(MENTION_ROWS)
+        mentionList.removeAllViews()
+        if (matches.isEmpty()) {
+            mentionList.visibility = android.view.View.GONE
+            return
+        }
+        for (member in matches) {
+            val row = layoutInflater.inflate(R.layout.item_member, mentionList, false)
+            val avatar = row.findViewById<android.widget.ImageView>(R.id.memberAvatar)
+            row.findViewById<android.widget.TextView>(R.id.memberName).text = member.name
+            AvatarLoader.load(member.chatId, member.name, avatar, AvatarLoader.dp(avatar, 40))
+            row.setOnClickListener { insertMention(member) }
+            mentionList.addView(row)
+        }
+        mentionList.visibility = android.view.View.VISIBLE
+    }
+
+    /**
+     * Writes the member's name, not their id: the wire form is built at send
+     * time (see mentionHits), so a draft that outlived this screen — or a name
+     * typed by hand — still turns into a real mention.
+     */
+    private fun insertMention(member: Bridge.Member) {
+        val query = mentionQuery() ?: return
+        val caret = input.selectionStart
+        val at = caret - query.length - 1
+        if (at < 0) return
+        input.text.replace(at, caret, "@${member.name} ")
+        mentionList.visibility = android.view.View.GONE
+    }
+
+    private fun composedMentions(text: String): List<Mention> {
+        if (members.isEmpty() || !text.contains('@')) return emptyList()
+        return members.map { Mention("@" + it.name, it.mentionId) }
+    }
+
+    private val formatMenu = object : android.view.ActionMode.Callback {
+        override fun onCreateActionMode(mode: android.view.ActionMode, menu: android.view.Menu): Boolean {
+            menu.add(android.view.Menu.NONE, MENU_BOLD, 100, R.string.format_bold)
+            menu.add(android.view.Menu.NONE, MENU_ITALIC, 101, R.string.format_italic)
+            return true
+        }
+
+        override fun onPrepareActionMode(mode: android.view.ActionMode, menu: android.view.Menu) = false
+
+        override fun onActionItemClicked(mode: android.view.ActionMode, item: android.view.MenuItem) =
+            when (item.itemId) {
+                MENU_BOLD -> { markSelection('*'); true }
+                MENU_ITALIC -> { markSelection('_'); true }
+                else -> false
+            }
+
+        override fun onDestroyActionMode(mode: android.view.ActionMode) {}
+    }
+
+    /**
+     * Wraps (or unwraps) the selection in a WhatsApp formatting marker. The
+     * selection is restored around the same characters afterwards so the two
+     * markers can be combined, or the same one tapped again to undo it.
+     */
+    private fun markSelection(marker: Char) {
+        val e = input.text
+        val start = minOf(input.selectionStart, input.selectionEnd)
+        val end = maxOf(input.selectionStart, input.selectionEnd)
+        if (start < 0 || end <= start) return
+        val m = marker.toString()
+        // the pair may sit outside the other marker's ("*_x_*" unwrapped as
+        // bold); wrapping again there produced "*_*x*_*", which reads back as
+        // stray markers rather than as text that lost its bold
+        var left = start - 1
+        while (left >= 0 && isMarker(e[left]) && e[left] != marker) left--
+        var right = end
+        while (right < e.length && isMarker(e[right]) && e[right] != marker) right++
+        when {
+            left >= 0 && right < e.length && e[left] == marker && e[right] == marker -> {
+                e.delete(right, right + 1)
+                e.delete(left, left + 1)
+                input.setSelection(start - 1, end - 1)
+            }
+            end - start > 2 && e[start] == marker && e[end - 1] == marker -> {
+                e.delete(end - 1, end)
+                e.delete(start, start + 1)
+                input.setSelection(start, end - 2)
+            }
+            else -> {
+                e.insert(end, m)
+                e.insert(start, m)
+                input.setSelection(start + 1, end + 1)
+            }
+        }
+    }
+
+    private fun isMarker(c: Char): Boolean = c == '*' || c == '_'
+
+    private fun saveDraft() {
+        // an edit borrows the composer to hold the message's own text; storing
+        // that would bring it back as a draft in a chat nothing was typed in
+        if (editTarget != null) return
+        Prefs.setDraft(this, chatId, input.text.toString())
+    }
+
     private fun updateActionButton() {
         if (recorder != null || pendingAudio != null) return // recording/pending UI owns the buttons meanwhile
         val sends = input.text.isNotBlank()
@@ -1532,12 +1706,15 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             Toast.makeText(this, R.string.edit_expired, Toast.LENGTH_SHORT).show()
             return
         }
+        val mentions = composedMentions(text)
         input.text.clear()
+        Prefs.setDraft(this, chatId, "")
+        mentionList.visibility = android.view.View.GONE
         val replying = replyTarget
         when {
             editing != null -> Bridge.editMessage(chatId, editing.id, text, editing.timeSent)
-            replying != null -> Bridge.sendReply(chatId, text, replying)
-            else -> Bridge.sendText(chatId, text)
+            replying != null -> Bridge.sendReply(chatId, text, replying, mentions)
+            else -> Bridge.sendText(chatId, text, mentions)
         }
         clearComposeContext()
     }
@@ -2154,6 +2331,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun startEdit(msg: MessageRow) {
         replyTarget = null
+        draftBeforeEdit = input.text.toString()
         editTarget = msg
         contextText.text = getString(R.string.editing_message)
         contextBar.visibility = android.view.View.VISIBLE
@@ -2191,7 +2369,21 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         imm.hideSoftInputFromWindow(target.windowToken, 0)
     }
 
+    private var draftBeforeEdit: String? = null
+
+    /** Cancelling an edit puts back whatever the composer held before it, which
+     *  the edit had overwritten — and which onStop would otherwise store as the
+     *  draft for this chat, message text and all. */
+    private fun cancelComposeContext() {
+        if (editTarget != null) {
+            input.setText(draftBeforeEdit.orEmpty())
+            input.setSelection(input.text.length)
+        }
+        clearComposeContext()
+    }
+
     private fun clearComposeContext() {
+        draftBeforeEdit = null
         replyTarget = null
         editTarget = null
         contextBar.visibility = android.view.View.GONE

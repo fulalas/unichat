@@ -386,6 +386,10 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         })
         val searchView = SearchView(this)
         searchView.queryHint = getString(R.string.search)
+        // SearchView's own text appearance is a title-sized one, which the app's
+        // font scale then enlarges again; match the rest of the app's inputs
+        searchView.findViewById<android.widget.TextView>(androidx.appcompat.R.id.search_src_text)
+            ?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15f)
         searchView.setOnSearchClickListener {
             if (!PhoneBook.granted(this) && !contactsAsked) {
                 contactsAsked = true

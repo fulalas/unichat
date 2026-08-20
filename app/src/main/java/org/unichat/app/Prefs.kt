@@ -10,6 +10,7 @@ object Prefs {
     private const val KEY_TG_LINKED = "tg_linked"
     private const val KEY_SCROLL = "scroll_"
     private const val KEY_COMPLETE = "hist_done_"
+    private const val KEY_DRAFT = "draft_"
 
     const val FONT_MIN = 0.8f
     const val FONT_MAX = 1.6f
@@ -71,6 +72,16 @@ object Prefs {
         val e = p.edit()
         if (chatId != null) e.remove(KEY_COMPLETE + chatId)
         else p.all.keys.filter { it.startsWith(KEY_COMPLETE) }.forEach { e.remove(it) }
+        e.apply()
+    }
+
+    fun draft(ctx: Context, chatId: String): String =
+        prefs(ctx).getString(KEY_DRAFT + chatId, "").orEmpty()
+
+    fun setDraft(ctx: Context, chatId: String, text: String) {
+        val e = prefs(ctx).edit()
+        if (text.isBlank()) e.remove(KEY_DRAFT + chatId)
+        else e.putString(KEY_DRAFT + chatId, text)
         e.apply()
     }
 

@@ -24,6 +24,7 @@
             android:inputType="text"
             android:imeOptions="actionSearch"
             android:maxLines="1"
+            android:textSize="15sp"
             android:textColor="@color/text_primary"
             android:textColorHint="@color/text_secondary"
             android:background="@null"
@@ -157,6 +158,14 @@
                 android:visibility="gone" />
         </FrameLayout>
     </FrameLayout>
+
+    <LinearLayout
+        android:id="@+id/mentionList"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@color/surface"
+        android:visibility="gone" />
 
     <LinearLayout
         android:id="@+id/contextBar"
