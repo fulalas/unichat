@@ -696,8 +696,19 @@ object Bridge : EventListener {
      */
     fun viewOnceSupported(chatId: String, kind: String): Boolean {
         if (!isTg(chatId)) return kind == "image" || kind == "video" || kind == "audio"
-        if (isGroupId(chatId) || chatId == Tg.selfId()) return false
+        if (isGroupId(chatId) || isTgSelfChat(chatId)) return false
         return kind == "image" || kind == "video"
+    }
+
+    /**
+     * Telegram's own chat, by id when TDLib has published it and by the contact
+     * row's flag until then — a first run reaches this from a long-press before
+     * my_id lands, and an unrecognised self chat is offered a view-once send the
+     * server then refuses. Queried only in that window, never once the id is in.
+     */
+    private fun isTgSelfChat(chatId: String): Boolean {
+        Tg.selfId().let { if (it.isNotEmpty()) return chatId == it }
+        return db.isSelfContact(chatId)
     }
 
     /** Who reacted to a message, and with what. Blocking; worker threads only. */

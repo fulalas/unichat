@@ -587,6 +587,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         }
     }
 
+    fun isSelfContact(id: String): Boolean = queryFirst(
+        "SELECT is_self FROM contacts WHERE id=?", arrayOf(id)
+    ) { it.getInt(0) != 0 } ?: false
+
     fun isMuted(chatId: String): Boolean = queryFirst(
         "SELECT muted FROM chats WHERE id=?", arrayOf(chatId)
     ) { it.getInt(0) != 0 } ?: false
