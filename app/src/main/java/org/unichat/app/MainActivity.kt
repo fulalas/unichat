@@ -30,6 +30,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private lateinit var chatList: RecyclerView
+    private lateinit var lm: LinearLayoutManager
     private lateinit var emptyText: TextView
     private lateinit var adapter: ChatListAdapter
     private val io = Io.executor
@@ -61,8 +62,16 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 if (!PhoneBook.isPhoneEntry(chat.id)) showChatOptions(chat)
             },
         )
-        chatList.layoutManager = LinearLayoutManager(this)
+        lm = LinearLayoutManager(this)
+        chatList.layoutManager = lm
         chatList.adapter = adapter
+        chatList.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            // on idle only: a fling would otherwise open and close a chat per row
+            // it passes, each one a request
+            override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
+                if (newState == RecyclerView.SCROLL_STATE_IDLE) syncWatchedChats()
+            }
+        })
 
         // POST_NOTIFICATIONS only exists as a runtime permission from API 33; on
         // 29..32 checkSelfPermission always reports DENIED and requestPermissions
@@ -90,6 +99,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         updateSubtitle()
         refreshAccountMenu()
         reload()
+        syncWatchedChats()
         refreshDayIfChanged()
         scheduleMidnightRefresh()
     }
@@ -97,6 +107,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     override fun onStop() {
         super.onStop()
         started = false
+        syncWatchedChats()
         chatList.removeCallbacks(midnightRefresh)
         chatList.removeCallbacks(bgReloadRelease)
         bgReloadCooldown = false
@@ -193,7 +204,35 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         val atTop = !chatList.canScrollVertically(-1)
         adapter.submit(withChatStates(chats)) {
             if (atTop) chatList.scrollToPosition(0)
+            // posted: the rows this commit added are not laid out yet, so the
+            // visible range is still the previous one
+            chatList.post { syncWatchedChats() }
         }
+    }
+
+    private val watched = HashSet<String>()
+
+    /**
+     * Telegram only pushes a private chat's typing/recording action to a client
+     * that has the chat open (or that can see the peer's exact last-seen), so
+     * the indicator never appeared here for contacts who hide their last-seen.
+     * Hold the rows on screen open, and only those: an off-screen row has
+     * nowhere to show the action anyway.
+     */
+    private fun syncWatchedChats() {
+        val wanted = HashSet<String>()
+        if (started) {
+            val first = (lm.findFirstVisibleItemPosition() - 2).coerceAtLeast(0)
+            val last = lm.findLastVisibleItemPosition() + 2
+            for (pos in first..last) {
+                val row = adapter.rowAt(pos) ?: continue
+                if (!row.isGroup && Tg.isTgId(row.id)) wanted.add(row.id)
+            }
+        }
+        for (id in watched - wanted) Bridge.watchChatActions(id, false)
+        for (id in wanted - watched) Bridge.watchChatActions(id, true)
+        watched.clear()
+        watched.addAll(wanted)
     }
 
     private fun openChat(chatId: String, name: String) {

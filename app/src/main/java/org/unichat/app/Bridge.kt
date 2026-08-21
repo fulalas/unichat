@@ -181,10 +181,15 @@ object Bridge : EventListener {
         fun sendText(
             chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
         ): Boolean
-        fun sendImage(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean
-        fun sendVideo(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean
+        fun sendImage(
+            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
+        ): Boolean
+        fun sendVideo(
+            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
+        ): Boolean
         fun sendAudio(
             chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
+            viewOnce: Boolean,
         ): Boolean
         fun sendDocument(
             chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
@@ -238,22 +243,31 @@ object Bridge : EventListener {
             ).isNotEmpty()
         }
 
-        override fun sendImage(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean {
+        override fun sendImage(
+            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
+        ): Boolean {
             val (qid, qtext, qsender) = quoteArgs(quoted)
-            return Wmbridge.sendImageMessage(connId, chatId, path, caption, qid, qtext, qsender).isNotEmpty()
+            return Wmbridge.sendImageMessage(
+                connId, chatId, path, caption, qid, qtext, qsender, viewOnce
+            ).isNotEmpty()
         }
 
-        override fun sendVideo(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean {
+        override fun sendVideo(
+            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
+        ): Boolean {
             val (qid, qtext, qsender) = quoteArgs(quoted)
-            return Wmbridge.sendVideoMessage(connId, chatId, path, caption, qid, qtext, qsender).isNotEmpty()
+            return Wmbridge.sendVideoMessage(
+                connId, chatId, path, caption, qid, qtext, qsender, viewOnce
+            ).isNotEmpty()
         }
 
         override fun sendAudio(
             chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
+            viewOnce: Boolean,
         ): Boolean {
             val (qid, qtext, qsender) = quoteArgs(quoted)
             return Wmbridge.sendAudioMessage(
-                connId, chatId, path, seconds.toLong(), qid, qtext, qsender, waveform
+                connId, chatId, path, seconds.toLong(), qid, qtext, qsender, waveform, viewOnce
             ).isNotEmpty()
         }
 
@@ -384,14 +398,19 @@ object Bridge : EventListener {
             chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
         ): Boolean = Tg.sendText(chatId, text, quoted?.id ?: "", mentions)
 
-        override fun sendImage(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean =
-            Tg.sendImage(chatId, path, caption, quoted?.id ?: "")
+        override fun sendImage(
+            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
+        ): Boolean = Tg.sendImage(chatId, path, caption, quoted?.id ?: "", viewOnce)
 
-        override fun sendVideo(chatId: String, path: String, caption: String, quoted: MessageRow?): Boolean =
-            Tg.sendVideo(chatId, path, caption, quoted?.id ?: "")
+        override fun sendVideo(
+            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
+        ): Boolean = Tg.sendVideo(chatId, path, caption, quoted?.id ?: "", viewOnce)
 
+        // viewOnce ignored: TDLib takes a self-destruct only on photo and video,
+        // so viewOnceSupported never offers it for a Telegram voice note
         override fun sendAudio(
             chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
+            viewOnce: Boolean,
         ): Boolean = Tg.sendAudio(chatId, path, seconds, quoted?.id ?: "", waveform)
 
         override fun sendDocument(
@@ -636,29 +655,55 @@ object Bridge : EventListener {
             if (p.consumesStagingInput && isStagingPath(filePath)) java.io.File(filePath).delete()
         }
 
-    fun sendImage(chatId: String, filePath: String, caption: String, quoted: MessageRow? = null) =
-        sendMedia("image", chatId, filePath) { it.sendImage(chatId, filePath, caption, quoted) }
+    fun sendImage(
+        chatId: String, filePath: String, caption: String, quoted: MessageRow? = null,
+        viewOnce: Boolean = false,
+    ) = sendMedia("image", chatId, filePath) {
+        it.sendImage(chatId, filePath, caption, quoted, viewOnce)
+    }
 
-    fun sendVideo(chatId: String, filePath: String, caption: String, quoted: MessageRow? = null) =
-        sendMedia("video", chatId, filePath) { it.sendVideo(chatId, filePath, caption, quoted) }
+    fun sendVideo(
+        chatId: String, filePath: String, caption: String, quoted: MessageRow? = null,
+        viewOnce: Boolean = false,
+    ) = sendMedia("video", chatId, filePath) {
+        it.sendVideo(chatId, filePath, caption, quoted, viewOnce)
+    }
 
     fun sendAudio(
         chatId: String, filePath: String, durationSeconds: Int,
         quoted: MessageRow? = null, waveform: ByteArray = ByteArray(0),
+        viewOnce: Boolean = false,
     ) = sendMedia("audio", chatId, filePath) {
-        it.sendAudio(chatId, filePath, durationSeconds, quoted, waveform)
+        it.sendAudio(chatId, filePath, durationSeconds, quoted, waveform, viewOnce)
     }
 
     fun sendFile(
         chatId: String, filePath: String, fileName: String, mimeType: String,
-        caption: String = "", quoted: MessageRow? = null,
+        caption: String = "", quoted: MessageRow? = null, viewOnce: Boolean = false,
     ) {
         when {
-            mimeType.startsWith("image/") -> sendImage(chatId, filePath, caption, quoted)
-            mimeType.startsWith("video/") -> sendVideo(chatId, filePath, caption, quoted)
+            mimeType.startsWith("image/") -> sendImage(chatId, filePath, caption, quoted, viewOnce)
+            mimeType.startsWith("video/") -> sendVideo(chatId, filePath, caption, quoted, viewOnce)
             else -> sendDocument(chatId, filePath, fileName, mimeType, quoted)
         }
     }
+
+    /**
+     * Whether this chat can carry a view-once send of that kind. WhatsApp takes
+     * photo, video and voice anywhere. Telegram self-destructs photo and video
+     * in one-to-one chats only, and rejects the flag outright on anything else
+     * ("Can't enable self-destruction for media"), so the option is not offered.
+     */
+    fun viewOnceSupported(chatId: String, kind: String): Boolean {
+        if (!isTg(chatId)) return kind == "image" || kind == "video" || kind == "audio"
+        if (isGroupId(chatId) || chatId == Tg.selfId()) return false
+        return kind == "image" || kind == "video"
+    }
+
+    /** Who reacted to a message, and with what. Blocking; worker threads only. */
+    fun reactionsOf(msg: MessageRow): List<Pair<String, String>> =
+        if (isTg(msg.chatId)) Tg.reactionSenders(msg.chatId, msg.id)
+        else db.reactionsOf(msg.chatId, msg.id)
 
     fun sendDocument(
         chatId: String, filePath: String, fileName: String, mimeType: String, quoted: MessageRow? = null,
@@ -736,10 +781,12 @@ object Bridge : EventListener {
         // The mapping used to be spelled out once per protocol.
         val p = proto(target)
         val ok = when (m.msgType) {
-            "image", "sticker" -> p.sendImage(target, m.filePath, m.text, null)
-            "video" -> p.sendVideo(target, m.filePath, m.text, null)
+            "image", "sticker" -> p.sendImage(target, m.filePath, m.text, null, false)
+            "video" -> p.sendVideo(target, m.filePath, m.text, null, false)
             "audio" ->
-                p.sendAudio(target, m.filePath, TimeFormat.parseSeconds(m.text), null, ByteArray(0))
+                p.sendAudio(
+                    target, m.filePath, TimeFormat.parseSeconds(m.text), null, ByteArray(0), false
+                )
             // the stored text IS the document's file name; its MIME type is
             // recovered from the extension rather than sent empty (which the
             // bridge downgrades to application/octet-stream, leaving the
@@ -1251,6 +1298,16 @@ object Bridge : EventListener {
 
     fun selfId(proto: String): String = if (isTgProto(proto)) Tg.selfId() else selfId()
 
+    fun selfIdOf(chatId: String): String = if (isTg(chatId)) Tg.selfId() else selfId()
+
+    /** A contact's @lid alias mapped back to their phone JID. Blocking; worker
+     *  threads only. Opening a chat under the alias would fork a second thread
+     *  for someone already there under their number (see reconcileLidChats). */
+    fun resolveChatId(chatId: String): String {
+        if (connId < 0 || isTg(chatId) || !chatId.endsWith("@lid")) return chatId
+        return Wmbridge.resolveChatId(connId, chatId).ifEmpty { chatId }
+    }
+
     fun fetchMyAbout(proto: String, onResult: (String) -> Unit) =
         if (isTgProto(proto)) onTg({ Tg.fetchMyAbout() }, onResult) else fetchMyAbout(onResult)
 
@@ -1721,6 +1778,17 @@ object Bridge : EventListener {
             activeChatOwner = null
         }
         AudioPlayer.refreshServiceState()
+    }
+
+    /**
+     * For rows a list is showing, NOT for a screen the user is in: it must not
+     * claim the active chat (notification suppression) the way openChat does.
+     * TDLib drops a private chat's typing/recording action unless the chat is
+     * open or the peer's exact last-seen is known, so contacts who hide their
+     * last-seen never showed as typing/recording in the chat list.
+     */
+    fun watchChatActions(chatId: String, watch: Boolean) {
+        if (watch) proto(chatId).openChat(chatId) else proto(chatId).closeChat(chatId)
     }
 
     private fun messagePreview(text: String, msgType: String): String {

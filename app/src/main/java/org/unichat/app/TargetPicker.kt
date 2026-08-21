@@ -12,17 +12,14 @@ fun Activity.targetChoices(): Pair<List<String>, List<String>> {
     val ids = ArrayList<String>()
     val labels = ArrayList<String>()
     val chats = Bridge.db.chats()
-    val lastTime = chats.associate { it.id to it.lastTime }
-    // Both notes-to-self stay pinned above the chats, but between themselves
-    // they follow the same rule as everything below — most recently used first.
-    // They used to be listed in a fixed order with WhatsApp always ahead, so an
-    // account someone never writes to sat above the one they use daily.
-    // Resolved once, not per comparison: each is a JNI hop into the Go bridge
-    // plus a preferences read.
-    val selves = listOf(Bridge.selfId(), if (Tg.hasSession()) Tg.selfId() else "")
+    // Both notes-to-self stay pinned above the chats, Telegram's always first:
+    // it is where files are sent, and ordering the two by recency (as everything
+    // below is ordered) pushed it under WhatsApp's on any day it went unused.
+    // selfIdBlocking, not selfId: both callers are on a worker thread, and a
+    // share that started this process gets here before TDLib knows who we are.
+    val selves = listOf(if (Tg.hasSession()) Tg.selfIdBlocking() else "", Bridge.selfId())
         .filter { it.isNotEmpty() }
         .distinct()
-        .sortedByDescending { lastTime[it] ?: 0L }
     for (self in selves) {
         ids.add(self)
         labels.add(selfPickerLabel(this, self))

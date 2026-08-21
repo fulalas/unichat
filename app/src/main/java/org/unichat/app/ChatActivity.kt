@@ -17,7 +17,9 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.io.File
 
-private class PendingRecording(val file: File, val duration: Int, val amps: List<Int>)
+private class PendingRecording(
+    val file: File, val duration: Int, val amps: List<Int>, val viewOnce: Boolean,
+)
 
 class ChatActivity : BaseActivity(), Bridge.UiListener {
 
@@ -29,6 +31,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         private const val LOCAL_PAGE = 500
         private const val RECORD_WAKE_LOCK_MS = 30 * 60 * 1000L
         private val FILE_MEDIA_TYPES = PICTURE_TYPES + setOf("audio", "video", "document")
+        // three lines is all the card shows; the rest would only cost every bind
+        private const val QUOTE_CHARS = 300
+        private const val STATE_PICK_VIEW_ONCE = "pickViewOnce"
         private const val MENTION_ROWS = 5
         private const val MENU_BOLD = 1001
         private const val MENU_ITALIC = 1002
@@ -74,7 +79,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private val pickFile = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent()
-    ) { uri -> uri?.let { onFilePicked(it) } }
+    ) { uri ->
+        // a cancelled picker must disarm the hold gesture, or the next ordinary
+        // attachment would go out view-once
+        if (uri == null) pickViewOnce = false else onFilePicked(uri)
+    }
     private val pickContact = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
     ) { result -> result.data?.data?.let { onContactPicked(it) } }
@@ -162,12 +171,20 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private var pendingAudio: File? = null
     private var pendingDuration: Int = 0
+    private var recordViewOnce = false
+    private var askedRecordViewOnce = false
+    private var pickViewOnce = false
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_PICK_VIEW_ONCE, pickViewOnce)
+    }
 
     private val recordTicker = object : Runnable {
         override fun run() {
             if (recorder == null) return
             val secs = ((SystemClock.elapsedRealtime() - recordStart) / 1000).toInt()
-            recordTimer.text = "●  " + TimeFormat.mmss(secs)
+            recordTimer.text = recordPrefix() + "●  " + TimeFormat.mmss(secs)
             main.postDelayed(this, 500)
         }
     }
@@ -224,6 +241,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         chatId = intent.getStringExtra("chatId") ?: run { finish(); return }
+        // The system file picker is another process, so this screen can be killed
+        // and rebuilt while it is up. Restored, or the photo the user chose "send
+        // as view once" for came back as an ordinary, permanent send.
+        pickViewOnce = savedInstanceState?.getBoolean(STATE_PICK_VIEW_ONCE) == true
         // WhatsApp chats swap the blue chat palette for the green one; must
         // happen before any view of this screen inflates
         applyProtocolTheme(Tg.isTgId(chatId))
@@ -316,6 +337,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             onContactClick = { msg -> addContact(msg) },
             onContactMessage = { msg -> messageContact(msg) },
             onMessageActions = { msg -> showMessageActions(msg) },
+            onReactionsClick = { msg -> showReactionList(msg) },
             onQuoteClick = { msg -> onQuoteTapped(msg) },
             onNeedLinkPreview = { url -> requestLinkPreview(url) },
             onLinkPreviewClick = { url -> openLink(url) },
@@ -367,11 +389,25 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         attachButton.setOnClickListener {
             if (recorder != null || pendingAudio != null) finishRecording(send = false) else showAttachMenu()
         }
+        attachButton.setOnLongClickListener {
+            if (recorder != null || pendingAudio != null) false
+            else askViewOnce(R.string.send_file, R.string.send_view_once, "image") {
+                pickFileFor(viewOnce = it)
+            }
+        }
         actionButton.setOnClickListener {
             when {
                 recorder != null || pendingAudio != null -> finishRecording(send = true)
                 input.text.isNotBlank() -> sendCurrentText()
                 else -> startRecording()
+            }
+        }
+        // text cannot be sent view-once on either network, so the send state of
+        // this button keeps its plain behaviour
+        actionButton.setOnLongClickListener {
+            if (recorder != null || pendingAudio != null || input.text.isNotBlank()) false
+            else askViewOnce(R.string.record_voice, R.string.record_view_once, "audio") {
+                startRecording(viewOnce = it)
             }
         }
         mentionList = findViewById(R.id.mentionList)
@@ -509,36 +545,47 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // contacts scan the cache exists to avoid.
     override fun onContactsChanged() {
         cachedContactNames = null
-        cachedQuoteNames.clear()
     }
 
     private fun contactNames(): Map<String, String> =
         cachedContactNames ?: Bridge.db.contactNames().also { cachedContactNames = it }
 
-    private val cachedQuoteNames = java.util.concurrent.ConcurrentHashMap<String, String>()
-
-    private fun quoteNamesFor(messages: List<MessageRow>): Map<String, String> {
-        val labels = HashMap<String, String>()
+    /**
+     * Read fresh every time, never memoised: the card now carries the quoted
+     * message's own body, and an edit (or a delete) of that message must not
+     * leave every reply to it quoting text it no longer has.
+     */
+    private fun quoteNamesFor(
+        messages: List<MessageRow>,
+        names: Map<String, String>,
+    ): Map<String, MessageAdapter.QuotedPreview> {
+        val labels = HashMap<String, MessageAdapter.QuotedPreview>()
         for (m in messages) {
             val qid = m.quotedId
             if (qid.isEmpty() || labels.containsKey(qid)) continue
-            val memo = cachedQuoteNames[qid]
-            if (memo != null) {
-                labels[qid] = memo
-                continue
-            }
-            val label = Bridge.db.messageSender(m.chatId, qid)?.let { s ->
+            // Our own copy of the quoted message, not just its sender: Telegram
+            // sends a reply as a bare message id, and WhatsApp's carried quote is
+            // empty for anything it does not inline (and for history sync), so
+            // without this the card had a name and the word "Message" under it.
+            val quoted = Bridge.db.quotedMessage(m.chatId, qid)
+            val label = quoted?.sender?.let { s ->
                 if (s.fromMe) getString(R.string.you)
-                else senderLabel(
-                    Bridge.db.contactName(s.senderId)?.let { mapOf(s.senderId to it) } ?: emptyMap(),
-                    s.senderId, s.senderName
-                )
+                else senderLabel(names, s.senderId, s.senderName)
             } ?: ""
-            labels[qid] = label
-            // don't memoize "unknown": the message may sync in later
-            if (label.isNotEmpty()) cachedQuoteNames[qid] = label
+            labels[qid] = MessageAdapter.QuotedPreview(
+                label, quoteSnippet(quoted?.text.orEmpty()), quoted?.msgType.orEmpty()
+            )
         }
         return labels
+    }
+
+    // take() counts Chars, so a cut that lands inside a surrogate pair leaves
+    // half an emoji at the end of the card, drawn as a replacement glyph
+    private fun quoteSnippet(text: String): String {
+        if (text.length <= QUOTE_CHARS) return text
+        val end = if (Character.isHighSurrogate(text[QUOTE_CHARS - 1])) QUOTE_CHARS - 1
+        else QUOTE_CHARS
+        return text.substring(0, end)
     }
 
     private fun reload(markRead: Boolean = false) {
@@ -546,7 +593,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         io.execute {
             val messages = Bridge.db.messages(chatId, loadLimit)
             val names = contactNames()
-            val quoteNames = quoteNamesFor(messages)
+            val quoteNames = quoteNamesFor(messages, names)
             runOnUiThread {
                 pendingVideoOpen?.let { id ->
                     val m = messages.find { it.id == id }
@@ -933,7 +980,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         io.execute {
             val all = Bridge.db.messages(chatId, searchLimit)
             val names = contactNames()
-            val quoteNames = quoteNamesFor(all)
+            val quoteNames = quoteNamesFor(all, names)
             runOnUiThread {
                 if (!searchActive || isFinishing || isDestroyed) return@runOnUiThread
                 val q = searchInput.text?.toString().orEmpty()
@@ -1081,7 +1128,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchExec.execute {
             val window = Bridge.searchContext(chatId, id)
             val names = contactNames()
-            val quoteNames = quoteNamesFor(window)
+            val quoteNames = quoteNamesFor(window, names)
             runOnUiThread {
                 if (seq != windowSeq || !searchActive || isFinishing || isDestroyed) {
                     return@runOnUiThread
@@ -1118,7 +1165,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
             }
             val names = if (merged.isEmpty()) emptyMap() else contactNames()
-            val quoteNames = if (merged.isEmpty()) emptyMap() else quoteNamesFor(merged)
+            val quoteNames =
+                if (merged.isEmpty()) emptyMap() else quoteNamesFor(merged, names)
             runOnUiThread {
                 windowLoading = false
                 if (seq != windowSeq || !windowMode || isFinishing || isDestroyed) {
@@ -1678,6 +1726,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
+    private fun recordPrefix(): String = if (recordViewOnce) "🔒  " else ""
+
     private fun isMarker(c: Char): Boolean = c == '*' || c == '_'
 
     private fun saveDraft() {
@@ -1721,23 +1771,47 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun onFilePicked(uri: Uri) {
         val quoted = replyTarget
+        val asked = pickViewOnce
+        pickViewOnce = false
         clearComposeContext()
         io.execute {
             val name = uriDisplayName(uri) ?: "file"
             val local = copyUriToCache(uri, "attach", name)
             val mime = contentResolver.getType(uri) ?: ""
+            val kind = when {
+                mime.startsWith("image/") -> "image"
+                mime.startsWith("video/") -> "video"
+                else -> ""
+            }
+            val viewOnce = asked && kind.isNotEmpty() && Bridge.viewOnceSupported(chatId, kind)
             runOnUiThread {
                 if (local == null) {
                     Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
                     return@runOnUiThread
                 }
-                Bridge.sendFile(chatId, local.absolutePath, name, mime, quoted = quoted)
+                // A document has no view-once form on either network. Say so and
+                // stop: sending it anyway hands over a permanent copy of the one
+                // thing the user asked to self-destruct, behind a toast that is
+                // easy to miss.
+                if (asked && !viewOnce) {
+                    Toast.makeText(this, R.string.view_once_unsupported, Toast.LENGTH_LONG).show()
+                    Io.files.execute { local.delete() }
+                    return@runOnUiThread
+                }
+                Bridge.sendFile(
+                    chatId, local.absolutePath, name, mime, quoted = quoted, viewOnce = viewOnce
+                )
             }
         }
     }
 
-    private fun startRecording() {
+    private fun startRecording(viewOnce: Boolean = false) {
+        recordViewOnce = viewOnce
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            // the very first "record view once" asks for the mic here and comes
+            // back through onRequestPermissionsResult, which knew nothing about
+            // the choice and started an ordinary recording instead
+            askedRecordViewOnce = viewOnce
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 2)
             return
         }
@@ -1764,7 +1838,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             main.post(ampTicker)
             input.visibility = android.view.View.GONE
             recordTimer.visibility = android.view.View.VISIBLE
-            recordTimer.text = "●  0:00"
+            recordTimer.text = recordPrefix() + "●  0:00"
             showRecordingButtons()
             main.post(recordTicker)
             buzz() // only once the mic is actually live, never on a failed start
@@ -1815,7 +1889,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
         super.onRequestPermissionsResult(code, perms, results)
         if (code == 2 && results.isNotEmpty() && results[0] == PackageManager.PERMISSION_GRANTED) {
-            startRecording()
+            startRecording(viewOnce = askedRecordViewOnce)
         }
         if (code == 3) {
             // Only GPS gives a precise fix, and on API 29 asking it for one with
@@ -1870,8 +1944,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         pendingAudio = file
         pendingDuration = duration
-        pendingRecordings[chatId] = PendingRecording(file, duration, recordAmps.toList())
-        recordTimer.text = getString(R.string.recording_paused, TimeFormat.mmss(duration))
+        pendingRecordings[chatId] = PendingRecording(
+            file, duration, recordAmps.toList(), recordViewOnce
+        )
+        recordTimer.text =
+            recordPrefix() + getString(R.string.recording_paused, TimeFormat.mmss(duration))
     }
 
     private fun restorePendingRecording() {
@@ -1886,9 +1963,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // array and the voice note went out with no waveform at all
         recordAmps.clear()
         recordAmps.addAll(pending.amps)
+        recordViewOnce = pending.viewOnce
         input.visibility = android.view.View.GONE
         recordTimer.visibility = android.view.View.VISIBLE
-        recordTimer.text = getString(R.string.recording_paused, TimeFormat.mmss(pending.duration))
+        recordTimer.text =
+            recordPrefix() + getString(R.string.recording_paused, TimeFormat.mmss(pending.duration))
         showRecordingButtons()
     }
 
@@ -1921,11 +2000,16 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             pendingDuration = 0
             pendingRecordings.remove(chatId)
         }
+        val viewOnce = recordViewOnce
+        recordViewOnce = false
         resetRecordingUi()
         if (send && duration >= 1) {
             val quoted = replyTarget
             clearComposeContext()
-            Bridge.sendAudio(chatId, file.absolutePath, duration, quoted, buildWaveform(recordAmps))
+            Bridge.sendAudio(
+                chatId, file.absolutePath, duration, quoted, buildWaveform(recordAmps),
+                viewOnce = viewOnce && Bridge.viewOnceSupported(chatId, "audio"),
+            )
             buzz() // it really went out: not for a cancel, nor for a too-short clip
         } else {
             // Tapping mic then send within a second gives duration 0. Silently
@@ -1934,6 +2018,28 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             if (send) Toast.makeText(this, R.string.recording_too_short, Toast.LENGTH_SHORT).show()
             file.delete()
         }
+    }
+
+    /**
+     * The hold gesture on the clip and the mic: normal, or view-once. Returns
+     * false when this chat's network won't take a view-once send of that kind,
+     * so the press falls through instead of offering something that would be
+     * rejected (or, worse, silently sent normally).
+     */
+    private fun askViewOnce(
+        normalLabel: Int, viewOnceLabel: Int, kind: String, onPick: (Boolean) -> Unit,
+    ): Boolean {
+        if (!Bridge.viewOnceSupported(chatId, kind)) return false
+        val items = arrayOf(getString(normalLabel), getString(viewOnceLabel))
+        AlertDialog.Builder(this)
+            .setItems(items) { _, which -> onPick(which == 1) }
+            .show()
+        return true
+    }
+
+    private fun pickFileFor(viewOnce: Boolean) {
+        pickViewOnce = viewOnce
+        pickFile.launch("*/*")
     }
 
     private fun showAttachMenu() {
@@ -1945,7 +2051,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         AlertDialog.Builder(this)
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> pickFile.launch("*/*")
+                    0 -> pickFileFor(viewOnce = false)
                     1 -> sendCurrentLocation()
                     2 -> try {
                         pickContact.launch(PhoneBook.pickIntent())
@@ -2279,6 +2385,53 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         add(R.string.react) { showReactionPicker(msg) }
 
         showActionDialog(actions)
+    }
+
+    private fun showReactionList(msg: MessageRow) {
+        io.execute {
+            val reactions = Bridge.reactionsOf(msg)
+            val self = Bridge.selfIdOf(msg.chatId)
+            val names = contactNames()
+            val who = reactions.map { (senderId, _) ->
+                if (senderId == self) getString(R.string.you) else reactorLabel(names, senderId)
+            }
+            val lines = reactions.mapIndexed { i, (_, emoji) -> "$emoji   ${who[i]}" }
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                // Telegram refuses the list in channels and large groups, and the
+                // request can time out: a pill that plainly has reactions and
+                // answers a tap with nothing reads as a broken control
+                if (lines.isEmpty()) {
+                    Toast.makeText(this, R.string.reactions_unavailable, Toast.LENGTH_SHORT).show()
+                    return@runOnUiThread
+                }
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.reactions)
+                    .setItems(lines.toTypedArray()) { _, which ->
+                        openReactorChat(reactions[which].first, who[which])
+                    }
+                    .show()
+            }
+        }
+    }
+
+    // phoneLabel only prettifies a WhatsApp phone JID, so a Telegram reactor who
+    // is not a saved contact was listed as the literal "tg:123456789" — and that
+    // string was then carried on as the title of the chat the row opens.
+    private fun reactorLabel(names: Map<String, String>, senderId: String): String {
+        names[senderId]?.takeIf { it.isNotEmpty() }?.let { return it }
+        Bridge.db.displayName(senderId).takeIf { it.isNotEmpty() && it != senderId }
+            ?.let { return it }
+        return if (Tg.isTgId(senderId)) getString(R.string.unknown_sender) else phoneLabel(senderId)
+    }
+
+    private fun openReactorChat(senderId: String, name: String) {
+        if (senderId.isEmpty() || senderId == chatId) return
+        if (senderId == Bridge.selfIdOf(chatId)) return
+        Io.lookup.execute {
+            val target = Bridge.resolveChatId(senderId)
+            runOnUiThread { if (!isFinishing) openContactChat(target, name) }
+        }
     }
 
     private fun showReactionPicker(msg: MessageRow) {

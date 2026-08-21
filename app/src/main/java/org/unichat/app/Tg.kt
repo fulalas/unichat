@@ -16,6 +16,7 @@ object Tg {
     private const val TAG = "UniChatTg"
 
     private const val MEMBER_PAGE = 200
+    private const val REACTION_PAGE = 50
 
     const val PREFIX = "tg:"
 
@@ -64,6 +65,15 @@ object Tg {
     private val pending = ConcurrentHashMap<Long, Pair<CountDownLatch, Array<JSONObject?>>>()
     private val nextExtra = AtomicLong(1)
 
+    // openChat is fire-and-forget and TDLib rejects it until it is authorized, so
+    // a cold start straight onto a chat (notification tap, share) lost the open
+    // for the whole visit — and with it every typing/recording action, which
+    // TDLib delivers for a private chat only while the chat is open. Keep what
+    // the screens asked for and replay it once TDLib is ready.
+    @Volatile private var ready = false
+    @Volatile private var readyLatch = CountDownLatch(1)
+    private val openCounts = ConcurrentHashMap<String, Int>()
+
     private val readInbox = ConcurrentHashMap<Long, Long>()
     private val readOutbox = ConcurrentHashMap<Long, Long>()
     // file id -> every (chatId, msgId) waiting on that download. A set, not a
@@ -82,12 +92,32 @@ object Tg {
 
     fun hasSession(): Boolean = appContext?.let { Prefs.tgLinked(it) } == true
 
-    fun selfId(): String = idFor(myId)
+    // Empty, never "tg:0", while the id is unknown: callers either compare it
+    // (no chat matches "") or offer it as a send target, and a target of tg:0
+    // fails the send and opens an empty chat.
+    fun selfId(): String = if (myId == 0L) "" else idFor(myId)
+
+    /**
+     * Own id, waiting for TDLib to come up if this process has just started.
+     * Blocking; worker threads only. A share sheet starts the process and asks
+     * for its send targets straight away, so leaving out the notes-to-self entry
+     * (or offering it as tg:0) is what the first share of a session used to get.
+     */
+    fun selfIdBlocking(): String {
+        selfId().let { if (it.isNotEmpty()) return it }
+        // Short budgets: this runs on Io.executor, the serial worker every
+        // screen's DB reads share, so waiting out the full request timeout here
+        // freezes the rest of the app rather than just this picker.
+        if (!awaitReady(5_000)) return ""
+        if (myId == 0L) fetchMe(3_000)
+        return selfId()
+    }
 
     @Synchronized
     fun init(context: Context) {
         if (clientId >= 0) return
         appContext = context.applicationContext
+        myId = Prefs.tgSelfId(context)
         runCatching {
             appVersion = context.packageManager
                 .getPackageInfo(context.packageName, 0).versionName ?: appVersion
@@ -100,6 +130,18 @@ object Tg {
     private fun send(obj: JSONObject) {
         val id = clientId
         if (id >= 0) TdJson.send(id, obj.toString())
+    }
+
+    // Blocking; never on the login path — the auth requests themselves run
+    // before this can be satisfied and would sit here until the timeout.
+    private fun awaitReady(timeoutMs: Long = 20_000): Boolean {
+        if (ready) return true
+        if (!hasSession()) return false
+        return try {
+            readyLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            false
+        }
     }
 
     private fun request(obj: JSONObject, timeoutMs: Long = 15_000): JSONObject? {
@@ -174,6 +216,19 @@ object Tg {
             "authorizationStateWaitPassword" -> Bridge.notifyTgAuth("wait_password", "")
             "authorizationStateReady" -> {
                 ctx?.let { Prefs.setTgLinked(it, true) }
+                readyLatch.countDown()
+                // `ready` flips on the executor, where openChat and closeChat
+                // run. Flipped here instead, an openChat already queued could
+                // read it and send the open that this replay also sends, leaving
+                // TDLib one open ahead of us — and the chat open for good, since
+                // only one close ever follows. The guard also keeps a repeated
+                // authorizationStateReady from replaying everything twice.
+                executor.execute {
+                    if (!ready) {
+                        ready = true
+                        for ((chatId, n) in openCounts) repeat(n) { sendOpenChat(chatId) }
+                    }
+                }
                 Bridge.notifyTgAuth("ready", "")
                 onReady()
             }
@@ -183,6 +238,9 @@ object Tg {
                 // something that no longer exists. Left in place they surfaced
                 // as the previous account's avatars, a permanently "exhausted"
                 // history and a stale selfId after the next login.
+                ready = false
+                readyLatch = CountDownLatch(1)
+                openCounts.clear()
                 readInbox.clear()
                 readOutbox.clear()
                 fileTargets.clear()
@@ -192,6 +250,7 @@ object Tg {
                 syncAllChat = null
                 exportChatId = null
                 myId = 0
+                ctx?.let { Prefs.setTgSelfId(it, 0L) }
                 myFirstName = ""
                 myLastName = ""
                 myPhone = ""
@@ -247,13 +306,18 @@ object Tg {
         appContext?.let { Prefs.setTgLinked(it, false) }
     }
 
-    private fun onReady() = pager.execute {
-        request(JSONObject().put("@type", "getMe"))?.let { me ->
+    private fun fetchMe(timeoutMs: Long = 15_000) {
+        request(JSONObject().put("@type", "getMe"), timeoutMs)?.let { me ->
             myId = me.optLong("id")
+            appContext?.let { Prefs.setTgSelfId(it, myId) }
             myFirstName = me.optString("first_name")
             myLastName = me.optString("last_name")
             myPhone = me.optString("phone_number")
         }
+    }
+
+    private fun onReady() = pager.execute {
+        fetchMe()
         var pages = 20
         while (pages-- > 0) {
             request(JSONObject().put("@type", "loadChats").put("limit", 100)) ?: break
@@ -347,6 +411,19 @@ object Tg {
                 Bridge.db.markReadUpTo(idFor(raw), upTo, incoming = false)
                 Bridge.notifyChat(idFor(raw))
             }
+            // TDLib publishes the account's own id as an option as soon as it
+            // authorizes, straight from its local database — no getMe round trip,
+            // which is what the first share of a cold start would have had to
+            // wait for.
+            "updateOption" -> {
+                if (obj.optString("name") == "my_id") {
+                    val id = obj.optJSONObject("value")?.optLong("value") ?: 0L
+                    if (id != 0L && id != myId) {
+                        myId = id
+                        appContext?.let { Prefs.setTgSelfId(it, id) }
+                    }
+                }
+            }
             "updateUser" -> onUser(obj.getJSONObject("user"))
             "updateUserStatus" ->
                 applyUserStatus(idFor(obj.getLong("user_id")), obj.optJSONObject("status"))
@@ -356,7 +433,10 @@ object Tg {
                 val action = obj.getJSONObject("action").optString("@type")
                 val st = when (action) {
                     "chatActionTyping" -> "typing"
-                    "chatActionRecordingVoiceNote" -> "recording"
+                    // The sender's client reports recording only while the mic is
+                    // held; the upload that follows is a separate action, so
+                    // dropping it blanked the indicator for the rest of the note.
+                    "chatActionRecordingVoiceNote", "chatActionUploadingVoiceNote" -> "recording"
                     "chatActionCancel" -> "paused"
                     else -> return
                 }
@@ -557,11 +637,26 @@ object Tg {
         }
 
         var quotedId = ""
+        var quotedText = ""
+        var quotedType = ""
         msg.optJSONObject("reply_to")?.let {
             if (it.optString("@type") == "messageReplyToMessage" &&
                 it.optLong("chat_id") == rawChat
             ) {
                 quotedId = it.optLong("message_id").toString()
+                // TDLib answers a reply with a bare message id and expects the
+                // client to look the message up itself. What it does hand over,
+                // when either is there, is the fragment the sender picked out and
+                // the content of a message from another chat.
+                quotedText = markedText(it.optJSONObject("quote")?.optJSONObject("text"))
+                it.optJSONObject("content")?.let { quoted ->
+                    if (quotedText.isEmpty()) {
+                        quotedText = markedText(
+                            quoted.optJSONObject("text") ?: quoted.optJSONObject("caption")
+                        )
+                    }
+                    quotedType = typeOf(quoted.optString("@type"))
+                }
             }
         }
 
@@ -577,6 +672,7 @@ object Tg {
                 filePath = filePath, fileStatus = fileStatus,
                 latitude = latitude, longitude = longitude,
                 edited = msg.optLong("edit_date") > 0, quotedId = quotedId,
+                quotedText = quotedText, quotedType = quotedType,
                 senderName = senderName,
                 forwarded = msg.optJSONObject("forward_info") != null,
             ),
@@ -680,6 +776,35 @@ object Tg {
         // Only the live update is a fresh event; replaying history must not
         // rewrite the chat's preview line with an old reaction.
         if (preview) Bridge.notifyChatsChanged()
+    }
+
+    /**
+     * Who reacted, from the server. The Db rows for a Telegram message are one
+     * per reaction TYPE with an aggregate count (see applyReactions), so they
+     * cannot answer this — and a channel or a big group may refuse to say at
+     * all, which reads here as nobody. Blocking; worker threads only.
+     */
+    fun reactionSenders(chatId: String, msgId: String): List<Pair<String, String>> {
+        val mid = msgId.toLongOrNull() ?: return emptyList()
+        val answer = request(
+            JSONObject().put("@type", "getMessageAddedReactions")
+                .put("chat_id", chatIdOf(chatId)).put("message_id", mid)
+                .put("offset", "").put("limit", REACTION_PAGE)
+        ) ?: return emptyList()
+        val arr = answer.optJSONArray("reactions") ?: return emptyList()
+        val out = ArrayList<Pair<String, String>>()
+        for (i in 0 until arr.length()) {
+            val r = arr.optJSONObject(i) ?: continue
+            val emoji = r.optJSONObject("type")?.optString("emoji").orEmpty()
+            val sender = r.optJSONObject("sender_id") ?: continue
+            val id = when (sender.optString("@type")) {
+                "messageSenderUser" -> idFor(sender.optLong("user_id"))
+                "messageSenderChat" -> idFor(sender.optLong("chat_id"))
+                else -> ""
+            }
+            if (id.isNotEmpty() && emoji.isNotEmpty()) out.add(id to emoji)
+        }
+        return out
     }
 
     fun downloadFile(msg: MessageRow): Boolean {
@@ -841,6 +966,12 @@ object Tg {
         }
 
     private fun sendMessage(chatId: String, content: JSONObject, quotedId: String = ""): Boolean {
+        // A share sheet can start this process and reach a send before TDLib has
+        // opened its database; until then every request is answered
+        // "Unauthorized", and the shared file was dropped on the floor. Bounded
+        // well under the 20s default: sends are dispatched on Bridge's single
+        // send thread, so this wait holds up every other chat's sends too.
+        if (!awaitReady(6_000)) return false
         val req = JSONObject().put("@type", "sendMessage")
             .put("chat_id", chatIdOf(chatId))
             .put("input_message_content", content)
@@ -893,6 +1024,19 @@ object Tg {
             )
         }
         return ft.put("entities", entities)
+    }
+
+    // Only what a quote card needs to name: a reply from another chat carries
+    // its content, and the row it belongs to is never stored or downloaded.
+    private fun typeOf(contentType: String): String = when (contentType) {
+        "messagePhoto" -> "image"
+        "messageSticker" -> "sticker"
+        "messageVideo", "messageVideoNote", "messageAnimation" -> "video"
+        "messageVoiceNote" -> "audio"
+        "messageAudio", "messageDocument" -> "document"
+        "messageLocation", "messageVenue" -> "location"
+        "messageContact" -> "contact"
+        else -> ""
     }
 
     private fun half(m: Markup.Mark, start: Int, end: Int): Boolean =
@@ -982,26 +1126,52 @@ object Tg {
     // This TDLib schema wraps media files in inputPhoto/inputVideo/… objects
     // (not bare InputFile — that parses as null and the send fails with
     // "InputFile is not specified").
-    fun sendImage(chatId: String, path: String, caption: String, quotedId: String = ""): Boolean =
+    // Telegram's own view-once: the recipient's client destroys the media as
+    // soon as it is closed. Only photo and video take it, and only in a private
+    // chat — anywhere else TDLib rejects the whole send.
+    private fun selfDestruct(content: JSONObject, chatId: String, viewOnce: Boolean): JSONObject {
+        if (!viewOnce || isGroupId(chatId)) return content
+        return content.put(
+            "self_destruct_type",
+            JSONObject().put("@type", "messageSelfDestructTypeImmediately")
+        )
+    }
+
+    fun sendImage(
+        chatId: String, path: String, caption: String, quotedId: String = "",
+        viewOnce: Boolean = false,
+    ): Boolean =
         sendMessage(
             chatId,
-            JSONObject().put("@type", "inputMessagePhoto")
-                .put("photo", JSONObject().put("@type", "inputPhoto").put("photo", inputLocalFile(path)))
-                .put("caption", formattedText(caption)),
+            selfDestruct(
+                JSONObject().put("@type", "inputMessagePhoto")
+                    .put(
+                        "photo",
+                        JSONObject().put("@type", "inputPhoto").put("photo", inputLocalFile(path))
+                    )
+                    .put("caption", formattedText(caption)),
+                chatId, viewOnce,
+            ),
             quotedId,
         )
 
-    fun sendVideo(chatId: String, path: String, caption: String, quotedId: String = ""): Boolean =
+    fun sendVideo(
+        chatId: String, path: String, caption: String, quotedId: String = "",
+        viewOnce: Boolean = false,
+    ): Boolean =
         sendMessage(
             chatId,
-            JSONObject().put("@type", "inputMessageVideo")
-                .put(
-                    "video",
-                    JSONObject().put("@type", "inputVideo")
-                        .put("video", inputLocalFile(path))
-                        .put("supports_streaming", true)
-                )
-                .put("caption", formattedText(caption)),
+            selfDestruct(
+                JSONObject().put("@type", "inputMessageVideo")
+                    .put(
+                        "video",
+                        JSONObject().put("@type", "inputVideo")
+                            .put("video", inputLocalFile(path))
+                            .put("supports_streaming", true)
+                    )
+                    .put("caption", formattedText(caption)),
+                chatId, viewOnce,
+            ),
             quotedId,
         )
 
@@ -1162,12 +1332,22 @@ object Tg {
      * why chat actions never appeared before this was wired up.
      */
     fun openChat(chatId: String) = executor.execute {
-        send(JSONObject().put("@type", "openChat").put("chat_id", chatIdOf(chatId)))
+        openCounts.merge(chatId, 1) { a, b -> a + b }
+        if (ready) sendOpenChat(chatId)
     }
 
     fun closeChat(chatId: String) = executor.execute {
-        send(JSONObject().put("@type", "closeChat").put("chat_id", chatIdOf(chatId)))
+        // only if we are the ones holding it open: an unmatched close is an
+        // error inside TDLib, and there is no open of ours for it to release
+        val held = openCounts.containsKey(chatId)
+        openCounts.compute(chatId) { _, n -> if (n == null || n <= 1) null else n - 1 }
+        if (ready && held) {
+            send(JSONObject().put("@type", "closeChat").put("chat_id", chatIdOf(chatId)))
+        }
     }
+
+    private fun sendOpenChat(chatId: String) =
+        send(JSONObject().put("@type", "openChat").put("chat_id", chatIdOf(chatId)))
 
     /**
      * Marks an incoming voice note as listened, which is what clears the

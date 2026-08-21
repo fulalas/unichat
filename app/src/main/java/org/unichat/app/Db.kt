@@ -48,6 +48,11 @@ fun MessageRow.coordinates(): String =
 
 data class SenderInfo(val senderId: String, val fromMe: Boolean, val senderName: String)
 
+/** What a reply shows of the message it answers, read from our own copy of it. */
+data class QuotedInfo(
+    val sender: SenderInfo, val text: String, val msgType: String,
+)
+
 fun previewLabel(
     ctx: Context, msgType: String, text: String, emoji: Boolean, detail: String = "",
 ): String {
@@ -528,10 +533,16 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         )
     }
 
-    fun messageSender(chatId: String, msgId: String): SenderInfo? = queryFirst(
-        "SELECT sender_id, from_me, sender_name FROM messages WHERE chat_id=? AND id=?",
+    fun quotedMessage(chatId: String, msgId: String): QuotedInfo? = queryFirst(
+        "SELECT sender_id, from_me, sender_name, text, msg_type FROM messages " +
+            "WHERE chat_id=? AND id=?",
         arrayOf(chatId, msgId)
-    ) { SenderInfo(it.getString(0), it.getInt(1) != 0, it.getString(2)) }
+    ) {
+        QuotedInfo(
+            SenderInfo(it.getString(0), it.getInt(1) != 0, it.getString(2)),
+            it.getString(3), it.getString(4),
+        )
+    }
 
     // One transaction: as two independent statements, a process kill or an
     // SQLite error between them left the message gone but its reactions behind —
@@ -590,6 +601,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
             arrayOf(chatId, msgId, senderId, emoji)
         )
     }
+
+    fun reactionsOf(chatId: String, msgId: String): List<Pair<String, String>> = queryList(
+        "SELECT sender_id, emoji FROM reactions WHERE chat_id=? AND msg_id=? " +
+            "ORDER BY emoji, sender_id",
+        arrayOf(chatId, msgId)
+    ) { it.getString(0) to it.getString(1) }
 
     fun deleteReaction(chatId: String, msgId: String, senderId: String) {
         writableDatabase.execSQL(

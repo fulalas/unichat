@@ -8,6 +8,7 @@ object Prefs {
     private const val KEY_NIGHT = "night_mode"
     private const val KEY_FONT = "font_scale"
     private const val KEY_TG_LINKED = "tg_linked"
+    private const val KEY_TG_SELF = "tg_self_id"
     private const val KEY_SCROLL = "scroll_"
     private const val KEY_COMPLETE = "hist_done_"
     private const val KEY_DRAFT = "draft_"
@@ -84,6 +85,17 @@ object Prefs {
         else e.putString(KEY_DRAFT + chatId, text)
         e.apply()
     }
+
+    /**
+     * Own Telegram user id. Persisted because it otherwise costs a getMe round
+     * trip after TDLib authorizes: a share sheet that starts the process asks
+     * for it in the same breath, and got "tg:0" — a target that cannot be sent
+     * to and opens an empty chat.
+     */
+    fun tgSelfId(ctx: Context): Long = prefs(ctx).getLong(KEY_TG_SELF, 0L)
+
+    fun setTgSelfId(ctx: Context, id: Long) =
+        prefs(ctx).edit().putLong(KEY_TG_SELF, id).apply()
 
     fun tgLinked(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_TG_LINKED, false)
 

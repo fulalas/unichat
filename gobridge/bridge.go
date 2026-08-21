@@ -933,7 +933,7 @@ func echoMessage(c *conn, chatJid types.JID, msgID string, ts time.Time, message
 	}
 	messageInfo.ID = msgID
 	messageInfo.Timestamp = ts
-	handleMessageFull(c, messageInfo, message, false, false, false, false)
+	handleMessageFull(c, messageInfo, message, false, false, false, false, true)
 }
 
 func echoLocalMedia(c *conn, chatJid types.JID, msgID string, text string, msgType string,
@@ -1029,7 +1029,21 @@ func uploadFile(c *conn, client *whatsmeow.Client, msgId string, filePath string
 	return client.UploadReader(context.Background(), src, tmp, mediaType)
 }
 
-func SendImageMessage(connId int, chatId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string) string {
+// The wrapper, not only the inner bit: an official client sends a view-once
+// photo as a ViewOnceMessageV2 (a voice note as the V2Extension), which is why
+// the receive path above had to learn that a wrapped voice note carries no
+// ViewOnce bit of its own. whatsmeow's send path unwraps all three to derive
+// the stanza's type, so handing it a wrapped message is supported.
+func wrapViewOnce(msg *waE2E.Message, extension bool) *waE2E.Message {
+	if extension {
+		return &waE2E.Message{
+			ViewOnceMessageV2Extension: &waE2E.FutureProofMessage{Message: msg},
+		}
+	}
+	return &waE2E.Message{ViewOnceMessageV2: &waE2E.FutureProofMessage{Message: msg}}
+}
+
+func SendImageMessage(connId int, chatId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string, viewOnce bool) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -1055,12 +1069,19 @@ func SendImageMessage(connId int, chatId string, filePath string, caption string
 			if len(caption) > 0 {
 				imageMessage.Caption = proto.String(caption)
 			}
+			if viewOnce {
+				imageMessage.ViewOnce = proto.Bool(true)
+			}
 			imageMessage.ContextInfo = buildQuoteContext(quotedId, quotedText, quotedSender)
-			return &waE2E.Message{ImageMessage: &imageMessage}, extFromMime(mimeType, ".jpg")
+			out := &waE2E.Message{ImageMessage: &imageMessage}
+			if viewOnce {
+				out = wrapViewOnce(out, false)
+			}
+			return out, extFromMime(mimeType, ".jpg")
 		})
 }
 
-func SendVideoMessage(connId int, chatId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string) string {
+func SendVideoMessage(connId int, chatId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string, viewOnce bool) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -1083,8 +1104,15 @@ func SendVideoMessage(connId int, chatId string, filePath string, caption string
 			if len(caption) > 0 {
 				videoMessage.Caption = proto.String(caption)
 			}
+			if viewOnce {
+				videoMessage.ViewOnce = proto.Bool(true)
+			}
 			videoMessage.ContextInfo = buildQuoteContext(quotedId, quotedText, quotedSender)
-			return &waE2E.Message{VideoMessage: &videoMessage}, extFromMime(mimeType, ".mp4")
+			out := &waE2E.Message{VideoMessage: &videoMessage}
+			if viewOnce {
+				out = wrapViewOnce(out, false)
+			}
+			return out, extFromMime(mimeType, ".mp4")
 		})
 }
 
@@ -1102,7 +1130,7 @@ func finishMediaSend(c *conn, chatJid types.JID, msgId string, ext string, srcPa
 	}
 }
 
-func SendAudioMessage(connId int, chatId string, filePath string, durationSeconds int, quotedId string, quotedText string, quotedSender string, waveform []byte) string {
+func SendAudioMessage(connId int, chatId string, filePath string, durationSeconds int, quotedId string, quotedText string, quotedSender string, waveform []byte, viewOnce bool) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -1123,8 +1151,15 @@ func SendAudioMessage(connId int, chatId string, filePath string, durationSecond
 			if len(waveform) > 0 {
 				audioMessage.Waveform = waveform
 			}
+			if viewOnce {
+				audioMessage.ViewOnce = proto.Bool(true)
+			}
 			audioMessage.ContextInfo = buildQuoteContext(quotedId, quotedText, quotedSender)
-			return &waE2E.Message{AudioMessage: &audioMessage}, ".ogg"
+			out := &waE2E.Message{AudioMessage: &audioMessage}
+			if viewOnce {
+				out = wrapViewOnce(out, true)
+			}
+			return out, ".ogg"
 		})
 }
 
@@ -2159,7 +2194,7 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 		requestContactsAsync(connId)
 
 	case *events.Message:
-		handleMessageFull(c, evt.Info, evt.Message, false, false, false, evt.IsViewOnce)
+		handleMessageFull(c, evt.Info, evt.Message, false, false, false, evt.IsViewOnce, false)
 
 	case *events.UndecryptableMessage:
 		handleUndecryptableMessage(c, evt)
@@ -2335,7 +2370,7 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 		}
 		if forExport {
 			for _, p := range parsed {
-				content, ok := getMessageContent(p.msg)
+				content, ok := getMessageContent(p.msg, false)
 				if !ok {
 					continue
 				}
@@ -2364,7 +2399,7 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 				isRead = false
 				unreadLeft--
 			}
-			handleMessageFull(c, *p.info, p.msg, isRead, p.peerRead, true, false)
+			handleMessageFull(c, *p.info, p.msg, isRead, p.peerRead, true, false, false)
 			if p.played {
 				c.listener.OnMessagePlayed(getChatId(client, &p.info.Chat, &p.info.Sender), p.info.ID)
 			}
@@ -2406,7 +2441,7 @@ func isDisplayable(msg *waE2E.Message) bool {
 	if msg == nil || msg.GetReactionMessage() != nil || msg.GetProtocolMessage() != nil {
 		return false
 	}
-	_, ok := getMessageContent(msg)
+	_, ok := getMessageContent(msg, false)
 	return ok
 }
 
@@ -2458,7 +2493,7 @@ func (c *conn) messageIsRead(chatId string, fromMe bool, timeSent time.Time, isS
 	return isSyncRead || isSelf || timeSent.Before(c.getTimeRead(chatId))
 }
 
-func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool, peerRead bool, isHistory bool, isViewOnce bool) {
+func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Message, isSyncRead bool, peerRead bool, isHistory bool, isViewOnce bool, ownSend bool) {
 	if isStatusBroadcast(messageInfo.Chat) {
 		return
 	}
@@ -2496,7 +2531,7 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 		}
 	}
 
-	content, ok := getMessageContent(msg)
+	content, ok := getMessageContent(msg, ownSend)
 	if !ok {
 		return
 	}
@@ -2583,7 +2618,7 @@ func extractQuote(ci *waE2E.ContextInfo) (id string, text string, msgType string
 	if quoted == nil {
 		return id, "", ""
 	}
-	qc, ok := getMessageContent(quoted)
+	qc, ok := getMessageContent(quoted, false)
 	if !ok {
 		return id, "", ""
 	}
@@ -2651,7 +2686,11 @@ func fromContext(ci *waE2E.ContextInfo) msgContent {
 // than a canned English body so previewLabel owns (and translates) the label.
 const viewOnceType = "viewonce"
 
-func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
+// ownSend: the ViewOnce bit governs what the RECIPIENT may do with the media,
+// so on the echo of our own send it must be ignored — the file is on this disk
+// already, and honouring it turned our own outgoing photo into the locked
+// placeholder an incoming view-once gets.
+func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 	if msg == nil {
 		return msgContent{}, false
 	}
@@ -2664,7 +2703,7 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 		return m, true
 	}
 	if img := msg.GetImageMessage(); img != nil {
-		if img.GetViewOnce() {
+		if img.GetViewOnce() && !ownSend {
 			return msgContent{msgType: viewOnceType}, true
 		}
 		m := fromContext(img.GetContextInfo())
@@ -2672,7 +2711,7 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 		return m, true
 	}
 	if vid := msg.GetVideoMessage(); vid != nil {
-		if vid.GetViewOnce() {
+		if vid.GetViewOnce() && !ownSend {
 			return msgContent{msgType: viewOnceType}, true
 		}
 		m := fromContext(vid.GetContextInfo())
@@ -2682,7 +2721,7 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 	// PTV ("video message" / round video note) is a VideoMessage in a separate
 	// field; treat it like a normal video so it reuses the "vid" download path.
 	if ptv := msg.GetPtvMessage(); ptv != nil {
-		if ptv.GetViewOnce() {
+		if ptv.GetViewOnce() && !ownSend {
 			return msgContent{msgType: viewOnceType}, true
 		}
 		m := fromContext(ptv.GetContextInfo())
@@ -2690,7 +2729,7 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 		return m, true
 	}
 	if aud := msg.GetAudioMessage(); aud != nil {
-		if aud.GetViewOnce() {
+		if aud.GetViewOnce() && !ownSend {
 			return msgContent{msgType: viewOnceType}, true
 		}
 		m := fromContext(aud.GetContextInfo())
@@ -2764,13 +2803,26 @@ func getMessageContent(msg *waE2E.Message) (msgContent, bool) {
 	}
 	if msg.GetViewOnceMessage() != nil || msg.GetViewOnceMessageV2() != nil ||
 		msg.GetViewOnceMessageV2Extension() != nil {
+		if !ownSend {
+			return msgContent{msgType: viewOnceType}, true
+		}
+		for _, w := range []*waE2E.FutureProofMessage{
+			msg.GetViewOnceMessage(), msg.GetViewOnceMessageV2(),
+			msg.GetViewOnceMessageV2Extension(),
+		} {
+			if w.GetMessage() != nil {
+				return getMessageContent(w.GetMessage(), true)
+			}
+		}
+		// an empty wrapper: still a message, and falling out of here reached the
+		// "nothing displayable" return, which drops the row entirely
 		return msgContent{msgType: viewOnceType}, true
 	}
 	if eph := msg.GetEphemeralMessage(); eph != nil {
-		return getMessageContent(eph.GetMessage())
+		return getMessageContent(eph.GetMessage(), ownSend)
 	}
 	if edited := msg.GetEditedMessage(); edited != nil {
-		return getMessageContent(edited.GetMessage())
+		return getMessageContent(edited.GetMessage(), ownSend)
 	}
 	return msgContent{}, false
 }

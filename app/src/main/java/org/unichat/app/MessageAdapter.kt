@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.text.Spannable
 import android.text.SpannableString
+import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
 import android.util.LruCache
 import android.view.Gravity
@@ -37,6 +38,7 @@ class MessageAdapter(
     private val onContactClick: (MessageRow) -> Unit,
     private val onContactMessage: (MessageRow) -> Unit,
     private val onMessageActions: (MessageRow) -> Unit,
+    private val onReactionsClick: (MessageRow) -> Unit,
     private val onQuoteClick: (MessageRow) -> Unit,
     private val onNeedLinkPreview: (String) -> Unit = {},
     private val onLinkPreviewClick: (String) -> Unit = {},
@@ -148,13 +150,31 @@ class MessageAdapter(
     private var flashArmedAt = 0L
     private var flashPlayedAt = 0L
 
+    /** What a reply's card shows of the message it answers: who wrote it, and
+     *  as much of it as we hold. */
+    data class QuotedPreview(val name: String, val text: String, val msgType: String)
+
     fun submit(
         newMessages: List<MessageRow>,
         newNames: Map<String, String>,
-        newQuoteNames: Map<String, String> = emptyMap(),
+        newQuoteNames: Map<String, QuotedPreview> = emptyMap(),
         onCommitted: (() -> Unit)? = null,
     ) {
-        val namesChanged = differ.currentList.isNotEmpty() && newNames != names
+        val hadRows = differ.currentList.isNotEmpty()
+        // A sender's name can appear on any row, so a change there redraws the
+        // window. A quoted preview reaches exactly the rows that answer that one
+        // message, and those have to redraw too — a reply that arrives before
+        // the message it quotes renders "Message", and when that message syncs
+        // in the reply row itself is unchanged, so nothing else would ask. The
+        // whole window used to redraw for it: in a reply-heavy group that is
+        // every image reloaded and every span rebuilt per incoming reply.
+        val namesChanged = hadRows && newNames != names
+        val staleQuotes = if (hadRows && !namesChanged) {
+            (newQuoteNames.keys + quoteNames.keys)
+                .filterTo(HashSet()) { newQuoteNames[it] != quoteNames[it] }
+        } else {
+            emptySet()
+        }
         names = newNames
         quoteNames = newQuoteNames
         differ.submitList(newMessages) {
@@ -163,7 +183,13 @@ class MessageAdapter(
             // selection change — in that window it would rebuild and cache the
             // map from the list that is still on its way out
             rowsById = null
-            if (namesChanged && itemCount > 0) notifyItemRangeChanged(0, itemCount)
+            if (namesChanged && itemCount > 0) {
+                notifyItemRangeChanged(0, itemCount)
+            } else if (staleQuotes.isNotEmpty()) {
+                messages.forEachIndexed { pos, m ->
+                    if (m.quotedId in staleQuotes) notifyItemChanged(pos)
+                }
+            }
             onCommitted?.invoke()
         }
     }
@@ -210,7 +236,7 @@ class MessageAdapter(
         }
     }
 
-    private var quoteNames: Map<String, String> = emptyMap()
+    private var quoteNames: Map<String, QuotedPreview> = emptyMap()
 
     private val videoDownloadPct = HashMap<String, Int>()
 
@@ -492,6 +518,11 @@ class MessageAdapter(
                 onNeedDownload(m, true)
             }
         }
+        holder.reactionPill.setOnClickListener {
+            if (tapWhileSelecting()) return@setOnClickListener
+            holder.current?.let(onReactionsClick)
+        }
+        holder.reactionPill.setOnLongClickListener(longPress)
         holder.audioSpeed.setOnClickListener { AudioPlayer.cycleSpeed() }
         holder.audioSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {}
@@ -581,10 +612,24 @@ class MessageAdapter(
         else -> ""
     }
 
+    /**
+     * Telegram gives one row per reaction TYPE, with its own count baked into
+     * the label ("👍3"); WhatsApp gives one row per person. Reading the count
+     * off each row makes both add up to the number of people who reacted.
+     */
     private fun reactionSummary(csv: String): String {
-        val all = csv.split(',').filter { it.isNotEmpty() }
-        if (all.size <= 3) return all.joinToString("")
-        return all.distinct().take(3).joinToString("") + all.size
+        var total = 0
+        val emojis = LinkedHashSet<String>()
+        for (row in csv.split(',')) {
+            if (row.isEmpty()) continue
+            val digits = row.takeLastWhile { it.isDigit() }
+            val emoji = row.dropLast(digits.length)
+            if (emoji.isEmpty()) continue
+            emojis.add(emoji)
+            total += digits.toIntOrNull() ?: 1
+        }
+        val shown = emojis.take(3).joinToString("")
+        return if (total > 1) "$shown $total" else shown
     }
 
     private fun emojiOnlyCount(text: String): Int {
@@ -745,16 +790,18 @@ class MessageAdapter(
 
         if (msg.quotedText.isNotEmpty() || msg.quotedId.isNotEmpty()) {
             holder.quotePreview.visibility = View.VISIBLE
-            val body = when {
-                msg.quotedText.isNotEmpty() -> resolveMentions(msg.quotedText, names)
-                msg.quotedType.isNotEmpty() ->
-                    previewLabel(ctx, msg.quotedType, "", emoji = false)
-                        .ifEmpty { ctx.getString(R.string.message_label) }
-                else -> ctx.getString(R.string.message_label)
-            }
-            val name = if (msg.quotedId.isEmpty()) "" else quoteNames[msg.quotedId].orEmpty()
+            val stored = quoteNames[msg.quotedId]
+            val text = msg.quotedText.ifEmpty { stored?.text.orEmpty() }
+            val type = msg.quotedType.ifEmpty { stored?.msgType.orEmpty() }
+            // through previewLabel, not the stored text: a voice note keeps its
+            // duration there, and a quote card reading "0:14" says nothing
+            val body = Markup.render(
+                previewLabel(ctx, type, resolveMentions(text, names), emoji = false)
+                    .ifEmpty { ctx.getString(R.string.message_label) }
+            )
+            val name = stored?.name.orEmpty()
             holder.quotePreview.text = if (name.isEmpty()) body else {
-                val sp = SpannableString(name + "\n" + body)
+                val sp = SpannableString(TextUtils.concat(name, "\n", body))
                 sp.setSpan(ForegroundColorSpan(ctx.themeColor(R.attr.chatAccent)), 0, name.length,
                     Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
                 sp.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD),

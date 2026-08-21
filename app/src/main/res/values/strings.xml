@@ -79,6 +79,13 @@
     <string name="next">Next</string>
     <string name="copy">Copy</string>
     <string name="members_count">%1$d members</string>
+    <string name="reactions">Reactions</string>
+    <string name="reactions_unavailable">Cannot see who reacted here</string>
+    <string name="unknown_sender">Unknown</string>
+    <string name="send_file">Send file</string>
+    <string name="send_view_once">Send as view once</string>
+    <string name="record_view_once">Record view once</string>
+    <string name="view_once_unsupported">View once only works with photos and videos</string>
     <string name="format_bold">Bold</string>
     <string name="format_italic">Italic</string>
     <string name="copied">Copied</string>

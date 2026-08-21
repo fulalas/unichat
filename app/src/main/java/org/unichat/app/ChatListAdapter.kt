@@ -64,6 +64,8 @@ class ChatListAdapter(
 
     override fun getItemCount(): Int = chats.size
 
+    fun rowAt(position: Int): ChatRow? = chats.getOrNull(position)
+
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val row = chats[position]
         val name = row.displayLabelWithProto(holder.itemView.context)
