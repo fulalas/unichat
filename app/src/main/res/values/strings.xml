@@ -14,6 +14,7 @@
     <string name="account_remove_body">This unlinks the account and deletes its chats, messages and downloaded files from this phone. It cannot be undone.</string>
     <string name="account_remove_confirm">Remove</string>
     <string name="account_removed">%1$s removed</string>
+    <string name="no_active_account">No active account. Check Manage accounts.</string>
     <string name="signal_register_title">Set up Signal</string>
     <string name="signal_register_help">Enter your number with country code.</string>
     <string name="signal_phone_hint">Phone number (e.g. +5511999998888)</string>

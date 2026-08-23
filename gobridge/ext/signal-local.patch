@@ -1,5 +1,35 @@
 Base-Commit: 0d5f3f457dac53707973f525809fe9c6dc926bd6 (v0.2608.0)
+#
+# Everything UniChat adds to signalmeow. The checkout is refetched by
+# build.sh and is gitignored, so anything not in here is lost on a clean
+# build: registration, SVR2, profile upload and the generated svr2 protobuf
+# all live only in this patch.
 
+diff --git a/pkg/libsignalgo/accountentropy.go b/pkg/libsignalgo/accountentropy.go
+index 712f886..74819d0 100644
+--- a/pkg/libsignalgo/accountentropy.go
++++ b/pkg/libsignalgo/accountentropy.go
+@@ -25,6 +25,18 @@ import "runtime"
+ type AccountEntropyPool string
+ type SVRKey = fixedArray32
+ 
++// GenerateAccountEntropyPool mints the root secret a PRIMARY device owns: the
++// master key, storage-service key and backup keys all derive from it. A linked
++// device never calls this — it is handed the pool by the primary.
++func GenerateAccountEntropyPool() (AccountEntropyPool, error) {
++	var out C.SignalCStringPtr
++	signalFfiError := C.signal_account_entropy_pool_generate(&out)
++	if signalFfiError != nil {
++		return "", wrapError(signalFfiError)
++	}
++	return AccountEntropyPool(CopyCStringToString(out)), nil
++}
++
+ func (aep AccountEntropyPool) DeriveSVRKey() ([]byte, error) {
+ 	var out SVRKey
+ 	aepC, free := GoStringToCString(string(aep))
+diff --git a/pkg/libsignalgo/cflags.go b/pkg/libsignalgo/cflags.go
+index e1bb7d5..fab660d 100644
 --- a/pkg/libsignalgo/cflags.go
 +++ b/pkg/libsignalgo/cflags.go
 @@ -1,3 +1,5 @@
@@ -8,7 +38,9 @@ Base-Commit: 0d5f3f457dac53707973f525809fe9c6dc926bd6 (v0.2608.0)
  package libsignalgo
  
  /*
+diff --git a/pkg/libsignalgo/cflags_android.go b/pkg/libsignalgo/cflags_android.go
 new file mode 100644
+index 0000000..8c59d0b
 --- /dev/null
 +++ b/pkg/libsignalgo/cflags_android.go
 @@ -0,0 +1,16 @@
@@ -28,3 +60,2398 @@ new file mode 100644
 +#cgo LDFLAGS: -lsignal_ffi -ldl -lm -lz -lc++_static -lc++abi
 +*/
 +import "C"
+diff --git a/pkg/libsignalgo/svr2.go b/pkg/libsignalgo/svr2.go
+new file mode 100644
+index 0000000..4706cfe
+--- /dev/null
++++ b/pkg/libsignalgo/svr2.go
+@@ -0,0 +1,105 @@
++package libsignalgo
++
++/*
++#include "./libsignal-ffi.h"
++#include <stdlib.h>
++*/
++import "C"
++import (
++	"runtime"
++	"time"
++)
++
++// PinHash is the Argon2 stretch of a Signal PIN, from which the two keys SVR2
++// needs are derived: the access key it is queried with, and the encryption key
++// that unwraps whatever comes back.
++type PinHash struct {
++	nc  noCopy
++	ptr *C.SignalPinHash
++}
++
++func wrapPinHash(ptr *C.SignalPinHash) *PinHash {
++	ph := &PinHash{ptr: ptr}
++	runtime.SetFinalizer(ph, (*PinHash).Destroy)
++	return ph
++}
++
++func (ph *PinHash) mutPtr() C.SignalMutPointerPinHash {
++	return C.SignalMutPointerPinHash{ph.ptr}
++}
++
++func (ph *PinHash) constPtr() C.SignalConstPointerPinHash {
++	return C.SignalConstPointerPinHash{ph.ptr}
++}
++
++func (ph *PinHash) Destroy() error {
++	if ph == nil || ph.ptr == nil {
++		return nil
++	}
++	runtime.SetFinalizer(ph, nil)
++	err := C.signal_pin_hash_destroy(ph.mutPtr())
++	ph.ptr = nil
++	return wrapError(err)
++}
++
++// PinHashFromUsernameMrenclave stretches a PIN for one specific enclave. The
++// mrenclave is part of the salt, so a hash is only usable against the enclave
++// it was made for — rotating enclaves invalidates it by construction.
++func PinHashFromUsernameMrenclave(pin []byte, username string, mrenclave []byte) (*PinHash, error) {
++	var out C.SignalMutPointerPinHash
++	usernameC, freeUsername := GoStringToCString(username)
++	defer freeUsername()
++	signalFfiError := C.signal_pin_hash_from_username_mrenclave(
++		&out,
++		BytesToBuffer(pin),
++		usernameC,
++		BytesToBuffer(mrenclave),
++	)
++	runtime.KeepAlive(pin)
++	runtime.KeepAlive(mrenclave)
++	if signalFfiError != nil {
++		return nil, wrapError(signalFfiError)
++	}
++	return wrapPinHash(out.raw), nil
++}
++
++// AccessKey is what SVR2 is queried with; it never reveals the PIN.
++func (ph *PinHash) AccessKey() ([]byte, error) {
++	var out fixedArray32
++	signalFfiError := C.signal_pin_hash_access_key(out.cFixedArray(), ph.constPtr())
++	runtime.KeepAlive(ph)
++	if signalFfiError != nil {
++		return nil, wrapError(signalFfiError)
++	}
++	return out[:], nil
++}
++
++// EncryptionKey unwraps the blob SVR2 returns.
++func (ph *PinHash) EncryptionKey() ([]byte, error) {
++	var out fixedArray32
++	signalFfiError := C.signal_pin_hash_encryption_key(out.cFixedArray(), ph.constPtr())
++	runtime.KeepAlive(ph)
++	if signalFfiError != nil {
++		return nil, wrapError(signalFfiError)
++	}
++	return out[:], nil
++}
++
++// NewSVR2ClientState opens an attested channel to an SVR2 enclave. Same shape
++// as NewCDS2ClientState — both are SGX enclaves and share the handshake, so the
++// SGXClientState methods work unchanged.
++func NewSVR2ClientState(mrenclave, attestationMessage []byte, currentTime time.Time) (*SGXClientState, error) {
++	var out C.SignalMutPointerSgxClientState
++	signalFfiError := C.signal_svr2_client_new(
++		&out,
++		BytesToBuffer(mrenclave),
++		BytesToBuffer(attestationMessage),
++		C.uint64_t(currentTime.UnixMilli()),
++	)
++	runtime.KeepAlive(mrenclave)
++	runtime.KeepAlive(attestationMessage)
++	if signalFfiError != nil {
++		return nil, wrapError(signalFfiError)
++	}
++	return wrapSGXClientState(out.raw), nil
++}
+diff --git a/pkg/signalmeow/profileupload.go b/pkg/signalmeow/profileupload.go
+new file mode 100644
+index 0000000..35e5ba7
+--- /dev/null
++++ b/pkg/signalmeow/profileupload.go
+@@ -0,0 +1,188 @@
++package signalmeow
++
++// Writing our own Signal profile.
++//
++// Upstream signalmeow only reads profiles. Publishing one is PUT /v1/profile
++// with every field encrypted under the account's profile key and padded to a
++// fixed length, plus a zkgroup commitment proving the version belongs to us.
++// The padding is not cosmetic: the ciphertext length is visible to the server,
++// so Signal fixes it per field to stop the length leaking the value.
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++
++	"go.mau.fi/mautrix-signal/pkg/libsignalgo"
++	"go.mau.fi/mautrix-signal/pkg/signalmeow/web"
++)
++
++const (
++	// Signal's own bucket sizes. A name over 53 bytes moves to the larger
++	// bucket rather than being rejected.
++	profileNameShortPadding = 53
++	profileNameLongPadding  = 257
++	profileAboutPadding     = 512
++)
++
++type profileUploadRequest struct {
++	Version        string `json:"version"`
++	Name           string `json:"name"`
++	About          string `json:"about"`
++	Avatar         bool   `json:"avatar"`
++	SameAvatar     bool   `json:"sameAvatar"`
++	Commitment     string `json:"commitment"`
++}
++
++// updateAccountAttributes rewrites the account attributes.
++//
++// Always the complete set: the endpoint replaces the stored object wholesale,
++// so sending one field alone drops registration ids, capabilities and the
++// unidentified access key with it.
++func (cli *Client) updateAccountAttributes(ctx context.Context, discoverable bool, accessKey []byte) error {
++	attrs := map[string]any{
++		"fetchesMessages":                true,
++		"registrationId":                 cli.Store.ACIRegistrationID,
++		"pniRegistrationId":              cli.Store.PNIRegistrationID,
++		"capabilities":                   signalCapabilities,
++		"unrestrictedUnidentifiedAccess": false,
++		"discoverableByPhoneNumber":      discoverable,
++	}
++	if len(accessKey) > 0 {
++		attrs["unidentifiedAccessKey"] = base64.StdEncoding.EncodeToString(accessKey)
++	}
++	body, err := json.Marshal(attrs)
++	if err != nil {
++		return err
++	}
++	username, password := cli.Store.BasicAuthCreds()
++	resp, err := web.SendHTTPRequest(
++		ctx, web.APIHostname, http.MethodPut, "/v1/accounts/attributes/", &web.HTTPReqOpt{
++			Body:        body,
++			Username:    &username,
++			Password:    &password,
++			ContentType: web.ContentTypeJSON,
++		},
++	)
++	if err != nil {
++		return err
++	}
++	defer resp.Body.Close()
++	raw, _ := io.ReadAll(resp.Body)
++	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
++		return fmt.Errorf("attribute update returned %d: %s", resp.StatusCode, string(raw))
++	}
++	return nil
++}
++
++// ensureProfileKey returns the account's profile key, minting one if the store
++// has none.
++//
++// Accounts registered before the key was persisted have nothing here. Minting a
++// replacement also changes the derived unidentified access key, so the server
++// copy has to be updated in the same breath or sealed-sender delivery to this
++// account starts failing.
++func (cli *Client) ensureProfileKey(ctx context.Context, discoverable bool) (libsignalgo.ProfileKey, error) {
++	stored, err := cli.Store.RecipientStore.MyProfileKey(ctx)
++	if err != nil {
++		return libsignalgo.ProfileKey{}, fmt.Errorf("failed to load own profile key: %w", err)
++	}
++	if stored != nil && !stored.IsEmpty() {
++		return *stored, nil
++	}
++
++	var key libsignalgo.ProfileKey
++	if _, err := rand.Read(key[:]); err != nil {
++		return key, fmt.Errorf("failed to generate profile key: %w", err)
++	}
++	accessKey, err := key.DeriveAccessKey()
++	if err != nil {
++		return key, fmt.Errorf("failed to derive access key: %w", err)
++	}
++	if err := cli.updateAccountAttributes(ctx, discoverable, accessKey[:]); err != nil {
++		return key, fmt.Errorf("failed to publish new access key: %w", err)
++	}
++	if err := cli.Store.RecipientStore.StoreProfileKey(ctx, cli.Store.ACI, key); err != nil {
++		return key, fmt.Errorf("failed to store profile key: %w", err)
++	}
++	return key, nil
++}
++
++// UpdateProfile publishes the account's display name and about text.
++func (cli *Client) UpdateProfile(ctx context.Context, name, about string, discoverable bool) error {
++	key, err := cli.ensureProfileKey(ctx, discoverable)
++	if err != nil {
++		return err
++	}
++
++	namePadding := profileNameShortPadding
++	if len(name) > profileNameShortPadding {
++		namePadding = profileNameLongPadding
++	}
++	encryptedName, err := encryptString(key, name, namePadding)
++	if err != nil {
++		return fmt.Errorf("failed to encrypt name: %w", err)
++	}
++	encryptedAbout, err := encryptString(key, about, profileAboutPadding)
++	if err != nil {
++		return fmt.Errorf("failed to encrypt about: %w", err)
++	}
++	version, err := key.GetProfileKeyVersion(cli.Store.ACI)
++	if err != nil {
++		return fmt.Errorf("failed to derive profile key version: %w", err)
++	}
++	commitment, err := key.GetCommitment(cli.Store.ACI)
++	if err != nil {
++		return fmt.Errorf("failed to derive profile key commitment: %w", err)
++	}
++
++	// sameAvatar keeps whatever avatar is already published: this call only
++	// changes the text fields, and omitting it would clear the picture.
++	body, err := json.Marshal(profileUploadRequest{
++		Version:    string(version[:]),
++		Name:       base64.StdEncoding.EncodeToString(encryptedName),
++		About:      base64.StdEncoding.EncodeToString(encryptedAbout),
++		Avatar:     false,
++		SameAvatar: true,
++		Commitment: base64.StdEncoding.EncodeToString(commitment[:]),
++	})
++	if err != nil {
++		return err
++	}
++
++	username, password := cli.Store.BasicAuthCreds()
++	resp, err := web.SendHTTPRequest(ctx, web.APIHostname, http.MethodPut, "/v1/profile", &web.HTTPReqOpt{
++		Body:        body,
++		Username:    &username,
++		Password:    &password,
++		ContentType: web.ContentTypeJSON,
++	})
++	if err != nil {
++		return err
++	}
++	defer resp.Body.Close()
++	raw, _ := io.ReadAll(resp.Body)
++	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
++		return fmt.Errorf("profile update returned %d: %s", resp.StatusCode, string(raw))
++	}
++	return nil
++}
++
++// SetDiscoverableByPhoneNumber controls whether contact discovery can find this
++// account by its number — the one Signal privacy setting that is an account
++// attribute rather than a client-side preference.
++func (cli *Client) SetDiscoverableByPhoneNumber(ctx context.Context, discoverable bool) error {
++	key, err := cli.ensureProfileKey(ctx, discoverable)
++	if err != nil {
++		return err
++	}
++	accessKey, err := key.DeriveAccessKey()
++	if err != nil {
++		return err
++	}
++	return cli.updateAccountAttributes(ctx, discoverable, accessKey[:])
++}
+diff --git a/pkg/signalmeow/protobuf/svr2.proto b/pkg/signalmeow/protobuf/svr2.proto
+new file mode 100644
+index 0000000..76cf4c0
+--- /dev/null
++++ b/pkg/signalmeow/protobuf/svr2.proto
+@@ -0,0 +1,157 @@
++//
++// Copyright 2026 Signal Messenger, LLC.
++// SPDX-License-Identifier: AGPL-3.0-only
++//
++
++syntax = "proto3";
++
++package org.signal.svr2;
++option go_package = "go.mau.fi/mautrix-signal/pkg/signalmeow/protobuf/svr2pb";
++option optimize_for = LITE_RUNTIME;
++
++// Client protocol for SecureValueRecovery2 (SVR2).
++//
++// A client that wishes to store a secret should call Backup,
++// followed by Expose.  Backup adds the secret to the store,
++// and Expose makes that secret available for restoration.  Subsequent
++// calls to Restore allow the client to retrieve the stored secret.
++// Calls to Backup and Expose are idempotent.  A client should call
++// Backup until it succeeds, then call Expose until it succeeds.
++// A client should NOT call Backup+Expose until the pair succeeds,
++// as doing so potentially resets the `tries` counter and allows
++// for brute force attempts against the pin.  If Backup succeeds but
++// a subsequent Expose call returns status=ERROR, the client can be
++// pretty sure that something nefarious is going on, and they should
++// reconsider storing their secret.
++
++message Request {
++  oneof inner {
++    BackupRequest backup = 2;
++    ExposeRequest expose = 5;
++    RestoreRequest restore = 3;
++    DeleteRequest delete = 4;
++    TriesRequest tries = 6;
++  }
++}
++
++message Response {
++  oneof inner {
++    BackupResponse backup = 1;
++    ExposeResponse expose = 4;
++    RestoreResponse restore = 2;
++    DeleteResponse delete = 3;
++    TriesResponse tries = 5;
++  }
++}
++
++//
++// backup
++//
++
++message BackupRequest {
++  bytes data = 1;  // between 16 and 48 bytes
++  bytes pin = 2;  // 32 bytes
++  uint32 max_tries = 3;  // [1,255]
++}
++
++message BackupResponse {
++  enum Status {
++    UNSET = 0;  // never returned
++    OK = 1;  // successfully set db[backup_id]=data
++  }
++
++  Status status = 1;
++}
++
++//
++// restore
++//
++
++message RestoreRequest {
++  bytes pin = 1;  // 32 bytes
++}
++
++message RestoreResponse {
++  enum Status {
++    UNSET = 0;  // never returned
++    OK = 1;  // successfully restored, [data] will be set
++    MISSING = 2;  // db[backup_id] does not exist
++    PIN_MISMATCH = 3;  // pin did not match, tries were decremented
++    ERROR = 4;  // error occurred looking up the request
++  }
++
++  Status status = 1;
++  bytes data = 2;  // between 16 and 48 bytes, if set
++  uint32 tries = 3;  // in range [0, 255]
++}
++
++//
++// delete
++//
++
++message DeleteRequest {
++}
++
++message DeleteResponse {
++}
++
++//
++// expose
++//
++
++message ExposeRequest {
++  bytes data = 1;
++}
++
++message ExposeResponse {
++  enum Status {
++    UNSET = 0;  // never returned
++    OK = 1;  // successfully restored, [data] will be set
++
++    // If this status comes back after a successful Backup() call,
++    // this should be cause for concern.
++    // It means that someone has either reset, deleted, or tried to brute-force
++    // the backup since it was created.
++    ERROR = 2;
++  }
++
++  Status status = 1;
++}
++
++//
++// tries
++//
++
++message TriesRequest {
++}
++message TriesResponse {
++  enum Status {
++    UNSET = 0;
++    OK = 1;
++    MISSING = 2;
++  }
++  Status status = 1;
++  uint32 tries = 2;
++  bool exposed = 3;
++}
++
++// This is not part of SVR2 protocol!
++//
++// Session state used to serialize in-progress backup operations
++message BackupSession {
++  bytes pin = 1;  // 32 bytes
++  bytes data = 2;  // between 16 and 48 bytes
++  uint32 max_tries = 3;  // in range [1,255]
++  bool is_completed = 4;  // Both Backup and Expose are done
++}
++
++// This is not part of SVR2 protocol!
++//
++// Session state used to serialize an in-progress enclave migration: the master
++// key is written to the current enclave. The current enclave's identity is
++// recorded so a completed session can be recognized as already-done without
++// contacting any enclave, as long as the current enclave has not changed.
++message MigrationSession {
++  bytes backup = 1;  // serialized BackupSession for the write to the current enclave
++  bytes current_mrenclave = 2;  // enclave this session migrated the key to
++}
+diff --git a/pkg/signalmeow/protobuf/svr2pb/svr2.pb.go b/pkg/signalmeow/protobuf/svr2pb/svr2.pb.go
+new file mode 100644
+index 0000000..1f8e15d
+--- /dev/null
++++ b/pkg/signalmeow/protobuf/svr2pb/svr2.pb.go
+@@ -0,0 +1,1247 @@
++//
++// Copyright 2026 Signal Messenger, LLC.
++// SPDX-License-Identifier: AGPL-3.0-only
++//
++
++// Code generated by protoc-gen-go. DO NOT EDIT.
++// versions:
++// 	protoc-gen-go v1.36.12
++// 	protoc        v5.29.3
++// source: svr2.proto
++
++package svr2pb
++
++import (
++	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
++	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
++	reflect "reflect"
++	sync "sync"
++	unsafe "unsafe"
++)
++
++const (
++	// Verify that this generated code is sufficiently up-to-date.
++	_ = protoimpl.EnforceVersion(20 - protoimpl.MinVersion)
++	// Verify that runtime/protoimpl is sufficiently up-to-date.
++	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
++)
++
++type BackupResponse_Status int32
++
++const (
++	BackupResponse_UNSET BackupResponse_Status = 0 // never returned
++	BackupResponse_OK    BackupResponse_Status = 1 // successfully set db[backup_id]=data
++)
++
++// Enum value maps for BackupResponse_Status.
++var (
++	BackupResponse_Status_name = map[int32]string{
++		0: "UNSET",
++		1: "OK",
++	}
++	BackupResponse_Status_value = map[string]int32{
++		"UNSET": 0,
++		"OK":    1,
++	}
++)
++
++func (x BackupResponse_Status) Enum() *BackupResponse_Status {
++	p := new(BackupResponse_Status)
++	*p = x
++	return p
++}
++
++func (x BackupResponse_Status) String() string {
++	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
++}
++
++func (BackupResponse_Status) Descriptor() protoreflect.EnumDescriptor {
++	return file_svr2_proto_enumTypes[0].Descriptor()
++}
++
++func (BackupResponse_Status) Type() protoreflect.EnumType {
++	return &file_svr2_proto_enumTypes[0]
++}
++
++func (x BackupResponse_Status) Number() protoreflect.EnumNumber {
++	return protoreflect.EnumNumber(x)
++}
++
++// Deprecated: Use BackupResponse_Status.Descriptor instead.
++func (BackupResponse_Status) EnumDescriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{3, 0}
++}
++
++type RestoreResponse_Status int32
++
++const (
++	RestoreResponse_UNSET        RestoreResponse_Status = 0 // never returned
++	RestoreResponse_OK           RestoreResponse_Status = 1 // successfully restored, [data] will be set
++	RestoreResponse_MISSING      RestoreResponse_Status = 2 // db[backup_id] does not exist
++	RestoreResponse_PIN_MISMATCH RestoreResponse_Status = 3 // pin did not match, tries were decremented
++	RestoreResponse_ERROR        RestoreResponse_Status = 4 // error occurred looking up the request
++)
++
++// Enum value maps for RestoreResponse_Status.
++var (
++	RestoreResponse_Status_name = map[int32]string{
++		0: "UNSET",
++		1: "OK",
++		2: "MISSING",
++		3: "PIN_MISMATCH",
++		4: "ERROR",
++	}
++	RestoreResponse_Status_value = map[string]int32{
++		"UNSET":        0,
++		"OK":           1,
++		"MISSING":      2,
++		"PIN_MISMATCH": 3,
++		"ERROR":        4,
++	}
++)
++
++func (x RestoreResponse_Status) Enum() *RestoreResponse_Status {
++	p := new(RestoreResponse_Status)
++	*p = x
++	return p
++}
++
++func (x RestoreResponse_Status) String() string {
++	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
++}
++
++func (RestoreResponse_Status) Descriptor() protoreflect.EnumDescriptor {
++	return file_svr2_proto_enumTypes[1].Descriptor()
++}
++
++func (RestoreResponse_Status) Type() protoreflect.EnumType {
++	return &file_svr2_proto_enumTypes[1]
++}
++
++func (x RestoreResponse_Status) Number() protoreflect.EnumNumber {
++	return protoreflect.EnumNumber(x)
++}
++
++// Deprecated: Use RestoreResponse_Status.Descriptor instead.
++func (RestoreResponse_Status) EnumDescriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{5, 0}
++}
++
++type ExposeResponse_Status int32
++
++const (
++	ExposeResponse_UNSET ExposeResponse_Status = 0 // never returned
++	ExposeResponse_OK    ExposeResponse_Status = 1 // successfully restored, [data] will be set
++	// If this status comes back after a successful Backup() call,
++	// this should be cause for concern.
++	// It means that someone has either reset, deleted, or tried to brute-force
++	// the backup since it was created.
++	ExposeResponse_ERROR ExposeResponse_Status = 2
++)
++
++// Enum value maps for ExposeResponse_Status.
++var (
++	ExposeResponse_Status_name = map[int32]string{
++		0: "UNSET",
++		1: "OK",
++		2: "ERROR",
++	}
++	ExposeResponse_Status_value = map[string]int32{
++		"UNSET": 0,
++		"OK":    1,
++		"ERROR": 2,
++	}
++)
++
++func (x ExposeResponse_Status) Enum() *ExposeResponse_Status {
++	p := new(ExposeResponse_Status)
++	*p = x
++	return p
++}
++
++func (x ExposeResponse_Status) String() string {
++	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
++}
++
++func (ExposeResponse_Status) Descriptor() protoreflect.EnumDescriptor {
++	return file_svr2_proto_enumTypes[2].Descriptor()
++}
++
++func (ExposeResponse_Status) Type() protoreflect.EnumType {
++	return &file_svr2_proto_enumTypes[2]
++}
++
++func (x ExposeResponse_Status) Number() protoreflect.EnumNumber {
++	return protoreflect.EnumNumber(x)
++}
++
++// Deprecated: Use ExposeResponse_Status.Descriptor instead.
++func (ExposeResponse_Status) EnumDescriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{9, 0}
++}
++
++type TriesResponse_Status int32
++
++const (
++	TriesResponse_UNSET   TriesResponse_Status = 0
++	TriesResponse_OK      TriesResponse_Status = 1
++	TriesResponse_MISSING TriesResponse_Status = 2
++)
++
++// Enum value maps for TriesResponse_Status.
++var (
++	TriesResponse_Status_name = map[int32]string{
++		0: "UNSET",
++		1: "OK",
++		2: "MISSING",
++	}
++	TriesResponse_Status_value = map[string]int32{
++		"UNSET":   0,
++		"OK":      1,
++		"MISSING": 2,
++	}
++)
++
++func (x TriesResponse_Status) Enum() *TriesResponse_Status {
++	p := new(TriesResponse_Status)
++	*p = x
++	return p
++}
++
++func (x TriesResponse_Status) String() string {
++	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
++}
++
++func (TriesResponse_Status) Descriptor() protoreflect.EnumDescriptor {
++	return file_svr2_proto_enumTypes[3].Descriptor()
++}
++
++func (TriesResponse_Status) Type() protoreflect.EnumType {
++	return &file_svr2_proto_enumTypes[3]
++}
++
++func (x TriesResponse_Status) Number() protoreflect.EnumNumber {
++	return protoreflect.EnumNumber(x)
++}
++
++// Deprecated: Use TriesResponse_Status.Descriptor instead.
++func (TriesResponse_Status) EnumDescriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{11, 0}
++}
++
++type Request struct {
++	state protoimpl.MessageState `protogen:"open.v1"`
++	// Types that are valid to be assigned to Inner:
++	//
++	//	*Request_Backup
++	//	*Request_Expose
++	//	*Request_Restore
++	//	*Request_Delete
++	//	*Request_Tries
++	Inner         isRequest_Inner `protobuf_oneof:"inner"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *Request) Reset() {
++	*x = Request{}
++	mi := &file_svr2_proto_msgTypes[0]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *Request) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*Request) ProtoMessage() {}
++
++func (x *Request) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[0]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use Request.ProtoReflect.Descriptor instead.
++func (*Request) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{0}
++}
++
++func (x *Request) GetInner() isRequest_Inner {
++	if x != nil {
++		return x.Inner
++	}
++	return nil
++}
++
++func (x *Request) GetBackup() *BackupRequest {
++	if x != nil {
++		if x, ok := x.Inner.(*Request_Backup); ok {
++			return x.Backup
++		}
++	}
++	return nil
++}
++
++func (x *Request) GetExpose() *ExposeRequest {
++	if x != nil {
++		if x, ok := x.Inner.(*Request_Expose); ok {
++			return x.Expose
++		}
++	}
++	return nil
++}
++
++func (x *Request) GetRestore() *RestoreRequest {
++	if x != nil {
++		if x, ok := x.Inner.(*Request_Restore); ok {
++			return x.Restore
++		}
++	}
++	return nil
++}
++
++func (x *Request) GetDelete() *DeleteRequest {
++	if x != nil {
++		if x, ok := x.Inner.(*Request_Delete); ok {
++			return x.Delete
++		}
++	}
++	return nil
++}
++
++func (x *Request) GetTries() *TriesRequest {
++	if x != nil {
++		if x, ok := x.Inner.(*Request_Tries); ok {
++			return x.Tries
++		}
++	}
++	return nil
++}
++
++type isRequest_Inner interface {
++	isRequest_Inner()
++}
++
++type Request_Backup struct {
++	Backup *BackupRequest `protobuf:"bytes,2,opt,name=backup,proto3,oneof"`
++}
++
++type Request_Expose struct {
++	Expose *ExposeRequest `protobuf:"bytes,5,opt,name=expose,proto3,oneof"`
++}
++
++type Request_Restore struct {
++	Restore *RestoreRequest `protobuf:"bytes,3,opt,name=restore,proto3,oneof"`
++}
++
++type Request_Delete struct {
++	Delete *DeleteRequest `protobuf:"bytes,4,opt,name=delete,proto3,oneof"`
++}
++
++type Request_Tries struct {
++	Tries *TriesRequest `protobuf:"bytes,6,opt,name=tries,proto3,oneof"`
++}
++
++func (*Request_Backup) isRequest_Inner() {}
++
++func (*Request_Expose) isRequest_Inner() {}
++
++func (*Request_Restore) isRequest_Inner() {}
++
++func (*Request_Delete) isRequest_Inner() {}
++
++func (*Request_Tries) isRequest_Inner() {}
++
++type Response struct {
++	state protoimpl.MessageState `protogen:"open.v1"`
++	// Types that are valid to be assigned to Inner:
++	//
++	//	*Response_Backup
++	//	*Response_Expose
++	//	*Response_Restore
++	//	*Response_Delete
++	//	*Response_Tries
++	Inner         isResponse_Inner `protobuf_oneof:"inner"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *Response) Reset() {
++	*x = Response{}
++	mi := &file_svr2_proto_msgTypes[1]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *Response) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*Response) ProtoMessage() {}
++
++func (x *Response) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[1]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use Response.ProtoReflect.Descriptor instead.
++func (*Response) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{1}
++}
++
++func (x *Response) GetInner() isResponse_Inner {
++	if x != nil {
++		return x.Inner
++	}
++	return nil
++}
++
++func (x *Response) GetBackup() *BackupResponse {
++	if x != nil {
++		if x, ok := x.Inner.(*Response_Backup); ok {
++			return x.Backup
++		}
++	}
++	return nil
++}
++
++func (x *Response) GetExpose() *ExposeResponse {
++	if x != nil {
++		if x, ok := x.Inner.(*Response_Expose); ok {
++			return x.Expose
++		}
++	}
++	return nil
++}
++
++func (x *Response) GetRestore() *RestoreResponse {
++	if x != nil {
++		if x, ok := x.Inner.(*Response_Restore); ok {
++			return x.Restore
++		}
++	}
++	return nil
++}
++
++func (x *Response) GetDelete() *DeleteResponse {
++	if x != nil {
++		if x, ok := x.Inner.(*Response_Delete); ok {
++			return x.Delete
++		}
++	}
++	return nil
++}
++
++func (x *Response) GetTries() *TriesResponse {
++	if x != nil {
++		if x, ok := x.Inner.(*Response_Tries); ok {
++			return x.Tries
++		}
++	}
++	return nil
++}
++
++type isResponse_Inner interface {
++	isResponse_Inner()
++}
++
++type Response_Backup struct {
++	Backup *BackupResponse `protobuf:"bytes,1,opt,name=backup,proto3,oneof"`
++}
++
++type Response_Expose struct {
++	Expose *ExposeResponse `protobuf:"bytes,4,opt,name=expose,proto3,oneof"`
++}
++
++type Response_Restore struct {
++	Restore *RestoreResponse `protobuf:"bytes,2,opt,name=restore,proto3,oneof"`
++}
++
++type Response_Delete struct {
++	Delete *DeleteResponse `protobuf:"bytes,3,opt,name=delete,proto3,oneof"`
++}
++
++type Response_Tries struct {
++	Tries *TriesResponse `protobuf:"bytes,5,opt,name=tries,proto3,oneof"`
++}
++
++func (*Response_Backup) isResponse_Inner() {}
++
++func (*Response_Expose) isResponse_Inner() {}
++
++func (*Response_Restore) isResponse_Inner() {}
++
++func (*Response_Delete) isResponse_Inner() {}
++
++func (*Response_Tries) isResponse_Inner() {}
++
++type BackupRequest struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`                          // between 16 and 48 bytes
++	Pin           []byte                 `protobuf:"bytes,2,opt,name=pin,proto3" json:"pin,omitempty"`                            // 32 bytes
++	MaxTries      uint32                 `protobuf:"varint,3,opt,name=max_tries,json=maxTries,proto3" json:"max_tries,omitempty"` // [1,255]
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *BackupRequest) Reset() {
++	*x = BackupRequest{}
++	mi := &file_svr2_proto_msgTypes[2]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *BackupRequest) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*BackupRequest) ProtoMessage() {}
++
++func (x *BackupRequest) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[2]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use BackupRequest.ProtoReflect.Descriptor instead.
++func (*BackupRequest) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{2}
++}
++
++func (x *BackupRequest) GetData() []byte {
++	if x != nil {
++		return x.Data
++	}
++	return nil
++}
++
++func (x *BackupRequest) GetPin() []byte {
++	if x != nil {
++		return x.Pin
++	}
++	return nil
++}
++
++func (x *BackupRequest) GetMaxTries() uint32 {
++	if x != nil {
++		return x.MaxTries
++	}
++	return 0
++}
++
++type BackupResponse struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Status        BackupResponse_Status  `protobuf:"varint,1,opt,name=status,proto3,enum=org.signal.svr2.BackupResponse_Status" json:"status,omitempty"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *BackupResponse) Reset() {
++	*x = BackupResponse{}
++	mi := &file_svr2_proto_msgTypes[3]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *BackupResponse) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*BackupResponse) ProtoMessage() {}
++
++func (x *BackupResponse) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[3]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use BackupResponse.ProtoReflect.Descriptor instead.
++func (*BackupResponse) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{3}
++}
++
++func (x *BackupResponse) GetStatus() BackupResponse_Status {
++	if x != nil {
++		return x.Status
++	}
++	return BackupResponse_UNSET
++}
++
++type RestoreRequest struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Pin           []byte                 `protobuf:"bytes,1,opt,name=pin,proto3" json:"pin,omitempty"` // 32 bytes
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *RestoreRequest) Reset() {
++	*x = RestoreRequest{}
++	mi := &file_svr2_proto_msgTypes[4]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *RestoreRequest) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*RestoreRequest) ProtoMessage() {}
++
++func (x *RestoreRequest) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[4]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use RestoreRequest.ProtoReflect.Descriptor instead.
++func (*RestoreRequest) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{4}
++}
++
++func (x *RestoreRequest) GetPin() []byte {
++	if x != nil {
++		return x.Pin
++	}
++	return nil
++}
++
++type RestoreResponse struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Status        RestoreResponse_Status `protobuf:"varint,1,opt,name=status,proto3,enum=org.signal.svr2.RestoreResponse_Status" json:"status,omitempty"`
++	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`    // between 16 and 48 bytes, if set
++	Tries         uint32                 `protobuf:"varint,3,opt,name=tries,proto3" json:"tries,omitempty"` // in range [0, 255]
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *RestoreResponse) Reset() {
++	*x = RestoreResponse{}
++	mi := &file_svr2_proto_msgTypes[5]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *RestoreResponse) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*RestoreResponse) ProtoMessage() {}
++
++func (x *RestoreResponse) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[5]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use RestoreResponse.ProtoReflect.Descriptor instead.
++func (*RestoreResponse) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{5}
++}
++
++func (x *RestoreResponse) GetStatus() RestoreResponse_Status {
++	if x != nil {
++		return x.Status
++	}
++	return RestoreResponse_UNSET
++}
++
++func (x *RestoreResponse) GetData() []byte {
++	if x != nil {
++		return x.Data
++	}
++	return nil
++}
++
++func (x *RestoreResponse) GetTries() uint32 {
++	if x != nil {
++		return x.Tries
++	}
++	return 0
++}
++
++type DeleteRequest struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *DeleteRequest) Reset() {
++	*x = DeleteRequest{}
++	mi := &file_svr2_proto_msgTypes[6]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *DeleteRequest) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*DeleteRequest) ProtoMessage() {}
++
++func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[6]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
++func (*DeleteRequest) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{6}
++}
++
++type DeleteResponse struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *DeleteResponse) Reset() {
++	*x = DeleteResponse{}
++	mi := &file_svr2_proto_msgTypes[7]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *DeleteResponse) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*DeleteResponse) ProtoMessage() {}
++
++func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[7]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
++func (*DeleteResponse) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{7}
++}
++
++type ExposeRequest struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *ExposeRequest) Reset() {
++	*x = ExposeRequest{}
++	mi := &file_svr2_proto_msgTypes[8]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *ExposeRequest) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*ExposeRequest) ProtoMessage() {}
++
++func (x *ExposeRequest) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[8]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use ExposeRequest.ProtoReflect.Descriptor instead.
++func (*ExposeRequest) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{8}
++}
++
++func (x *ExposeRequest) GetData() []byte {
++	if x != nil {
++		return x.Data
++	}
++	return nil
++}
++
++type ExposeResponse struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Status        ExposeResponse_Status  `protobuf:"varint,1,opt,name=status,proto3,enum=org.signal.svr2.ExposeResponse_Status" json:"status,omitempty"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *ExposeResponse) Reset() {
++	*x = ExposeResponse{}
++	mi := &file_svr2_proto_msgTypes[9]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *ExposeResponse) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*ExposeResponse) ProtoMessage() {}
++
++func (x *ExposeResponse) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[9]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use ExposeResponse.ProtoReflect.Descriptor instead.
++func (*ExposeResponse) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{9}
++}
++
++func (x *ExposeResponse) GetStatus() ExposeResponse_Status {
++	if x != nil {
++		return x.Status
++	}
++	return ExposeResponse_UNSET
++}
++
++type TriesRequest struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *TriesRequest) Reset() {
++	*x = TriesRequest{}
++	mi := &file_svr2_proto_msgTypes[10]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *TriesRequest) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*TriesRequest) ProtoMessage() {}
++
++func (x *TriesRequest) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[10]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use TriesRequest.ProtoReflect.Descriptor instead.
++func (*TriesRequest) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{10}
++}
++
++type TriesResponse struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Status        TriesResponse_Status   `protobuf:"varint,1,opt,name=status,proto3,enum=org.signal.svr2.TriesResponse_Status" json:"status,omitempty"`
++	Tries         uint32                 `protobuf:"varint,2,opt,name=tries,proto3" json:"tries,omitempty"`
++	Exposed       bool                   `protobuf:"varint,3,opt,name=exposed,proto3" json:"exposed,omitempty"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *TriesResponse) Reset() {
++	*x = TriesResponse{}
++	mi := &file_svr2_proto_msgTypes[11]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *TriesResponse) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*TriesResponse) ProtoMessage() {}
++
++func (x *TriesResponse) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[11]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use TriesResponse.ProtoReflect.Descriptor instead.
++func (*TriesResponse) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{11}
++}
++
++func (x *TriesResponse) GetStatus() TriesResponse_Status {
++	if x != nil {
++		return x.Status
++	}
++	return TriesResponse_UNSET
++}
++
++func (x *TriesResponse) GetTries() uint32 {
++	if x != nil {
++		return x.Tries
++	}
++	return 0
++}
++
++func (x *TriesResponse) GetExposed() bool {
++	if x != nil {
++		return x.Exposed
++	}
++	return false
++}
++
++// This is not part of SVR2 protocol!
++//
++// Session state used to serialize in-progress backup operations
++type BackupSession struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Pin           []byte                 `protobuf:"bytes,1,opt,name=pin,proto3" json:"pin,omitempty"`                                     // 32 bytes
++	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`                                   // between 16 and 48 bytes
++	MaxTries      uint32                 `protobuf:"varint,3,opt,name=max_tries,json=maxTries,proto3" json:"max_tries,omitempty"`          // in range [1,255]
++	IsCompleted   bool                   `protobuf:"varint,4,opt,name=is_completed,json=isCompleted,proto3" json:"is_completed,omitempty"` // Both Backup and Expose are done
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *BackupSession) Reset() {
++	*x = BackupSession{}
++	mi := &file_svr2_proto_msgTypes[12]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *BackupSession) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*BackupSession) ProtoMessage() {}
++
++func (x *BackupSession) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[12]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use BackupSession.ProtoReflect.Descriptor instead.
++func (*BackupSession) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{12}
++}
++
++func (x *BackupSession) GetPin() []byte {
++	if x != nil {
++		return x.Pin
++	}
++	return nil
++}
++
++func (x *BackupSession) GetData() []byte {
++	if x != nil {
++		return x.Data
++	}
++	return nil
++}
++
++func (x *BackupSession) GetMaxTries() uint32 {
++	if x != nil {
++		return x.MaxTries
++	}
++	return 0
++}
++
++func (x *BackupSession) GetIsCompleted() bool {
++	if x != nil {
++		return x.IsCompleted
++	}
++	return false
++}
++
++// This is not part of SVR2 protocol!
++//
++// Session state used to serialize an in-progress enclave migration: the master
++// key is written to the current enclave. The current enclave's identity is
++// recorded so a completed session can be recognized as already-done without
++// contacting any enclave, as long as the current enclave has not changed.
++type MigrationSession struct {
++	state            protoimpl.MessageState `protogen:"open.v1"`
++	Backup           []byte                 `protobuf:"bytes,1,opt,name=backup,proto3" json:"backup,omitempty"`                                             // serialized BackupSession for the write to the current enclave
++	CurrentMrenclave []byte                 `protobuf:"bytes,2,opt,name=current_mrenclave,json=currentMrenclave,proto3" json:"current_mrenclave,omitempty"` // enclave this session migrated the key to
++	unknownFields    protoimpl.UnknownFields
++	sizeCache        protoimpl.SizeCache
++}
++
++func (x *MigrationSession) Reset() {
++	*x = MigrationSession{}
++	mi := &file_svr2_proto_msgTypes[13]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *MigrationSession) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*MigrationSession) ProtoMessage() {}
++
++func (x *MigrationSession) ProtoReflect() protoreflect.Message {
++	mi := &file_svr2_proto_msgTypes[13]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use MigrationSession.ProtoReflect.Descriptor instead.
++func (*MigrationSession) Descriptor() ([]byte, []int) {
++	return file_svr2_proto_rawDescGZIP(), []int{13}
++}
++
++func (x *MigrationSession) GetBackup() []byte {
++	if x != nil {
++		return x.Backup
++	}
++	return nil
++}
++
++func (x *MigrationSession) GetCurrentMrenclave() []byte {
++	if x != nil {
++		return x.CurrentMrenclave
++	}
++	return nil
++}
++
++var File_svr2_proto protoreflect.FileDescriptor
++
++const file_svr2_proto_rawDesc = "" +
++	"\n" +
++	"\n" +
++	"svr2.proto\x12\x0forg.signal.svr2\"\xb4\x02\n" +
++	"\aRequest\x128\n" +
++	"\x06backup\x18\x02 \x01(\v2\x1e.org.signal.svr2.BackupRequestH\x00R\x06backup\x128\n" +
++	"\x06expose\x18\x05 \x01(\v2\x1e.org.signal.svr2.ExposeRequestH\x00R\x06expose\x12;\n" +
++	"\arestore\x18\x03 \x01(\v2\x1f.org.signal.svr2.RestoreRequestH\x00R\arestore\x128\n" +
++	"\x06delete\x18\x04 \x01(\v2\x1e.org.signal.svr2.DeleteRequestH\x00R\x06delete\x125\n" +
++	"\x05tries\x18\x06 \x01(\v2\x1d.org.signal.svr2.TriesRequestH\x00R\x05triesB\a\n" +
++	"\x05inner\"\xba\x02\n" +
++	"\bResponse\x129\n" +
++	"\x06backup\x18\x01 \x01(\v2\x1f.org.signal.svr2.BackupResponseH\x00R\x06backup\x129\n" +
++	"\x06expose\x18\x04 \x01(\v2\x1f.org.signal.svr2.ExposeResponseH\x00R\x06expose\x12<\n" +
++	"\arestore\x18\x02 \x01(\v2 .org.signal.svr2.RestoreResponseH\x00R\arestore\x129\n" +
++	"\x06delete\x18\x03 \x01(\v2\x1f.org.signal.svr2.DeleteResponseH\x00R\x06delete\x126\n" +
++	"\x05tries\x18\x05 \x01(\v2\x1e.org.signal.svr2.TriesResponseH\x00R\x05triesB\a\n" +
++	"\x05inner\"R\n" +
++	"\rBackupRequest\x12\x12\n" +
++	"\x04data\x18\x01 \x01(\fR\x04data\x12\x10\n" +
++	"\x03pin\x18\x02 \x01(\fR\x03pin\x12\x1b\n" +
++	"\tmax_tries\x18\x03 \x01(\rR\bmaxTries\"m\n" +
++	"\x0eBackupResponse\x12>\n" +
++	"\x06status\x18\x01 \x01(\x0e2&.org.signal.svr2.BackupResponse.StatusR\x06status\"\x1b\n" +
++	"\x06Status\x12\t\n" +
++	"\x05UNSET\x10\x00\x12\x06\n" +
++	"\x02OK\x10\x01\"\"\n" +
++	"\x0eRestoreRequest\x12\x10\n" +
++	"\x03pin\x18\x01 \x01(\fR\x03pin\"\xc3\x01\n" +
++	"\x0fRestoreResponse\x12?\n" +
++	"\x06status\x18\x01 \x01(\x0e2'.org.signal.svr2.RestoreResponse.StatusR\x06status\x12\x12\n" +
++	"\x04data\x18\x02 \x01(\fR\x04data\x12\x14\n" +
++	"\x05tries\x18\x03 \x01(\rR\x05tries\"E\n" +
++	"\x06Status\x12\t\n" +
++	"\x05UNSET\x10\x00\x12\x06\n" +
++	"\x02OK\x10\x01\x12\v\n" +
++	"\aMISSING\x10\x02\x12\x10\n" +
++	"\fPIN_MISMATCH\x10\x03\x12\t\n" +
++	"\x05ERROR\x10\x04\"\x0f\n" +
++	"\rDeleteRequest\"\x10\n" +
++	"\x0eDeleteResponse\"#\n" +
++	"\rExposeRequest\x12\x12\n" +
++	"\x04data\x18\x01 \x01(\fR\x04data\"x\n" +
++	"\x0eExposeResponse\x12>\n" +
++	"\x06status\x18\x01 \x01(\x0e2&.org.signal.svr2.ExposeResponse.StatusR\x06status\"&\n" +
++	"\x06Status\x12\t\n" +
++	"\x05UNSET\x10\x00\x12\x06\n" +
++	"\x02OK\x10\x01\x12\t\n" +
++	"\x05ERROR\x10\x02\"\x0e\n" +
++	"\fTriesRequest\"\xa8\x01\n" +
++	"\rTriesResponse\x12=\n" +
++	"\x06status\x18\x01 \x01(\x0e2%.org.signal.svr2.TriesResponse.StatusR\x06status\x12\x14\n" +
++	"\x05tries\x18\x02 \x01(\rR\x05tries\x12\x18\n" +
++	"\aexposed\x18\x03 \x01(\bR\aexposed\"(\n" +
++	"\x06Status\x12\t\n" +
++	"\x05UNSET\x10\x00\x12\x06\n" +
++	"\x02OK\x10\x01\x12\v\n" +
++	"\aMISSING\x10\x02\"u\n" +
++	"\rBackupSession\x12\x10\n" +
++	"\x03pin\x18\x01 \x01(\fR\x03pin\x12\x12\n" +
++	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
++	"\tmax_tries\x18\x03 \x01(\rR\bmaxTries\x12!\n" +
++	"\fis_completed\x18\x04 \x01(\bR\visCompleted\"W\n" +
++	"\x10MigrationSession\x12\x16\n" +
++	"\x06backup\x18\x01 \x01(\fR\x06backup\x12+\n" +
++	"\x11current_mrenclave\x18\x02 \x01(\fR\x10currentMrenclaveB;H\x03Z7go.mau.fi/mautrix-signal/pkg/signalmeow/protobuf/svr2pbb\x06proto3"
++
++var (
++	file_svr2_proto_rawDescOnce sync.Once
++	file_svr2_proto_rawDescData []byte
++)
++
++func file_svr2_proto_rawDescGZIP() []byte {
++	file_svr2_proto_rawDescOnce.Do(func() {
++		file_svr2_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_svr2_proto_rawDesc), len(file_svr2_proto_rawDesc)))
++	})
++	return file_svr2_proto_rawDescData
++}
++
++var file_svr2_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
++var file_svr2_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
++var file_svr2_proto_goTypes = []any{
++	(BackupResponse_Status)(0),  // 0: org.signal.svr2.BackupResponse.Status
++	(RestoreResponse_Status)(0), // 1: org.signal.svr2.RestoreResponse.Status
++	(ExposeResponse_Status)(0),  // 2: org.signal.svr2.ExposeResponse.Status
++	(TriesResponse_Status)(0),   // 3: org.signal.svr2.TriesResponse.Status
++	(*Request)(nil),             // 4: org.signal.svr2.Request
++	(*Response)(nil),            // 5: org.signal.svr2.Response
++	(*BackupRequest)(nil),       // 6: org.signal.svr2.BackupRequest
++	(*BackupResponse)(nil),      // 7: org.signal.svr2.BackupResponse
++	(*RestoreRequest)(nil),      // 8: org.signal.svr2.RestoreRequest
++	(*RestoreResponse)(nil),     // 9: org.signal.svr2.RestoreResponse
++	(*DeleteRequest)(nil),       // 10: org.signal.svr2.DeleteRequest
++	(*DeleteResponse)(nil),      // 11: org.signal.svr2.DeleteResponse
++	(*ExposeRequest)(nil),       // 12: org.signal.svr2.ExposeRequest
++	(*ExposeResponse)(nil),      // 13: org.signal.svr2.ExposeResponse
++	(*TriesRequest)(nil),        // 14: org.signal.svr2.TriesRequest
++	(*TriesResponse)(nil),       // 15: org.signal.svr2.TriesResponse
++	(*BackupSession)(nil),       // 16: org.signal.svr2.BackupSession
++	(*MigrationSession)(nil),    // 17: org.signal.svr2.MigrationSession
++}
++var file_svr2_proto_depIdxs = []int32{
++	6,  // 0: org.signal.svr2.Request.backup:type_name -> org.signal.svr2.BackupRequest
++	12, // 1: org.signal.svr2.Request.expose:type_name -> org.signal.svr2.ExposeRequest
++	8,  // 2: org.signal.svr2.Request.restore:type_name -> org.signal.svr2.RestoreRequest
++	10, // 3: org.signal.svr2.Request.delete:type_name -> org.signal.svr2.DeleteRequest
++	14, // 4: org.signal.svr2.Request.tries:type_name -> org.signal.svr2.TriesRequest
++	7,  // 5: org.signal.svr2.Response.backup:type_name -> org.signal.svr2.BackupResponse
++	13, // 6: org.signal.svr2.Response.expose:type_name -> org.signal.svr2.ExposeResponse
++	9,  // 7: org.signal.svr2.Response.restore:type_name -> org.signal.svr2.RestoreResponse
++	11, // 8: org.signal.svr2.Response.delete:type_name -> org.signal.svr2.DeleteResponse
++	15, // 9: org.signal.svr2.Response.tries:type_name -> org.signal.svr2.TriesResponse
++	0,  // 10: org.signal.svr2.BackupResponse.status:type_name -> org.signal.svr2.BackupResponse.Status
++	1,  // 11: org.signal.svr2.RestoreResponse.status:type_name -> org.signal.svr2.RestoreResponse.Status
++	2,  // 12: org.signal.svr2.ExposeResponse.status:type_name -> org.signal.svr2.ExposeResponse.Status
++	3,  // 13: org.signal.svr2.TriesResponse.status:type_name -> org.signal.svr2.TriesResponse.Status
++	14, // [14:14] is the sub-list for method output_type
++	14, // [14:14] is the sub-list for method input_type
++	14, // [14:14] is the sub-list for extension type_name
++	14, // [14:14] is the sub-list for extension extendee
++	0,  // [0:14] is the sub-list for field type_name
++}
++
++func init() { file_svr2_proto_init() }
++func file_svr2_proto_init() {
++	if File_svr2_proto != nil {
++		return
++	}
++	file_svr2_proto_msgTypes[0].OneofWrappers = []any{
++		(*Request_Backup)(nil),
++		(*Request_Expose)(nil),
++		(*Request_Restore)(nil),
++		(*Request_Delete)(nil),
++		(*Request_Tries)(nil),
++	}
++	file_svr2_proto_msgTypes[1].OneofWrappers = []any{
++		(*Response_Backup)(nil),
++		(*Response_Expose)(nil),
++		(*Response_Restore)(nil),
++		(*Response_Delete)(nil),
++		(*Response_Tries)(nil),
++	}
++	type x struct{}
++	out := protoimpl.TypeBuilder{
++		File: protoimpl.DescBuilder{
++			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
++			RawDescriptor: unsafe.Slice(unsafe.StringData(file_svr2_proto_rawDesc), len(file_svr2_proto_rawDesc)),
++			NumEnums:      4,
++			NumMessages:   14,
++			NumExtensions: 0,
++			NumServices:   0,
++		},
++		GoTypes:           file_svr2_proto_goTypes,
++		DependencyIndexes: file_svr2_proto_depIdxs,
++		EnumInfos:         file_svr2_proto_enumTypes,
++		MessageInfos:      file_svr2_proto_msgTypes,
++	}.Build()
++	File_svr2_proto = out.File
++	file_svr2_proto_goTypes = nil
++	file_svr2_proto_depIdxs = nil
++}
+diff --git a/pkg/signalmeow/registration.go b/pkg/signalmeow/registration.go
+new file mode 100644
+index 0000000..04cbf14
+--- /dev/null
++++ b/pkg/signalmeow/registration.go
+@@ -0,0 +1,354 @@
++package signalmeow
++
++// Registering as a PRIMARY device, rather than linking as a companion.
++//
++// Upstream signalmeow only knows how to link (see provisioning.go). This adds
++// the account-registration half of the Signal service API: a verification
++// session (captcha, SMS/voice code) followed by POST /v1/registration, which
++// produces exactly the store.DeviceData that linking produces, so everything
++// downstream — sending, receiving, groups, storage service — is unchanged.
++//
++// libsignal_ffi does ship a registration client of its own, but every call in
++// it is async: it needs a Tokio runtime handle, a C-promise-to-Go callback
++// bridge and libsignal's chat-connection struct, none of which libsignalgo
++// wraps. Talking to the same REST endpoints directly reuses the HTTP layer
++// already here instead.
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"strings"
++
++	mrand "math/rand/v2"
++
++	"github.com/google/uuid"
++	"github.com/rs/zerolog"
++	"go.mau.fi/util/random"
++
++	"go.mau.fi/mautrix-signal/pkg/libsignalgo"
++	"go.mau.fi/mautrix-signal/pkg/signalmeow/store"
++	"go.mau.fi/mautrix-signal/pkg/signalmeow/web"
++)
++
++// RegistrationSession is the server's view of an in-progress registration.
++type RegistrationSession struct {
++	ID                   string   `json:"id"`
++	Verified             bool     `json:"verified"`
++	RequestedInformation []string `json:"requestedInformation"`
++}
++
++// NeedsCaptcha reports whether the server is withholding the code until a
++// captcha token is submitted. It nearly always is for a new number.
++func (s *RegistrationSession) NeedsCaptcha() bool {
++	for _, info := range s.RequestedInformation {
++		if info == "captcha" {
++			return true
++		}
++	}
++	return false
++}
++
++// RegistrationError carries the HTTP status so callers can tell apart the cases
++// a user can act on: 402 captcha rejected, 409/423 registration lock, 429 rate
++// limited, 440 wrong code.
++type RegistrationError struct {
++	StatusCode int
++	Body       string
++}
++
++func (e RegistrationError) Error() string {
++	// The body is only useful when the server actually explains itself. A
++	// schema rejection comes back as a full Jetty HTML error page, and putting
++	// that on screen buried the one number that matters.
++	detail := strings.TrimSpace(e.Body)
++	if strings.HasPrefix(detail, "<") || len(detail) > 120 {
++		detail = ""
++	}
++	switch {
++	case detail != "":
++		return fmt.Sprintf("Signal rejected this (%d): %s", e.StatusCode, detail)
++	case e.StatusCode == 422:
++		return "Signal rejected the request (422)"
++	case e.StatusCode == 429:
++		return "Too many attempts, try later"
++	default:
++		return fmt.Sprintf("Signal error %d", e.StatusCode)
++	}
++}
++
++// RegistrationLockError means the number has Registration Lock enabled, so the
++// account's PIN is required. Satisfying it needs the master key out of SVR,
++// which nothing here can do yet — the user has to turn the lock off in the
++// official app first.
++type RegistrationLockError struct {
++	TimeRemainingSeconds int64 `json:"timeRemaining"`
++}
++
++func (e RegistrationLockError) Error() string {
++	return fmt.Sprintf("number has registration lock enabled (%ds remaining)", e.TimeRemainingSeconds)
++}
++
++func registrationJSON(ctx context.Context, method, path string, body any, out any) error {
++	var payload []byte
++	if body != nil {
++		var err error
++		payload, err = json.Marshal(body)
++		if err != nil {
++			return fmt.Errorf("failed to marshal %s %s: %w", method, path, err)
++		}
++	}
++	resp, err := web.SendHTTPRequest(ctx, web.APIHostname, method, path, &web.HTTPReqOpt{
++		Body:        payload,
++		ContentType: web.ContentTypeJSON,
++	})
++	if err != nil {
++		return err
++	}
++	defer resp.Body.Close()
++	raw, _ := io.ReadAll(resp.Body)
++	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
++		return RegistrationError{StatusCode: resp.StatusCode, Body: string(raw)}
++	}
++	if out == nil {
++		return nil
++	}
++	return json.Unmarshal(raw, out)
++}
++
++// CreateRegistrationSession opens a verification session for a number in E.164.
++func CreateRegistrationSession(ctx context.Context, number string) (*RegistrationSession, error) {
++	session := &RegistrationSession{}
++	err := registrationJSON(ctx, http.MethodPost, "/v1/verification/session", map[string]any{
++		"number": number,
++	}, session)
++	if err != nil {
++		return nil, err
++	}
++	return session, nil
++}
++
++// SubmitRegistrationCaptcha hands over the token from Signal's captcha page.
++// The value is the whole `signalcaptcha://...` payload the page produces.
++func SubmitRegistrationCaptcha(ctx context.Context, sessionID, token string) (*RegistrationSession, error) {
++	session := &RegistrationSession{}
++	err := registrationJSON(ctx, http.MethodPatch, "/v1/verification/session/"+sessionID, map[string]any{
++		"captcha": token,
++	}, session)
++	if err != nil {
++		return nil, err
++	}
++	return session, nil
++}
++
++// RequestRegistrationCode asks for the verification code. transport is "sms" or
++// "voice".
++func RequestRegistrationCode(ctx context.Context, sessionID, transport string) (*RegistrationSession, error) {
++	session := &RegistrationSession{}
++	err := registrationJSON(ctx, http.MethodPost, "/v1/verification/session/"+sessionID+"/code", map[string]any{
++		"transport": transport,
++		"client":    "android",
++	}, session)
++	if err != nil {
++		return nil, err
++	}
++	return session, nil
++}
++
++// SubmitRegistrationCode submits the code the user received. A 200 with
++// Verified false means the code was wrong but the session is still alive.
++func SubmitRegistrationCode(ctx context.Context, sessionID, code string) (*RegistrationSession, error) {
++	session := &RegistrationSession{}
++	err := registrationJSON(ctx, http.MethodPut, "/v1/verification/session/"+sessionID+"/code", map[string]any{
++		"code": code,
++	}, session)
++	if err != nil {
++		return nil, err
++	}
++	return session, nil
++}
++
++type registerAccountResponse struct {
++	UUID     uuid.UUID `json:"uuid"`
++	PNI      uuid.UUID `json:"pni"`
++	Number   string    `json:"number"`
++	DeviceID int       `json:"deviceId"`
++}
++
++// RegisterPrimaryDevice claims the number for this client and stores the
++// resulting account. THIS UNREGISTERS ANY OTHER PRIMARY on the same number:
++// Signal allows exactly one, so the official app on that number stops working
++// until it re-registers (which would in turn evict this one).
++func RegisterPrimaryDevice(
++	ctx context.Context,
++	deviceStore store.DeviceStore,
++	number string,
++	sessionID string,
++) (*store.Device, error) {
++	log := zerolog.Ctx(ctx).With().Str("action", "register primary").Logger()
++
++	aciIdentityKeyPair, err := libsignalgo.GenerateIdentityKeyPair()
++	if err != nil {
++		return nil, fmt.Errorf("failed to generate ACI identity key pair: %w", err)
++	}
++	pniIdentityKeyPair, err := libsignalgo.GenerateIdentityKeyPair()
++	if err != nil {
++		return nil, fmt.Errorf("failed to generate PNI identity key pair: %w", err)
++	}
++
++	// Registration IDs are 14-bit; Signal rejects anything wider. Same range
++	// the linking path uses.
++	aciRegistrationID := mrand.IntN(16383) + 1
++	pniRegistrationID := mrand.IntN(16383) + 1
++
++	aciSignedPreKey := GenerateSignedPreKey(1, aciIdentityKeyPair)
++	pniSignedPreKey := GenerateSignedPreKey(1, pniIdentityKeyPair)
++	aciPQLastResortPreKey := GenerateKyberPreKeys(1, 1, aciIdentityKeyPair)[0]
++	pniPQLastResortPreKey := GenerateKyberPreKeys(1, 1, pniIdentityKeyPair)[0]
++
++	aciSignedPreKeyJSON, err := SignedPreKeyToJSON(aciSignedPreKey)
++	if err != nil {
++		return nil, fmt.Errorf("failed to encode ACI signed prekey: %w", err)
++	}
++	pniSignedPreKeyJSON, err := SignedPreKeyToJSON(pniSignedPreKey)
++	if err != nil {
++		return nil, fmt.Errorf("failed to encode PNI signed prekey: %w", err)
++	}
++	aciPQJSON, err := KyberPreKeyToJSON(aciPQLastResortPreKey)
++	if err != nil {
++		return nil, fmt.Errorf("failed to encode ACI kyber prekey: %w", err)
++	}
++	pniPQJSON, err := KyberPreKeyToJSON(pniPQLastResortPreKey)
++	if err != nil {
++		return nil, fmt.Errorf("failed to encode PNI kyber prekey: %w", err)
++	}
++
++	aciPub, err := aciIdentityKeyPair.GetPublicKey().Serialize()
++	if err != nil {
++		return nil, fmt.Errorf("failed to serialize ACI identity key: %w", err)
++	}
++	pniPub, err := pniIdentityKeyPair.GetPublicKey().Serialize()
++	if err != nil {
++		return nil, fmt.Errorf("failed to serialize PNI identity key: %w", err)
++	}
++
++	// The server insists on an unidentified-access key. It is derived from the
++	// profile key, so a primary has to mint one at registration rather than
++	// leaving it for the first profile upload.
++	var profileKey libsignalgo.ProfileKey
++	if _, err := rand.Read(profileKey[:]); err != nil {
++		return nil, fmt.Errorf("failed to generate profile key: %w", err)
++	}
++	accessKey, err := profileKey.DeriveAccessKey()
++	if err != nil {
++		return nil, fmt.Errorf("failed to derive access key: %w", err)
++	}
++
++	password := random.String(22)
++	// The account entropy pool is the root of the master key, storage-service
++	// key and backup keys. A primary mints its own; a linked device is handed
++	// one by the primary.
++	entropyPool, err := libsignalgo.GenerateAccountEntropyPool()
++	if err != nil {
++		return nil, fmt.Errorf("failed to generate account entropy pool: %w", err)
++	}
++
++	body := map[string]any{
++		"sessionId": sessionID,
++		// Both required by the server's schema; omitting either is a bare 422
++		// with no field named.
++		"everySignedKeyValid": true,
++		"skipDeviceTransfer":  true,
++		"accountAttributes": map[string]any{
++			"fetchesMessages":   true,
++			"registrationId":    aciRegistrationID,
++			"pniRegistrationId": pniRegistrationID,
++			"capabilities":      signalCapabilities,
++			"unidentifiedAccessKey":          base64.StdEncoding.EncodeToString(accessKey[:]),
++			"unrestrictedUnidentifiedAccess": false,
++			"discoverableByPhoneNumber":      true,
++			// No "name": for a primary the server wants either an absent field
++			// or base64 of an ENCRYPTED device name. A plain string is rejected.
++		},
++		"aciIdentityKey":        base64.StdEncoding.EncodeToString(aciPub),
++		"pniIdentityKey":        base64.StdEncoding.EncodeToString(pniPub),
++		"aciSignedPreKey":       aciSignedPreKeyJSON,
++		"pniSignedPreKey":       pniSignedPreKeyJSON,
++		"aciPqLastResortPreKey": aciPQJSON,
++		"pniPqLastResortPreKey": pniPQJSON,
++	}
++	payload, err := json.Marshal(body)
++	if err != nil {
++		return nil, fmt.Errorf("failed to marshal registration: %w", err)
++	}
++
++	// Basic auth with the password we just minted: the account does not exist
++	// yet, so there is nothing else to authenticate with.
++	resp, err := web.SendHTTPRequest(ctx, web.APIHostname, http.MethodPost, "/v1/registration", &web.HTTPReqOpt{
++		Body:        payload,
++		Username:    &number,
++		Password:    &password,
++		ContentType: web.ContentTypeJSON,
++	})
++	if err != nil {
++		return nil, err
++	}
++	defer resp.Body.Close()
++	raw, _ := io.ReadAll(resp.Body)
++	if resp.StatusCode == http.StatusLocked || resp.StatusCode == http.StatusConflict {
++		lockErr := RegistrationLockError{}
++		_ = json.Unmarshal(raw, &lockErr)
++		return nil, lockErr
++	}
++	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
++		return nil, RegistrationError{StatusCode: resp.StatusCode, Body: string(raw)}
++	}
++
++	account := registerAccountResponse{}
++	if err := json.Unmarshal(raw, &account); err != nil {
++		return nil, fmt.Errorf("failed to parse registration response: %w", err)
++	}
++
++	deviceID := account.DeviceID
++	if deviceID == 0 {
++		deviceID = 1
++	}
++	data := &store.DeviceData{
++		ACIIdentityKeyPair: aciIdentityKeyPair,
++		PNIIdentityKeyPair: pniIdentityKeyPair,
++		ACIRegistrationID:  aciRegistrationID,
++		PNIRegistrationID:  pniRegistrationID,
++		ACI:                account.UUID,
++		PNI:                account.PNI,
++		DeviceID:           deviceID,
++		Number:             number,
++		Password:           password,
++		AccountEntropyPool: entropyPool,
++	}
++	data.MasterKey, err = entropyPool.DeriveSVRKey()
++	if err != nil {
++		// Not fatal for messaging, but storage service and backups need it.
++		log.Err(err).Msg("failed to derive master key from account entropy pool")
++	}
++
++	if err := deviceStore.PutDevice(ctx, data); err != nil {
++		return nil, fmt.Errorf("failed to store registered device: %w", err)
++	}
++	device, err := deviceStore.DeviceByACI(ctx, data.ACI)
++	if err != nil {
++		return nil, fmt.Errorf("failed to load registered device: %w", err)
++	}
++	// Persist the profile key we just minted. It is not only the account's own
++	// profile encryption key — the unidentified access key sent above derives
++	// from it — so losing it means never being able to publish a profile.
++	if err := device.RecipientStore.StoreProfileKey(ctx, data.ACI, profileKey); err != nil {
++		log.Err(err).Msg("failed to store own profile key")
++	}
++	return device, nil
++}
++
++
+diff --git a/pkg/signalmeow/sending.go b/pkg/signalmeow/sending.go
+index 756e673..605bb33 100644
+--- a/pkg/signalmeow/sending.go
++++ b/pkg/signalmeow/sending.go
+@@ -1171,3 +1171,39 @@ func (cli *Client) handle428(ctx context.Context, recipient libsignalgo.ServiceI
+ 	//}
+ 	return fmt.Errorf("got 428 error")
+ }
++
++// SendNoteToSelf delivers a message addressed to our own account.
++//
++// Signal has no recipient to encrypt for here, so SendMessage reports failure
++// with an empty result. A note to self is instead a SyncMessage.Sent addressed
++// to ourselves: our other devices pick it up, and with no other devices the
++// send is simply a no-op that still succeeds.
++func (cli *Client) SendNoteToSelf(ctx context.Context, content *signalpb.Content) error {
++	self := cli.Store.ACIServiceID()
++	var sent *signalpb.SyncMessage_Sent
++	var timestamp uint64
++
++	switch c := content.Content.(type) {
++	case *signalpb.Content_DataMessage:
++		timestamp = c.DataMessage.GetTimestamp()
++		sent = &signalpb.SyncMessage_Sent{
++			Message:                    c.DataMessage,
++			DestinationServiceIdBinary: self.Bytes(),
++			Timestamp:                  c.DataMessage.Timestamp,
++			ExpirationStartTimestamp:   ptr.Ptr(uint64(time.Now().UnixMilli())),
++		}
++	case *signalpb.Content_EditMessage:
++		timestamp = c.EditMessage.GetDataMessage().GetTimestamp()
++		sent = &signalpb.SyncMessage_Sent{
++			EditMessage:                c.EditMessage,
++			DestinationServiceIdBinary: self.Bytes(),
++			Timestamp:                  c.EditMessage.GetDataMessage().Timestamp,
++		}
++	default:
++		// Typing and receipts have no meaning addressed at yourself.
++		return nil
++	}
++
++	_, err := cli.sendContent(ctx, self, timestamp, syncSentMessage(sent), 0, true, nil, nil)
++	return err
++}
+diff --git a/pkg/signalmeow/svr2.go b/pkg/signalmeow/svr2.go
+new file mode 100644
+index 0000000..a59a94e
+--- /dev/null
++++ b/pkg/signalmeow/svr2.go
+@@ -0,0 +1,264 @@
++package signalmeow
++
++// Recovering the account master key from SVR2 (Secure Value Recovery v2).
++//
++// The master key is what decrypts the storage service — the contact list,
++// groups and settings. A linked device is handed it by the primary. A device
++// that REGISTERS mints a new one, which leaves the account's existing storage
++// manifest on the server but unreadable. SVR2 is the only way back: the user's
++// PIN, stretched inside an SGX enclave, unwraps the original key.
++//
++// The enclave is the same kind CDSI uses, so the handshake reuses
++// libsignalgo.SGXClientState; only the enclave id, the URL and the request
++// protobuf differ.
++
++import (
++	"context"
++	"crypto/hmac"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"path"
++	"strings"
++	"time"
++
++	"github.com/coder/websocket"
++	"google.golang.org/protobuf/proto"
++
++	"go.mau.fi/mautrix-signal/pkg/libsignalgo"
++	"go.mau.fi/mautrix-signal/pkg/signalmeow/protobuf/svr2pb"
++	"go.mau.fi/mautrix-signal/pkg/signalmeow/web"
++)
++
++const (
++	svr2Hostname = "svr2.signal.org"
++	// The enclave id is part of the PIN salt, so it is not a detail that can be
++	// left approximate: a stale one derives the wrong access key and the
++	// restore comes back PIN_MISMATCH rather than failing cleanly. Taken from
++	// libsignal's attest::constants (ENCLAVE_ID_SVR2_2026Q1_PROD) and must be
++	// bumped in step with the libsignal version this links against.
++	svr2MrEnclaveHex = "1240acbd4aa26974184844c8a46b1022d3957ac8a76c1fd8f5b1a15141ee0708"
++)
++
++// SVR2RestoreError distinguishes the outcomes the user can act on from the ones
++// they cannot.
++type SVR2RestoreError struct {
++	Status svr2pb.RestoreResponse_Status
++	Tries  uint32
++}
++
++func (e SVR2RestoreError) Error() string {
++	switch e.Status {
++	case svr2pb.RestoreResponse_PIN_MISMATCH:
++		return fmt.Sprintf("wrong PIN, %d tries left", e.Tries)
++	case svr2pb.RestoreResponse_MISSING:
++		return "no backup stored for this account"
++	default:
++		return fmt.Sprintf("restore failed (%s)", e.Status)
++	}
++}
++
++type svr2Credentials struct {
++	Username string `json:"username"`
++	Password string `json:"password"`
++}
++
++func (cli *Client) getSVR2Credentials(ctx context.Context) (*svr2Credentials, error) {
++	username, password := cli.Store.BasicAuthCreds()
++	resp, err := web.SendHTTPRequest(ctx, web.APIHostname, http.MethodGet, "/v2/svr/auth", &web.HTTPReqOpt{
++		Username: &username,
++		Password: &password,
++	})
++	if err != nil {
++		return nil, err
++	}
++	defer resp.Body.Close()
++	body, _ := io.ReadAll(resp.Body)
++	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
++		return nil, fmt.Errorf("svr2 auth returned %d: %s", resp.StatusCode, string(body))
++	}
++	creds := &svr2Credentials{}
++	if err := json.Unmarshal(body, creds); err != nil {
++		return nil, fmt.Errorf("failed to parse svr2 auth: %w", err)
++	}
++	return creds, nil
++}
++
++// RestoreMasterKeyFromSVR2 exchanges the account PIN for the stored master key.
++//
++// Returns every plausible reading of the enclave's payload, best first, because
++// the wire format is not self-describing: the proto caps the stored blob at 48
++// bytes, which a GCM-wrapped 32-byte key (32+12+16) cannot fit, so the common
++// case is the key stored raw. The caller settles it by trying each against the
++// storage service — the only definitive test.
++func (cli *Client) RestoreMasterKeyFromSVR2(ctx context.Context, pin string) ([][]byte, error) {
++	mrenclave, err := hex.DecodeString(svr2MrEnclaveHex)
++	if err != nil {
++		return nil, fmt.Errorf("bad enclave id: %w", err)
++	}
++
++	creds, err := cli.getSVR2Credentials(ctx)
++	if err != nil {
++		return nil, err
++	}
++
++	// The PIN is stretched against the enclave id and the SVR username, so the
++	// resulting keys are useless anywhere else.
++	pinHash, err := libsignalgo.PinHashFromUsernameMrenclave(
++		[]byte(normalizePIN(pin)), creds.Username, mrenclave,
++	)
++	if err != nil {
++		return nil, fmt.Errorf("failed to hash PIN: %w", err)
++	}
++	defer pinHash.Destroy()
++
++	accessKey, err := pinHash.AccessKey()
++	if err != nil {
++		return nil, err
++	}
++	encryptionKey, err := pinHash.EncryptionKey()
++	if err != nil {
++		return nil, err
++	}
++
++	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++
++	// Credentials ride in the URL userinfo, the same way contact discovery
++	// authenticates to its enclave.
++	addr := (&url.URL{
++		Scheme: "wss",
++		Host:   svr2Hostname,
++		User:   url.UserPassword(creds.Username, creds.Password),
++		Path:   path.Join("v1", svr2MrEnclaveHex),
++	}).String()
++	ws, _, err := web.OpenWebsocket(ctx, addr)
++	if err != nil {
++		return nil, fmt.Errorf("failed to open svr2 socket: %w", err)
++	}
++	defer ws.Close(websocket.StatusInternalError, "svr2 done")
++
++	// The enclave sends its attestation first; the handshake proves we are
++	// talking to genuine SVR2 code and not the server relaying our PIN.
++	_, attestation, err := ws.Read(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("failed to read attestation: %w", err)
++	}
++	sgx, err := libsignalgo.NewSVR2ClientState(mrenclave, attestation, time.Now())
++	if err != nil {
++		return nil, fmt.Errorf("attestation rejected: %w", err)
++	}
++	defer sgx.Destroy()
++
++	initial, err := sgx.InitialRequest()
++	if err != nil {
++		return nil, err
++	}
++	if err := ws.Write(ctx, websocket.MessageBinary, initial); err != nil {
++		return nil, fmt.Errorf("failed to send handshake: %w", err)
++	}
++	_, handshakeResp, err := ws.Read(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("failed to read handshake: %w", err)
++	}
++	if err := sgx.CompleteHandshake(handshakeResp); err != nil {
++		return nil, fmt.Errorf("handshake failed: %w", err)
++	}
++
++	request := &svr2pb.Request{
++		Inner: &svr2pb.Request_Restore{
++			Restore: &svr2pb.RestoreRequest{Pin: accessKey},
++		},
++	}
++	plaintext, err := proto.Marshal(request)
++	if err != nil {
++		return nil, err
++	}
++	sealed, err := sgx.EstablishedSend(plaintext)
++	if err != nil {
++		return nil, err
++	}
++	if err := ws.Write(ctx, websocket.MessageBinary, sealed); err != nil {
++		return nil, fmt.Errorf("failed to send restore: %w", err)
++	}
++	_, sealedResp, err := ws.Read(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("failed to read restore: %w", err)
++	}
++	respBytes, err := sgx.EstablishedReceive(sealedResp)
++	if err != nil {
++		return nil, err
++	}
++	response := &svr2pb.Response{}
++	if err := proto.Unmarshal(respBytes, response); err != nil {
++		return nil, err
++	}
++	restore := response.GetRestore()
++	if restore == nil {
++		return nil, fmt.Errorf("svr2 returned no restore response")
++	}
++	if restore.GetStatus() != svr2pb.RestoreResponse_OK {
++		return nil, SVR2RestoreError{Status: restore.GetStatus(), Tries: restore.GetTries()}
++	}
++
++	data := restore.GetData()
++	candidates := make([][]byte, 0, 2)
++	if len(data) == 32 {
++		candidates = append(candidates, data)
++	}
++	if unwrapped, err := decryptSVR2Data(encryptionKey, data); err == nil {
++		candidates = append(candidates, unwrapped)
++	}
++	if len(candidates) == 0 {
++		return nil, fmt.Errorf("svr2 returned %d bytes that fit no known layout", len(data))
++	}
++	return candidates, nil
++}
++
++// decryptSVR2Data unwraps the 48-byte blob SVR2 stores: HMAC-SHA256-SIV, which
++// is 16 bytes of synthetic IV followed by 32 bytes of ciphertext.
++//
++// Not AES-GCM, though the length is suggestive. The scheme is a keystream XOR
++// with the IV doubling as the authentication tag, and it is what libsignal's
++// PinHash::decode_master_key does (rust/account-keys/src/hash.rs). The whole
++// point of the fixed 48 bytes is that the proto caps the stored value there.
++func decryptSVR2Data(key, data []byte) ([]byte, error) {
++	const ivSize = 16
++	if len(data) != 48 {
++		return nil, fmt.Errorf("svr2 payload is %d bytes, expected 48", len(data))
++	}
++	kA := hmacSHA256(key, []byte("auth"))
++	kE := hmacSHA256(key, []byte("enc"))
++	iv, ciphertext := data[:ivSize], data[ivSize:]
++
++	kX := hmacSHA256(kE, iv)
++	master := make([]byte, len(ciphertext))
++	for i := range ciphertext {
++		master[i] = kX[i] ^ ciphertext[i]
++	}
++
++	// The IV is a MAC over the plaintext, so recomputing it authenticates the
++	// result; a wrong key yields plausible-looking bytes otherwise.
++	expectedIV := hmacSHA256(kA, master)[:ivSize]
++	if !hmac.Equal(iv, expectedIV) {
++		return nil, fmt.Errorf("svr2 payload failed authentication")
++	}
++	return master, nil
++}
++
++
++// normalizePIN matches what other Signal clients hash. A numeric PIN is used
++// exactly as typed; an alphanumeric one is lowercased, which is the only
++// transform Signal applies. Getting this wrong produces a valid-looking hash
++// that simply never matches.
++func normalizePIN(pin string) string {
++	for _, r := range pin {
++		if r < '0' || r > '9' {
++			return strings.ToLower(pin)
++		}
++	}
++	return pin
++}

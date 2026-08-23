@@ -1,6 +1,7 @@
 package org.unichat.app
 
 import android.content.Context
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 
 object ProtoPicker {
@@ -19,8 +20,11 @@ object ProtoPicker {
 
     fun isLinked(proto: String): Boolean = proto in linked()
 
-    /** Accounts whose profile and privacy screens this app can drive. */
-    fun editable(): List<String> = linked()
+    /** Linked and switched on. A paused account is disconnected from its
+     *  network, so it can neither send nor read back a profile — only Manage
+     *  accounts may list one. */
+    fun active(): List<String> = linked().filter { Bridge.protoEnabled(it) }
+
 
     /** Which protocol a chat id belongs to. WhatsApp is the unprefixed one. */
     fun of(chatId: String): String = when {
@@ -37,11 +41,11 @@ object ProtoPicker {
         }
     )
 
-    fun pick(ctx: Context, onPick: (String) -> Unit) = pickFrom(ctx, linked(), onPick)
+    fun pick(ctx: Context, onPick: (String) -> Unit) = pickFrom(ctx, active(), onPick)
 
     fun pickFrom(ctx: Context, options: List<String>, onPick: (String) -> Unit) {
         when (options.size) {
-            0 -> {}
+            0 -> Toast.makeText(ctx, R.string.no_active_account, Toast.LENGTH_SHORT).show()
             1 -> onPick(options[0])
             else -> AlertDialog.Builder(ctx)
                 .setTitle(R.string.choose_account)

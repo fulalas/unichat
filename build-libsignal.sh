@@ -33,7 +33,7 @@ TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 # relative to the toolchain it finds. Without it the BoringSSL bindings fail to
 # generate — invisibly at first, because a cached boring-sys output makes the
 # build skip bindgen entirely.
-export PATH="$TC/bin:$HOME/.cargo/bin:$DIR/../toolchain/protoc/bin:$PATH"
+export PATH="$TC/bin:$PATH"
 for CMD in cargo git protoc; do
     command -v "$CMD" >/dev/null || { echo "libsignal: missing '$CMD'" >&2; exit 1; }
 done
@@ -109,6 +109,10 @@ if [ -f "$ARCHIVE" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$KEY" ]; then
 fi
 
 echo "== Building libsignal_ffi $VERSION for $ABI (LTO, this takes a few minutes) =="
+# libsignal pins its own nightly via rust-toolchain; rustup installs that on
+# first use, but the Android target has to be added to it explicitly or the
+# build fails on a missing std for the target.
+( cd "$SRC" && rustup target add "$RUST_TARGET" >/dev/null 2>&1 || true )
 ( cd "$SRC" && cargo build -p libsignal-ffi --release --target "$RUST_TARGET" )
 
 mkdir -p "$OUT"

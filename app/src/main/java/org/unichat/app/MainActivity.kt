@@ -467,7 +467,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             M_FONT -> { showFontSizeDialog(); return true }
             M_ABOUT -> { showAboutDialog(); return true }
             M_PRIVACY -> {
-                ProtoPicker.pickFrom(this, ProtoPicker.editable()) { proto ->
+                ProtoPicker.pickFrom(this, ProtoPicker.active()) { proto ->
                     startActivity(
                         Intent(this, PrivacyActivity::class.java).putExtra("proto", proto)
                     )
@@ -475,7 +475,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 return true
             }
             M_PROFILE -> {
-                ProtoPicker.pickFrom(this, ProtoPicker.editable()) { proto ->
+                ProtoPicker.pickFrom(this, ProtoPicker.active()) { proto ->
                     startActivity(
                         Intent(this, ProfileActivity::class.java).putExtra("proto", proto)
                     )
