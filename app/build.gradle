@@ -11,8 +11,8 @@ android {
         applicationId "org.unichat.app"
         minSdk 29
         targetSdk 35
-        versionCode 147
-        versionName "0.36.6"
+        versionCode 148
+        versionName "0.36.7"
         ndk {
             // arm64 only: the three-ABI APK carried ~50 MB of native libraries no
             // real device could ever load. Must stay in step with build.sh's

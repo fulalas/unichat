@@ -35,6 +35,9 @@ type sgConn struct {
 	client    *signalmeow.Client
 	device    *sgstore.Device
 	container *sgstore.Container
+	// The same handle Container wraps, kept so a caller can put many store
+	// writes in one transaction. Container's own field is private.
+	db *dbutil.Database
 	// Held so logout can close it: Container exposes no Close, and the caller
 	// deletes the whole directory straight afterwards.
 	sql *sql.DB
@@ -103,6 +106,12 @@ func sgActive() (*sgConn, *signalmeow.Client, *sgstore.Device) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c, c.client, c.device
+}
+
+func (c *sgConn) dbHandle() *dbutil.Database {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.db
 }
 
 func sgGet() *sgConn {
@@ -175,6 +184,7 @@ func SignalInit(dataDir string, listener EventListener) bool {
 		return false
 	}
 	c.sql = db
+	c.db = rawDB
 	container := sgstore.NewStore(rawDB, dbutil.ZeroLogger(c.logger()))
 	if err := container.Upgrade(ctx); err != nil {
 		c.log(LogError, "store upgrade error "+err.Error())
@@ -246,13 +256,28 @@ func SignalConnect() bool {
 	c.cancel = cancel
 	c.mu.Unlock()
 
+	// StartReceiveLoops returns before the socket is up, so the first status it
+	// reports is what settles this call. Buffered and written at most once, so
+	// the loop below never blocks on a caller that has already given up.
+	settled := make(chan bool, 1)
+	settle := func(ok bool) {
+		select {
+		case settled <- ok:
+		default:
+		}
+	}
+
 	go func() {
 		for status := range statusChan {
 			switch status.Event {
 			case signalmeow.SignalConnectionEventConnected:
 				c.setState("connected")
+				settle(true)
 			case signalmeow.SignalConnectionEventDisconnected, signalmeow.SignalConnectionEventError:
 				c.setState("disconnected")
+				// Deliberately not settling: signalmeow reports a drop while it
+				// is still dialling, and reporting failure on the first one gave
+				// up on a connection that went on to come up.
 			case signalmeow.SignalConnectionEventLoggedOut:
 				// The primary device unlinked us. The stored keys are dead;
 				// keeping them would make every later connect fail the same way.
@@ -262,30 +287,20 @@ func SignalConnect() bool {
 				c.device, c.client = nil, nil
 				c.mu.Unlock()
 				c.setState("logged_out")
+				settle(false)
 			}
 		}
+		// The loop only closes the channel when it has stopped for good.
+		settle(false)
 	}()
 
 	go c.publishSelfContact()
 
-	// StartReceiveLoops returns before the socket is up; wait for the first
-	// connected status rather than reporting success on a socket still dialling.
-	deadline := time.After(30 * time.Second)
-	for {
-		c.mu.Lock()
-		state := c.state
-		c.mu.Unlock()
-		if state == "connected" {
-			return true
-		}
-		if state == "logged_out" {
-			return false
-		}
-		select {
-		case <-deadline:
-			return false
-		case <-time.After(100 * time.Millisecond):
-		}
+	select {
+	case ok := <-settled:
+		return ok
+	case <-time.After(30 * time.Second):
+		return false
 	}
 }
 
@@ -333,7 +348,7 @@ func SignalLogout() {
 	c.device, c.client = nil, nil
 	c.known = make(map[string]bool)
 	handle := c.sql
-	c.container, c.sql = nil, nil
+	c.container, c.sql, c.db = nil, nil, nil
 	c.mu.Unlock()
 	c.setState("logged_out")
 
@@ -781,37 +796,60 @@ func SignalDiscoverContacts(numbers string) string {
 	ctx := context.TODO()
 	selfID := SignalSelfID()
 	found := 0
-	for e164, entry := range resp {
-		if entry.ACI == uuid.Nil && entry.PNI == uuid.Nil {
-			continue
-		}
-		// Our own number is only in the lookup as a control that the request
-		// worked. Reporting it as a contact would overwrite the self row
-		// publishSelfContact wrote — with a blank name, since the address book
-		// rarely holds your own number — and the note-to-self chat would fall
-		// back to showing a bare ACI.
-		if id := sgRecipientID(entry.ACI, entry.PNI); id == selfID {
+	type sgHit struct{ id, phone string }
+	var hits []sgHit
+
+	// One transaction for the whole address book. A phone with a thousand
+	// contacts meant a thousand separate sqlite commits, each one an fsync.
+	// Only the store writes are in here: the OnContact callbacks below cross
+	// into Kotlin, which must not happen with the transaction open.
+	store := func(ctx context.Context) error {
+		for e164, entry := range resp {
+			if entry.ACI == uuid.Nil && entry.PNI == uuid.Nil {
+				continue
+			}
+			// Our own number is only in the lookup as a control that the request
+			// worked. Reporting it as a contact would overwrite the self row
+			// publishSelfContact wrote — with a blank name, since the address
+			// book rarely holds your own number — and the note-to-self chat
+			// would fall back to showing a bare ACI.
+			id := sgRecipientID(entry.ACI, entry.PNI)
+			if id == selfID {
+				found++
+				continue
+			}
+			// Digits only: the contacts table stores a bare number and the query
+			// that reads it prepends the '+', so storing one here showed "++34…".
+			phone := fmt.Sprintf("%d", e164)
+			// Teach signalmeow the number/ACI/PNI mapping, so a later message
+			// from this person is recognised as the same recipient instead of
+			// opening a second chat.
+			if _, err := client.Store.RecipientStore.UpdateRecipientE164(ctx, entry.ACI, entry.PNI, "+"+phone); err != nil {
+				// Not fatal, and never returned: one unstorable recipient must
+				// not roll back the whole address book.
+				c.log(LogWarning, "failed to store discovered recipient: "+err.Error())
+			}
+			hits = append(hits, sgHit{id: id, phone: phone})
 			found++
-			continue
 		}
-		// Digits only: the contacts table stores a bare number and the query
-		// that reads it prepends the '+', so storing one here showed "++34…".
-		phone := fmt.Sprintf("%d", e164)
-		// Teach signalmeow the number/ACI/PNI mapping, so a later message from
-		// this person is recognised as the same recipient instead of opening a
-		// second chat.
-		if _, err := client.Store.RecipientStore.UpdateRecipientE164(ctx, entry.ACI, entry.PNI, "+"+phone); err != nil {
-			c.log(LogWarning, "failed to store discovered recipient: "+err.Error())
+		return nil
+	}
+	if db := c.dbHandle(); db != nil {
+		if err := db.DoTxn(ctx, nil, store); err != nil {
+			return sgUpstream(err)
 		}
-		id := sgRecipientID(entry.ACI, entry.PNI)
+	} else if err := store(ctx); err != nil {
+		return sgUpstream(err)
+	}
+
+	for _, hit := range hits {
 		c.mu.Lock()
-		c.known[id] = true
+		c.known[hit.id] = true
 		c.mu.Unlock()
 		// Name is left empty: the address book already has one for this number,
 		// and the app prefers its own contact name over anything a service
 		// reports. Sending a blank one here would overwrite it.
-		c.listener.OnContact(id, "", phone, false, false, true)
-		found++
+		c.listener.OnContact(hit.id, "", hit.phone, false, false, true)
 	}
 	_, selfFound := resp[selfE164]
 	c.log(LogInfo, fmt.Sprintf(

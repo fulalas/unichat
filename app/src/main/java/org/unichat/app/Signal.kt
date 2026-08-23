@@ -21,8 +21,15 @@ object Signal : EventListener {
      *  Uppercase, matching how signalmeow spells incoming service ids. */
     const val PNI_PREFIX = "PNI:"
 
-    private val executor = Executors.newSingleThreadExecutor()
-    // Written on [executor], read from the UI thread via hasSession(); without
+    // Two threads, not one: connect() blocks for up to 30 s waiting for the
+    // socket and contact discovery is a round trip over it, so sharing a single
+    // thread with reactions and read receipts made a reaction sent seconds
+    // after launch wait for all of startup. Each stays single-threaded, because
+    // both halves depend on their own calls staying in order — registration
+    // steps on [control], and a read receipt after the read on [ops].
+    private val control = Executors.newSingleThreadExecutor()
+    private val ops = Executors.newSingleThreadExecutor()
+    // Written on [control], read from the UI thread via hasSession(); without
     // volatile the main thread could keep seeing a linked account as absent.
     @Volatile private var started = false
     @Volatile private var linked = false
@@ -51,7 +58,7 @@ object Signal : EventListener {
         started = true
         appContext = context.applicationContext
         val dir = context.filesDir.absolutePath + "/signal"
-        executor.execute {
+        control.execute {
             if (!Wmbridge.signalInit(dir, this)) {
                 Log.w(TAG, "signal store init failed")
                 started = false
@@ -65,7 +72,7 @@ object Signal : EventListener {
 
     fun connect() {
         if (!linked) return
-        executor.execute {
+        control.execute {
             if (Wmbridge.signalConnect()) discoverContacts()
         }
     }
@@ -78,7 +85,7 @@ object Signal : EventListener {
      */
     fun discoverContacts() {
         val ctx = appContext ?: return
-        executor.execute {
+        control.execute {
             val entries = PhoneBook.allEntries(ctx)
             if (entries.isEmpty()) return@execute
             // Keep the address-book name against the number: discovery answers
@@ -94,15 +101,15 @@ object Signal : EventListener {
     @Volatile private var namesByNumber: Map<String, String> = emptyMap()
 
     /** Drops the socket but keeps the link, for the Manage accounts pause. */
-    fun disconnect() = executor.execute { Wmbridge.signalDisconnect() }
+    fun disconnect() = control.execute { Wmbridge.signalDisconnect() }
 
 
-    fun logout() = executor.execute {
+    fun logout() = control.execute {
         Wmbridge.signalLogout()
         linked = false
         started = false
         selfIdMemo = ""
-        // On this executor, after the Go side has closed the store: the media
+        // On [control], after the Go side has closed the store: the media
         // and session tree is ours to remove and nothing else is holding it.
         // Then reopen, so registering again without restarting the app has a
         // store to write into rather than reporting "signal not initialised".
@@ -141,29 +148,29 @@ object Signal : EventListener {
     }
 
     // --- Registration (primary device) ----------------------------------
-    // Each call blocks on the network, so they all run on [executor] and report
+    // Each call blocks on the network, so they all run on [control] and report
     // back on the main thread. An empty string means success; anything else is
     // an error code for errorText().
 
-    fun registerStart(number: String, onDone: (String) -> Unit) = executor.execute {
+    fun registerStart(number: String, onDone: (String) -> Unit) = control.execute {
         val err = Wmbridge.signalRegisterStart(number)
         Bridge.runOnUi { onDone(err) }
     }
 
     fun needsCaptcha(): Boolean = Wmbridge.signalRegisterNeedsCaptcha()
 
-    fun registerSubmitCaptcha(token: String, onDone: (String) -> Unit) = executor.execute {
+    fun registerSubmitCaptcha(token: String, onDone: (String) -> Unit) = control.execute {
         val err = Wmbridge.signalRegisterSubmitCaptcha(token)
         Bridge.runOnUi { onDone(err) }
     }
 
     /** Always SMS: there is no voice-call option in the UI. */
-    fun registerRequestCode(onDone: (String) -> Unit) = executor.execute {
+    fun registerRequestCode(onDone: (String) -> Unit) = control.execute {
         val err = Wmbridge.signalRegisterRequestCode("sms")
         Bridge.runOnUi { onDone(err) }
     }
 
-    fun registerSubmitCode(number: String, code: String, onDone: (String) -> Unit) = executor.execute {
+    fun registerSubmitCode(number: String, code: String, onDone: (String) -> Unit) = control.execute {
         val err = Wmbridge.signalRegisterSubmitCode(number, code)
         if (err.isEmpty()) {
             linked = true
@@ -185,7 +192,7 @@ object Signal : EventListener {
 
     fun myPhone(): String = if (linked) Wmbridge.signalMyPhone() else ""
 
-    fun fetchAbout(onResult: (String) -> Unit) = executor.execute {
+    fun fetchAbout(onResult: (String) -> Unit) = control.execute {
         val about = Wmbridge.signalMyAbout()
         Bridge.runOnUi { onResult(about) }
     }
@@ -194,7 +201,7 @@ object Signal : EventListener {
      * Signal's profile endpoint replaces every field at once, so a name-only or
      * about-only edit has to resend the other one or it is blanked.
      */
-    fun setProfile(name: String?, about: String?, onResult: (Boolean) -> Unit) = executor.execute {
+    fun setProfile(name: String?, about: String?, onResult: (Boolean) -> Unit) = control.execute {
         val currentName = name ?: Wmbridge.signalMyName()
         val currentAbout = about ?: Wmbridge.signalMyAbout()
         // Discoverability travels with this call because minting a missing
@@ -204,12 +211,12 @@ object Signal : EventListener {
         Bridge.runOnUi { onResult(ok) }
     }
 
-    fun setDiscoverable(discoverable: Boolean, onResult: (Boolean) -> Unit) = executor.execute {
+    fun setDiscoverable(discoverable: Boolean, onResult: (Boolean) -> Unit) = control.execute {
         val ok = Wmbridge.signalSetDiscoverable(discoverable)
         Bridge.runOnUi { onResult(ok) }
     }
 
-    fun restoreFromPin(pin: String, onDone: (String) -> Unit) = executor.execute {
+    fun restoreFromPin(pin: String, onDone: (String) -> Unit) = control.execute {
         val err = Wmbridge.signalRestoreFromPIN(pin)
         Bridge.runOnUi { onDone(err) }
     }
@@ -221,10 +228,10 @@ object Signal : EventListener {
         ).isNotEmpty()
 
     fun react(msg: MessageRow, emoji: String) =
-        executor.execute { Wmbridge.signalReact(msg.chatId, msg.id, msg.senderId, emoji) }
+        ops.execute { Wmbridge.signalReact(msg.chatId, msg.id, msg.senderId, emoji) }
 
     fun delete(chatId: String, msgId: String) =
-        executor.execute { Wmbridge.signalDelete(chatId, msgId) }
+        ops.execute { Wmbridge.signalDelete(chatId, msgId) }
 
     fun edit(chatId: String, msgId: String, newText: String): Boolean =
         Wmbridge.signalEdit(chatId, msgId, newText)
@@ -233,7 +240,7 @@ object Signal : EventListener {
      * Marks the chat read locally and acks the newest unread message, matching
      * what the WhatsApp path does. Nothing happens when there is nothing new.
      */
-    fun markChatRead(chatId: String) = executor.execute {
+    fun markChatRead(chatId: String) = ops.execute {
         val latest = Bridge.db.latestUnread(chatId) ?: return@execute
         Bridge.db.markChatRead(chatId)
         Bridge.notifyChatsChanged()
@@ -242,7 +249,7 @@ object Signal : EventListener {
     }
 
     fun setTyping(chatId: String, typing: Boolean) =
-        executor.execute { Wmbridge.signalSetTyping(chatId, typing) }
+        ops.execute { Wmbridge.signalSetTyping(chatId, typing) }
 
     fun sendAttachment(
         chatId: String, path: String, caption: String, mime: String,
