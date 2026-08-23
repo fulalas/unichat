@@ -28,6 +28,10 @@ interface Account {
     fun isLinked(): Boolean
     val state: String
     fun selfId(): String
+
+    /** Own id, waiting for the protocol to come up if it has just started. Only
+     *  Telegram has to wait; for the rest this is [selfId]. Blocking. */
+    fun selfIdBlocking(): String = selfId()
     fun myName(): String
 
     /** Empty when the protocol does not tell us the number. */
@@ -75,8 +79,13 @@ interface Account {
 }
 
 object Accounts {
-    /** Every protocol the app speaks, linked or not, in the order the UI lists them. */
-    val ALL: List<Account> = listOf(WaAccount, TgAccount, SgAccount)
+    /**
+     * Every protocol the app speaks, linked or not. THIS is the order the user
+     * sees, everywhere one is offered — Manage accounts, the "which account?"
+     * picker, the login tabs, the notes-to-self pinned above the forward list.
+     * Telegram first because its own chat is where files get sent.
+     */
+    val ALL: List<Account> = listOf(TgAccount, SgAccount, WaAccount)
 
     // Indexed loops, not firstOrNull: [ofChat] is on the chat-list and message
     // bind paths, which ask once per row, and an iterator per row is waste.
@@ -163,6 +172,7 @@ private object TgAccount : Account {
     override fun isLinked() = Tg.hasSession()
     override val state get() = Tg.state
     override fun selfId() = Tg.selfId()
+    override fun selfIdBlocking() = Tg.selfIdBlocking()
     override fun myName() = Tg.myName()
     override fun myPhone() = Tg.myPhone()
 

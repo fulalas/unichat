@@ -12,17 +12,15 @@ fun Activity.targetChoices(): Pair<List<String>, List<String>> {
     val ids = ArrayList<String>()
     val labels = ArrayList<String>()
     val chats = Bridge.visibleChats()
-    // Every notes-to-self stays pinned above the chats, in a fixed order —
-    // Telegram, Signal, WhatsApp — rather than by recency: Telegram's is where
-    // files are sent, and ordering these the way everything below is ordered
-    // pushed it under the others on any day it went unused.
+    // Every notes-to-self stays pinned above the chats rather than ordered by
+    // recency: Telegram's is where files are sent, and ordering these the way
+    // everything below is ordered pushed it under the others on any day it went
+    // unused. The order is Accounts.ALL's, so it matches every other place a
+    // protocol is offered.
     // selfIdBlocking, not selfId: both callers are on a worker thread, and a
     // share that started this process gets here before TDLib knows who we are.
-    val selves = listOf(
-        if (Tg.hasSession() && Bridge.protoEnabled(ProtoPicker.TG)) Tg.selfIdBlocking() else "",
-        if (Bridge.protoEnabled(ProtoPicker.SG)) Signal.selfId() else "",
-        if (Bridge.protoEnabled(ProtoPicker.WA)) Bridge.selfId() else "",
-    )
+    val selves = Accounts.active()
+        .map { it.selfIdBlocking() }
         .filter { it.isNotEmpty() }
         .distinct()
     for (self in selves) {
