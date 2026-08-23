@@ -77,12 +77,15 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private lateinit var adapter: MessageAdapter
     private var dragSelect: DragSelectTouchListener? = null
 
+    // GetMultipleContents, not GetContent: the picker let the user tick several
+    // files and then handed only the first one over, so the rest were silently
+    // dropped
     private val pickFile = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.GetContent()
-    ) { uri ->
+        androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
         // a cancelled picker must disarm the hold gesture, or the next ordinary
         // attachment would go out view-once
-        if (uri == null) pickViewOnce = false else onFilePicked(uri)
+        if (uris.isEmpty()) pickViewOnce = false else onFilesPicked(uris)
     }
     private val pickContact = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
@@ -1776,40 +1779,64 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         clearComposeContext()
     }
 
-    private fun onFilePicked(uri: Uri) {
+    private fun onFilesPicked(uris: List<Uri>) {
         val quoted = replyTarget
         val asked = pickViewOnce
         pickViewOnce = false
         clearComposeContext()
-        io.execute {
-            val name = uriDisplayName(uri) ?: "file"
-            val local = copyUriToCache(uri, "attach", name)
-            val mime = contentResolver.getType(uri) ?: ""
-            val kind = when {
-                mime.startsWith("image/") -> "image"
-                mime.startsWith("video/") -> "video"
-                else -> ""
+        // Io.files, not the shared serial worker: a selection of large files is
+        // bulk copying, and on Io.executor it blocks every screen's DB reads
+        // until the last byte is staged.
+        Io.files.execute {
+            val picked = uris.map {
+                PickedFile(it, uriDisplayName(it) ?: "file", contentResolver.getType(it) ?: "")
             }
-            val viewOnce = asked && kind.isNotEmpty() && Bridge.viewOnceSupported(chatId, kind)
-            runOnUiThread {
-                if (local == null) {
-                    Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
-                    return@runOnUiThread
-                }
-                // A document has no view-once form on either network. Say so and
-                // stop: sending it anyway hands over a permanent copy of the one
-                // thing the user asked to self-destruct, behind a toast that is
-                // easy to miss.
-                if (asked && !viewOnce) {
-                    Toast.makeText(this, R.string.view_once_unsupported, Toast.LENGTH_LONG).show()
-                    Io.files.execute { local.delete() }
-                    return@runOnUiThread
-                }
-                Bridge.sendFile(
-                    chatId, local.absolutePath, name, mime, quoted = quoted, viewOnce = viewOnce
+            // A document has no view-once form on either network. Drop it and say
+            // so: sending it anyway hands over a permanent copy of the one thing
+            // the user asked to self-destruct, behind a toast that is easy to miss.
+            val (sendable, rejected) = picked.partition {
+                !asked || Bridge.viewOnceSupported(chatId, viewOnceKind(it.mime))
+            }
+            var sent = 0
+            var quote = quoted
+            for ((index, file) in sendable.withIndex()) {
+                val (uri, name, mime) = file
+                // the index keeps two files picked in the same millisecond from
+                // sharing one staging name
+                val local = copyUriToCache(uri, "attach", "${index}_$name") ?: continue
+                sent++
+                // the quote rides the first file that actually goes out, not the
+                // first one picked: the reply was lost outright when that one was
+                // dropped as unsupported or failed to stage
+                Bridge.sendFileInOrder(
+                    chatId, local.absolutePath, name, mime, quoted = quote, viewOnce = asked
                 )
+                quote = null
+            }
+            runOnUiThread {
+                if (rejected.isNotEmpty()) {
+                    Toast.makeText(this, R.string.view_once_unsupported, Toast.LENGTH_LONG).show()
+                }
+                when {
+                    sendable.isEmpty() -> {}
+                    sent == 0 -> Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
+                    // a partial staging failure was invisible: the user saw
+                    // nothing and never learned some files were left behind
+                    sent < sendable.size -> Toast.makeText(
+                        this, getString(R.string.attach_partial, sent, sendable.size),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             }
         }
+    }
+
+    private data class PickedFile(val uri: Uri, val name: String, val mime: String)
+
+    private fun viewOnceKind(mime: String): String = when {
+        mime.startsWith("image/") -> "image"
+        mime.startsWith("video/") -> "video"
+        else -> ""
     }
 
     private fun startRecording(viewOnce: Boolean = false) {

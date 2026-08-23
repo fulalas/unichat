@@ -828,45 +828,63 @@ object Bridge : EventListener {
     private fun quoteArgs(q: MessageRow?): Triple<String, String, String> =
         Triple(q?.id ?: "", q?.let { quotedPreview(it) } ?: "", q?.senderId ?: "")
 
-    private fun sendMedia(kind: String, chatId: String, filePath: String, send: (Protocol) -> Boolean) =
-        mediaExecutor.execute {
-            val p = proto(chatId)
-            if (!send(p)) onSendFailed(kind, chatId)
-            // Only ever inside cacheDir — forwards re-send straight from the
-            // permanent media dir, which must survive.
-            if (p.consumesStagingInput && isStagingPath(filePath)) java.io.File(filePath).delete()
-        }
-
-    fun sendImage(
-        chatId: String, filePath: String, caption: String, quoted: MessageRow? = null,
-        viewOnce: Boolean = false,
-    ) = sendMedia("image", chatId, filePath) {
-        it.sendImage(chatId, filePath, caption, quoted, viewOnce)
-    }
-
-    fun sendVideo(
-        chatId: String, filePath: String, caption: String, quoted: MessageRow? = null,
-        viewOnce: Boolean = false,
-    ) = sendMedia("video", chatId, filePath) {
-        it.sendVideo(chatId, filePath, caption, quoted, viewOnce)
+    private fun sendMediaBlocking(
+        kind: String, chatId: String, filePath: String, send: (Protocol) -> Boolean,
+    ) {
+        val p = proto(chatId)
+        if (!send(p)) onSendFailed(kind, chatId)
+        // Only ever inside cacheDir — forwards re-send straight from the
+        // permanent media dir, which must survive.
+        if (p.consumesStagingInput && isStagingPath(filePath)) java.io.File(filePath).delete()
     }
 
     fun sendAudio(
         chatId: String, filePath: String, durationSeconds: Int,
         quoted: MessageRow? = null, waveform: ByteArray = ByteArray(0),
         viewOnce: Boolean = false,
-    ) = sendMedia("audio", chatId, filePath) {
-        it.sendAudio(chatId, filePath, durationSeconds, quoted, waveform, viewOnce)
+    ) = mediaExecutor.execute {
+        sendMediaBlocking("audio", chatId, filePath) {
+            it.sendAudio(chatId, filePath, durationSeconds, quoted, waveform, viewOnce)
+        }
     }
 
     fun sendFile(
         chatId: String, filePath: String, fileName: String, mimeType: String,
         caption: String = "", quoted: MessageRow? = null, viewOnce: Boolean = false,
+    ) = mediaExecutor.execute {
+        sendFileBlocking(chatId, filePath, fileName, mimeType, caption, quoted, viewOnce)
+    }
+
+    /**
+     * One file of a batch picked together, sent to completion before the next
+     * one starts. On [batchExecutor], not mediaExecutor's two workers, where a
+     * small file overtook the larger one picked before it and the attachments
+     * arrived shuffled.
+     */
+    fun sendFileInOrder(
+        chatId: String, filePath: String, fileName: String, mimeType: String,
+        quoted: MessageRow? = null, viewOnce: Boolean = false,
+    ) = batchExecutor.execute {
+        sendFileBlocking(chatId, filePath, fileName, mimeType, "", quoted, viewOnce)
+    }
+
+    private fun sendFileBlocking(
+        chatId: String, filePath: String, fileName: String, mimeType: String,
+        caption: String, quoted: MessageRow?, viewOnce: Boolean,
     ) {
         when {
-            mimeType.startsWith("image/") -> sendImage(chatId, filePath, caption, quoted, viewOnce)
-            mimeType.startsWith("video/") -> sendVideo(chatId, filePath, caption, quoted, viewOnce)
-            else -> sendDocument(chatId, filePath, fileName, mimeType, quoted)
+            mimeType.startsWith("image/") ->
+                sendMediaBlocking("image", chatId, filePath) {
+                    it.sendImage(chatId, filePath, caption, quoted, viewOnce)
+                }
+            mimeType.startsWith("video/") ->
+                sendMediaBlocking("video", chatId, filePath) {
+                    it.sendVideo(chatId, filePath, caption, quoted, viewOnce)
+                }
+            else ->
+                sendMediaBlocking("document", chatId, filePath) {
+                    it.sendDocument(chatId, filePath, fileName, mimeType, quoted)
+                }
         }
     }
 
@@ -893,12 +911,6 @@ object Bridge : EventListener {
     /** Who reacted to a message, and with what. Blocking; worker threads only. */
     fun reactionsOf(msg: MessageRow): List<Pair<String, String>> =
         proto(msg.chatId).reactionSenders(msg) ?: db.reactionsOf(msg.chatId, msg.id)
-
-    fun sendDocument(
-        chatId: String, filePath: String, fileName: String, mimeType: String, quoted: MessageRow? = null,
-    ) = sendMedia("document", chatId, filePath) {
-        it.sendDocument(chatId, filePath, fileName, mimeType, quoted)
-    }
 
     // A failed media send is otherwise invisible outside logcat (the share
     // flow has already finished by the time the upload runs); surface it.
@@ -947,16 +959,18 @@ object Bridge : EventListener {
         if (!proto(chatId).sendContact(chatId, name, numbers)) onSendFailed("contact", chatId)
     }
 
-    // A dedicated single thread for forwarding a batch: each message (media
-    // included — its upload finishes) is sent to completion before the next
-    // starts, so a multi-select forward arrives in the same order it was sent.
-    // Off the shared executor/mediaExecutor so a slow upload never stalls live
-    // sending or receiving.
-    private val forwardExecutor = Executors.newSingleThreadExecutor()
+    // A dedicated single thread for sending a batch (a multi-select forward, a
+    // multi-file attachment): each message (media included — its upload
+    // finishes) is sent to completion before the next starts, so the batch
+    // arrives in the same order it was sent. Off the shared
+    // executor/mediaExecutor so a slow upload never stalls live sending or
+    // receiving — nor the media downloads and avatar fetches that share
+    // mediaExecutor's two workers.
+    private val batchExecutor = Executors.newSingleThreadExecutor()
 
     fun forwardMessages(
         targetChatIds: List<String>, messages: List<MessageRow>, onDone: (Boolean) -> Unit,
-    ) = forwardExecutor.execute {
+    ) = batchExecutor.execute {
         var sent = false
         for (target in targetChatIds) {
             for (m in messages) if (forwardOneBlocking(target, m)) sent = true

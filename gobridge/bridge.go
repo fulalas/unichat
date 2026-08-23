@@ -2304,7 +2304,30 @@ func handleReceipt(c *conn, receipt *events.Receipt) {
 	}
 }
 
-const initialSyncMessageCap = 20
+// historyPage measures one conversation's page as the history walk sees it:
+// how many entries the phone sent, and the key of the oldest of them. Counted
+// off the raw key, so an entry this app cannot parse or display still counts —
+// a page of nothing but stubs looked empty, and the walk read that as the end
+// of the history and left everything older unfetched forever.
+func historyPage(msgs []*waHistorySync.HistorySyncMsg) (size int, oldestId string, oldestTime int64, oldestFromMe bool) {
+	for _, syncMessage := range msgs {
+		webMessageInfo := syncMessage.Message
+		id := webMessageInfo.GetKey().GetID()
+		if id == "" {
+			continue // cannot anchor the next page: the app reads "" as exhausted
+		}
+		size++
+		// <=, not <: whatsapp timestamps are second-resolution, so a page
+		// routinely ends on several entries sharing the oldest second, and
+		// anchoring on the first of them makes the next page re-deliver that
+		// same second instead of moving past it
+		t := int64(webMessageInfo.GetMessageTimestamp())
+		if oldestId == "" || t <= oldestTime {
+			oldestId, oldestTime, oldestFromMe = id, t, webMessageInfo.GetKey().GetFromMe()
+		}
+	}
+	return
+}
 
 func handleHistorySync(c *conn, historySync *events.HistorySync) {
 	client := c.getClient()
@@ -2338,6 +2361,8 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 			played    bool
 			reactions []*waWeb.Reaction
 		}
+		pageSize, oldestId, oldestTime, oldestFromMe := historyPage(conversation.GetMessages())
+
 		var parsed []parsedMsg
 		for _, syncMessage := range conversation.GetMessages() {
 			webMessageInfo := syncMessage.Message
@@ -2356,9 +2381,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 		sort.SliceStable(parsed, func(i, j int) bool {
 			return parsed[i].info.Timestamp.After(parsed[j].info.Timestamp)
 		})
-		if !onDemand && len(parsed) > initialSyncMessageCap {
-			parsed = parsed[:initialSyncMessageCap]
-		}
 
 		convChatId := getChatId(client, &chatJid, nil)
 		forExport := onDemand && c.exportRouted(convChatId)
@@ -2372,12 +2394,7 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 			}
 			answeredPending = true
 			c.clearPendingActive()
-			oldestId, oldestTime, oldestFromMe := "", int64(0), false
-			if len(parsed) > 0 {
-				oldest := parsed[len(parsed)-1].info
-				oldestId, oldestTime, oldestFromMe = oldest.ID, oldest.Timestamp.Unix(), oldest.IsFromMe
-			}
-			c.listener.OnChatHistoryDelivered(convChatId, len(parsed), forExport,
+			c.listener.OnChatHistoryDelivered(convChatId, pageSize, forExport,
 				oldestId, oldestTime, oldestFromMe)
 		}
 		if forExport {

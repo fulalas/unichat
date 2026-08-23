@@ -267,6 +267,7 @@
     <string name="sync_failed">Sync failed — check your connection</string>
     <string name="share_failed">Could not read the shared file</string>
     <string name="share_partial">Sending to %1$d of %2$d chats — the rest couldn\'t be prepared</string>
+    <string name="attach_partial">Sending %1$d of %2$d files — the rest couldn\'t be read</string>
     <string name="send_failed">Send failed</string>
     <string name="service_notification">Connected</string>
     <string name="about">About</string>
