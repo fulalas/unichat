@@ -11,8 +11,10 @@ object ProtoPicker {
     const val TG = "tg"
     const val SG = "sg"
 
-    fun pick(ctx: Context, onPick: (String) -> Unit) =
-        pickFrom(ctx, Accounts.active().map { it.proto }, onPick)
+    /** Linked and switched on, as protocol keys. */
+    fun active(): List<String> = Accounts.active().map { it.proto }
+
+    fun pick(ctx: Context, onPick: (String) -> Unit) = pickFrom(ctx, active(), onPick)
 
     fun pickFrom(ctx: Context, options: List<String>, onPick: (String) -> Unit) {
         when (options.size) {

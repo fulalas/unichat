@@ -516,16 +516,49 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
 
     private fun showChatOptions(chat: ChatRow) {
         val muteLabel = getString(if (chat.muted) R.string.unmute_chat else R.string.mute_chat)
-        val items = arrayOf(muteLabel, getString(R.string.delete_chat))
+        val items = arrayOf(
+            muteLabel, getString(R.string.open_on_other_account), getString(R.string.delete_chat)
+        )
         AlertDialog.Builder(this)
             .setTitle(R.string.chat_options_title)
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> Bridge.setMuted(chat.id, !chat.muted)
-                    1 -> showDeleteChatDialog(chat)
+                    1 -> openOnOtherAccount(chat)
+                    2 -> showDeleteChatDialog(chat)
                 }
             }
             .show()
+    }
+
+    /**
+     * Opens the same person on a different account, by their number.
+     *
+     * Only the address book is scanned for who else is on a network, and only at
+     * startup — so someone reachable on one protocol could not be reached on
+     * another even when the account knew their number. This asks the chosen
+     * network about that one number, there and then.
+     */
+    private fun openOnOtherAccount(chat: ChatRow) {
+        if (chat.isGroup) {
+            Toast.makeText(this, R.string.no_number_for_chat, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val own = Accounts.ofChat(chat.id).proto
+        val digits = Bridge.db.contactPhone(chat.id).ifEmpty {
+            if (isPhoneId(chat.id)) chat.id.substringBefore('@') else ""
+        }
+        if (digits.isEmpty()) {
+            Toast.makeText(this, R.string.no_number_for_chat, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val others = ProtoPicker.active().filter { it != own }
+        ProtoPicker.pickFrom(this, others) { proto ->
+            resolveNumberThenOpen(Accounts.of(proto), "+" + digits.removePrefix("+")) { id ->
+                Bridge.rememberContact(id, chat.name)
+                openChat(id, chat.name)
+            }
+        }
     }
 
     private fun showDeleteChatDialog(chat: ChatRow) {
