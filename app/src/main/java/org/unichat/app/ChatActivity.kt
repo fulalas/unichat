@@ -1458,14 +1458,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun showChatMenu(anchor: android.view.View) {
         val popup = android.widget.PopupMenu(this, anchor)
-        // Neither is offered for Signal: a newly registered account has no
-        // history to sync, and export is not implemented — offering it walked
-        // the user through the save dialog only to write an empty file and
-        // report failure.
-        if (!Signal.isSgId(chatId)) {
-            popup.menu.add(0, 1, 0, R.string.sync_all)
-            popup.menu.add(0, 2, 1, R.string.export_chat)
-        }
+        // No "sync all" for Signal: there is no server-side history to walk,
+        // so the only messages that exist are the ones already here. Export
+        // works from those, so it is offered for every protocol — a menu with
+        // nothing in it just looked broken.
+        if (!Signal.isSgId(chatId)) popup.menu.add(0, 1, 0, R.string.sync_all)
+        popup.menu.add(0, 2, 1, R.string.export_chat)
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> {

@@ -336,7 +336,33 @@ object Bridge : EventListener {
         // as a live export sitting at zero messages, so every Signal chat opened
         // with "Exporting… 0 messages fetched" under its title.
         override fun syncAllProgress(chatId: String) = -1
-        override fun exportChat(chatId: String, uri: android.net.Uri) = false
+        // Straight from the local store, unlike the other two: Signal keeps no
+        // server-side history to walk, so what has been received is all of it.
+        override fun exportChat(chatId: String, uri: android.net.Uri): Boolean {
+            val ctx = appContext ?: return false
+            mediaExecutor.execute {
+                var messages = 0
+                // Throwable, not Exception: the whole history goes through one
+                // list, so OutOfMemoryError is the likeliest failure and an
+                // Error would otherwise leave the UI waiting for a completion
+                // that never comes.
+                val success = try {
+                    val sorted = db.messages(chatId, Int.MAX_VALUE).sortedBy { it.timeSent }
+                    messages = sorted.size
+                    ChatExporter.write(ctx, db, chatId, uri, sorted)
+                    true
+                } catch (e: Throwable) {
+                    Log.w(TAG, "signal export write failed: $e")
+                    false
+                }
+                releaseExportUri(uri)
+                notifyUi { it.onChatExportDone(chatId, messages, true, success) }
+            }
+            return true
+        }
+
+        // Nothing to report: the export above is a local read, so it is done by
+        // the time anything could ask.
         override fun exportProgress(chatId: String) = -1
 
         override fun startDownload(msg: MessageRow) = Signal.startDownload(msg)
