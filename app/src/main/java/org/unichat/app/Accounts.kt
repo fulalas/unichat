@@ -22,24 +22,17 @@ interface Account {
     val labelRes: Int
     val accentRes: Int
 
-    /** Theme overlay for this protocol's screens, or null when the base theme
-     *  is already its colour. */
+    /** Null when the base theme is already this protocol's colour. */
     val themeOverlayRes: Int?
 
     fun isLinked(): Boolean
-
-    /** "connected", "connecting", "disconnected" or "logged_out", as the
-     *  protocol last reported through UiListener.onAccountState. */
     val state: String
-
     fun selfId(): String
     fun myName(): String
 
-    /** The account's own number, as the user should read it. Empty when the
-     *  protocol does not tell us. */
+    /** Empty when the protocol does not tell us the number. */
     fun myPhone(): String
 
-    /** Where the user links this account. */
     fun setupIntent(ctx: Context): Intent
 
     /** The Manage accounts pause: off the network, but still linked. */
@@ -58,12 +51,11 @@ interface Account {
 }
 
 object Accounts {
-    /** Every protocol the app speaks, linked or not, in the order the UI lists
-     *  them. WhatsApp last would break [ofChat]'s fallback. */
+    /** Every protocol the app speaks, linked or not, in the order the UI lists them. */
     val ALL: List<Account> = listOf(WaAccount, TgAccount, SgAccount)
 
-    // Indexed loops, not firstOrNull: both are on the chat-list and message
-    // bind paths, which ask once per row.
+    // Indexed loops, not firstOrNull: [ofChat] is on the chat-list and message
+    // bind paths, which ask once per row, and an iterator per row is waste.
     fun of(proto: String): Account {
         for (i in ALL.indices) if (ALL[i].proto == proto) return ALL[i]
         return WaAccount
@@ -136,21 +128,20 @@ private object TgAccount : Account {
     override fun setNetworkEnabled(enabled: Boolean) = Tg.setNetworkEnabled(enabled)
     override fun logout() = Tg.logout()
 
-    // Every TDLib call blocks on its own thread and answers on the main one.
-    override fun fetchAbout(onResult: (String) -> Unit) = Bridge.onTg({ Tg.fetchMyAbout() }, onResult)
+    override fun fetchAbout(onResult: (String) -> Unit) = Tg.async({ Tg.fetchMyAbout() }, onResult)
     override fun setMyName(name: String, onResult: (Boolean) -> Unit) =
-        Bridge.onTg({ Tg.setMyName(name) }, onResult)
+        Tg.async({ Tg.setMyName(name) }, onResult)
     override fun setAbout(text: String, onResult: (Boolean) -> Unit) =
-        Bridge.onTg({ Tg.setAbout(text) }, onResult)
+        Tg.async({ Tg.setAbout(text) }, onResult)
 
     override val supportsProfilePicture = true
     override fun setProfilePicture(jpegPath: String, onResult: (Boolean) -> Unit) =
-        Bridge.onTg({ Tg.setProfilePicture(jpegPath) }, onResult)
+        Tg.async({ Tg.setProfilePicture(jpegPath) }, onResult)
 
     override fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit) =
-        Bridge.onTg({ Tg.fetchPrivacySettings() }, onResult)
+        Tg.async({ Tg.fetchPrivacySettings() }, onResult)
     override fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit) =
-        Bridge.onTg({ Tg.setPrivacySetting(name, value) }, onResult)
+        Tg.async({ Tg.setPrivacySetting(name, value) }, onResult)
 }
 
 private object SgAccount : Account {

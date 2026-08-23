@@ -35,16 +35,13 @@ type sgConn struct {
 	client    *signalmeow.Client
 	device    *sgstore.Device
 	container *sgstore.Container
-	// The same handle Container wraps, kept so a caller can put many store
-	// writes in one transaction. Container's own field is private.
-	db *dbutil.Database
 	// Held so logout can close it: Container exposes no Close, and the caller
 	// deletes the whole directory straight afterwards.
-	sql *sql.DB
-	listener  EventListener
-	path      string
-	state     string
-	cancel    context.CancelFunc
+	sql      *sql.DB
+	listener EventListener
+	path     string
+	state    string
+	cancel   context.CancelFunc
 	// Names already pushed to the listener. The storage-service sync covers
 	// saved contacts, but anyone else — and every group — is resolved lazily
 	// from the first message they send, which must not refetch on every later one.
@@ -106,12 +103,6 @@ func sgActive() (*sgConn, *signalmeow.Client, *sgstore.Device) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c, c.client, c.device
-}
-
-func (c *sgConn) dbHandle() *dbutil.Database {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.db
 }
 
 func sgGet() *sgConn {
@@ -184,7 +175,6 @@ func SignalInit(dataDir string, listener EventListener) bool {
 		return false
 	}
 	c.sql = db
-	c.db = rawDB
 	container := sgstore.NewStore(rawDB, dbutil.ZeroLogger(c.logger()))
 	if err := container.Upgrade(ctx); err != nil {
 		c.log(LogError, "store upgrade error "+err.Error())
@@ -348,7 +338,7 @@ func SignalLogout() {
 	c.device, c.client = nil, nil
 	c.known = make(map[string]bool)
 	handle := c.sql
-	c.container, c.sql, c.db = nil, nil, nil
+	c.container, c.sql = nil, nil
 	c.mu.Unlock()
 	c.setState("logged_out")
 
@@ -758,8 +748,8 @@ func SignalRegisterSubmitCode(number string, code string) string {
 //
 // numbers is comma-separated E.164 without the leading '+'. Blocking.
 func SignalDiscoverContacts(numbers string) string {
-	c, client, _ := sgActive()
-	if client == nil {
+	c, client, device := sgActive()
+	if client == nil || device == nil {
 		return sgErrNotRegistered
 	}
 
@@ -797,7 +787,7 @@ func SignalDiscoverContacts(numbers string) string {
 	selfID := SignalSelfID()
 	found := 0
 	type sgHit struct{ id, phone string }
-	var hits []sgHit
+	hits := make([]sgHit, 0, len(resp))
 
 	// One transaction for the whole address book. A phone with a thousand
 	// contacts meant a thousand separate sqlite commits, each one an fsync.
@@ -834,18 +824,18 @@ func SignalDiscoverContacts(numbers string) string {
 		}
 		return nil
 	}
-	if db := c.dbHandle(); db != nil {
-		if err := db.DoTxn(ctx, nil, store); err != nil {
-			return sgUpstream(err)
-		}
-	} else if err := store(ctx); err != nil {
+	// signalmeow's own helper, not a bare DoTxn: it takes the same contact lock
+	// every other batch write to the recipient table takes.
+	if err := device.DoContactTxn(ctx, store); err != nil {
 		return sgUpstream(err)
 	}
 
+	c.mu.Lock()
 	for _, hit := range hits {
-		c.mu.Lock()
 		c.known[hit.id] = true
-		c.mu.Unlock()
+	}
+	c.mu.Unlock()
+	for _, hit := range hits {
 		// Name is left empty: the address book already has one for this number,
 		// and the app prefers its own contact name over anything a service
 		// reports. Sending a blank one here would overwrite it.
@@ -1216,7 +1206,6 @@ func SignalRestoreFromPIN(pin string) string {
 	if client == nil || device == nil {
 		return sgErrNotRegistered
 	}
-	_ = c
 
 	ctx := context.TODO()
 	candidates, err := client.RestoreMasterKeyFromSVR2(ctx, pin)

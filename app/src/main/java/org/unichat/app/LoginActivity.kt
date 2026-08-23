@@ -36,13 +36,9 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             Intent(ctx, LoginActivity::class.java).putExtra(EXTRA_PROTO, proto)
     }
 
-    // The protocols this screen links itself. Anything else is sent to its own
-    // setup activity when its tab is tapped.
-    private val panelIds = mapOf(
-        ProtoPicker.WA to R.id.waPanel,
-        ProtoPicker.TG to R.id.tgPanel,
-    )
-
+    // The protocols this screen links itself, resolved once. Anything else is
+    // sent to its own setup activity when its tab is tapped.
+    private val panels = LinkedHashMap<String, View>()
     private val tabs = LinkedHashMap<String, Button>()
 
     private lateinit var tabRow: LinearLayout
@@ -102,12 +98,17 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         }
 
         Accounts.ALL.filterNot { it.isLinked() }.forEach { pending.add(it.proto) }
+        panels[ProtoPicker.WA] = findViewById(R.id.waPanel)
+        panels[ProtoPicker.TG] = findViewById(R.id.tgPanel)
         buildTabs()
         wireWhatsApp()
         wireTelegram()
 
         Bridge.addListener(this)
-        continueButton.visibility = if (Bridge.hasAnySession()) View.VISIBLE else View.GONE
+        // Anything already linked is one this screen has nothing left to do
+        // for, so there are chats to open.
+        continueButton.visibility =
+            if (pending.size < Accounts.ALL.size) View.VISIBLE else View.GONE
         select(requestedProto())
     }
 
@@ -116,42 +117,46 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         // A protocol set up on its own screen — Signal — comes back linked with
         // no event this screen listens for, so the just-linked step would never
         // run and the first run was left on the QR with no way to the chat list.
-        val elsewhere = pending.firstOrNull { Accounts.of(it).isLinked() } ?: return
-        pending.remove(elsewhere)
-        onLinked(elsewhere)
+        pending.firstOrNull { Accounts.of(it).isLinked() }?.let { claimLinked(it) }
+    }
+
+    /** The one place [pending] shrinks: each protocol reports a link its own
+     *  way, and every one of them lands here. */
+    private fun claimLinked(proto: String) {
+        if (pending.remove(proto)) onLinked(proto)
     }
 
     /** The protocol the caller asked for, or the first one still needing a
      *  link. Only ever one this screen has a panel for. */
     private fun requestedProto(): String {
         val asked = intent.getStringExtra(EXTRA_PROTO)
-        if (asked != null && asked in panelIds && asked in pending) return asked
-        return pending.firstOrNull { it in panelIds } ?: ProtoPicker.WA
+        if (asked != null && asked in panels && asked in pending) return asked
+        return pending.firstOrNull { it in panels } ?: ProtoPicker.WA
     }
 
+    // From [pending], which already knows what is unlinked, rather than asking
+    // every account again — each answer is a bridge call or a prefs read.
     private fun buildTabs() {
         val inflater = LayoutInflater.from(this)
         tabRow.removeAllViews()
         tabs.clear()
-        for (account in Accounts.ALL) {
-            if (account.isLinked()) continue
+        for (proto in pending) {
             val tab = inflater.inflate(R.layout.item_login_tab, tabRow, false) as Button
-            tab.text = getString(account.labelRes)
-            tab.setOnClickListener { select(account.proto) }
+            tab.text = ProtoPicker.label(this, proto)
+            tab.setOnClickListener { select(proto) }
             tabRow.addView(tab)
-            tabs[account.proto] = tab
+            tabs[proto] = tab
         }
     }
 
     private fun select(proto: String) {
-        val panel = panelIds[proto]
-        if (panel == null) {
+        if (proto !in panels) {
             startActivity(Accounts.of(proto).setupIntent(this))
             return
         }
         showing = proto
-        for ((p, id) in panelIds) {
-            findViewById<View>(id).visibility = if (p == proto) View.VISIBLE else View.GONE
+        for ((p, panel) in panels) {
+            panel.visibility = if (p == proto) View.VISIBLE else View.GONE
         }
         for ((p, tab) in tabs) {
             val selected = p == proto
@@ -163,21 +168,18 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         // The QR socket is a live connection to WhatsApp; open it only once the
         // panel that shows the code is actually on screen. Linking Telegram
         // used to open it too, for a QR nobody was looking at.
-        if (proto == ProtoPicker.WA && !Bridge.hasSession() && !qrStarted) {
+        if (proto == ProtoPicker.WA && proto in pending && !qrStarted) {
             qrStarted = true
             Bridge.startQrLogin()
         }
-        statusText.text = statusFor(proto)
+        statusText.text =
+            if (proto == ProtoPicker.TG) tgStatusForState(Tg.authState)
+            else getString(R.string.login_waiting)
         // renderStep, not the "ready" path: switching to this tab with Telegram
         // already linked used to re-enter the just-linked flow, bouncing back to
         // the WhatsApp tab or finishing the screen. Linking is an event, not
         // something a tab tap replays.
         if (proto == ProtoPicker.TG) renderStep(currentTgUiState())
-    }
-
-    private fun statusFor(proto: String): String = when (proto) {
-        ProtoPicker.TG -> tgStatusForState(Tg.authState)
-        else -> getString(R.string.login_waiting)
     }
 
     private fun wireWhatsApp() {
@@ -231,7 +233,7 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
     private fun onLinked(proto: String) {
         WmService.start(this)
         buildTabs()
-        val next = pending.firstOrNull { it in panelIds }
+        val next = pending.firstOrNull { it in panels }
         if (next == null || !isTaskRoot) {
             goToMain()
             return
@@ -325,7 +327,7 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         // Telegram connects before it is authorised, so a live socket says
         // nothing about the link; this is the only signal that it is done.
         if (state == "ready") {
-            if (pending.remove(ProtoPicker.TG)) onLinked(ProtoPicker.TG)
+            claimLinked(ProtoPicker.TG)
             return
         }
         renderStep(state)
@@ -363,7 +365,7 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         // WhatsApp only ever reports "connected" with a session in hand, so for
         // it that is the link signal.
         if (proto == ProtoPicker.WA && state == "connected") {
-            if (pending.remove(proto)) onLinked(proto)
+            claimLinked(proto)
             return
         }
         // Only the WhatsApp panel takes its status from the connection. Telegram

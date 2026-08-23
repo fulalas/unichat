@@ -310,15 +310,30 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun updateSubtitle() {
-        // Only accounts that are switched on: a paused one never connects, and
-        // counting it kept the subtitle at "disconnected" for good.
-        val states = ProtoPicker.active().map { Accounts.of(it).state }
+        // One pass, no intermediate lists: this runs on every state event and
+        // once per history-sync batch, and each isLinked() is a bridge call.
+        // Only accounts that are switched on count — a paused one never
+        // connects, and counting it kept the subtitle at "disconnected" for good.
+        var active = 0
+        var connected = 0
+        var connecting = 0
+        var waLinked = false
+        for (account in Accounts.ALL) {
+            if (!account.isLinked()) continue
+            if (account.proto == ProtoPicker.WA) waLinked = true
+            if (!Bridge.protoEnabled(account.proto)) continue
+            active++
+            when (account.state) {
+                "connected" -> connected++
+                "connecting" -> connecting++
+            }
+        }
         supportActionBar?.subtitle = when {
-            states.isEmpty() -> getString(R.string.state_disconnected)
-            states.all { it == "connected" } && Bridge.hasSession() && Bridge.syncProgress in 0..99 ->
+            active == 0 -> getString(R.string.state_disconnected)
+            connected == active && waLinked && Bridge.syncProgress in 0..99 ->
                 getString(R.string.state_syncing, Bridge.syncProgress)
-            states.all { it == "connected" } -> getString(R.string.state_connected)
-            states.any { it == "connecting" } -> getString(R.string.state_connecting)
+            connected == active -> getString(R.string.state_connected)
+            connecting > 0 -> getString(R.string.state_connecting)
             else -> getString(R.string.state_disconnected)
         }
     }

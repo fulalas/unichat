@@ -62,6 +62,12 @@ object Tg {
      */
     val io: java.util.concurrent.ExecutorService = Executors.newSingleThreadExecutor()
 
+    /** Runs a blocking TDLib call on [io] and answers on the main thread. */
+    internal fun <T> async(work: () -> T, onResult: (T) -> Unit) = io.execute {
+        val result = work()
+        Bridge.runOnUi { onResult(result) }
+    }
+
     private val pending = ConcurrentHashMap<Long, Pair<CountDownLatch, Array<JSONObject?>>>()
     private val nextExtra = AtomicLong(1)
 
@@ -725,7 +731,7 @@ object Tg {
         Bridge.ingestMessage(
             row,
             notify = notify,
-            fetchMedia = notify && !row.fromMe && !row.isRead && row.filePath.isEmpty(),
+            fetchMedia = notify && !row.fromMe && !row.isRead,
             // Telegram bumps even for an edit: an edited message reaches us
             // through the same update as a new one, and skipping the bump left
             // the chat list ordered by whenever it was first seen.

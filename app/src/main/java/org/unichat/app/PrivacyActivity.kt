@@ -17,6 +17,7 @@ class PrivacyActivity : BaseActivity() {
     private val settings = HashMap<String, String>()
     private var loaded = false
     private var proto: String = ProtoPicker.WA
+    private val account get() = Accounts.of(proto)
     private val isTg get() = proto == ProtoPicker.TG
     private val isSg get() = proto == ProtoPicker.SG
     private var rendering = false
@@ -107,7 +108,7 @@ class PrivacyActivity : BaseActivity() {
     }
 
     private fun load() {
-        Bridge.fetchPrivacySettings(proto) { map -> onLoaded(map) }
+        account.fetchPrivacySettings { map -> onLoaded(map) }
     }
 
     private fun onLoaded(map: Map<String, String>?) {
@@ -174,7 +175,7 @@ class PrivacyActivity : BaseActivity() {
             onDone?.invoke()
             return
         }
-        Bridge.setPrivacySetting(proto, name, value) { ok -> onApplied(name, value, ok, onDone) }
+        account.setPrivacySetting(name, value) { ok -> onApplied(name, value, ok, onDone) }
     }
 
     private fun onApplied(name: String, value: String, ok: Boolean, onDone: (() -> Unit)?) {

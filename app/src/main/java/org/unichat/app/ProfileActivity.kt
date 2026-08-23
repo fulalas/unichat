@@ -24,6 +24,7 @@ class ProfileActivity : BaseActivity() {
     private val io = Io.executor
     private lateinit var selfId: String
     private var proto: String = ProtoPicker.WA
+    private val account get() = Accounts.of(proto)
     private var name: String = ""
     private var about: String = ""
 
@@ -43,7 +44,7 @@ class ProfileActivity : BaseActivity() {
             setDisplayHomeAsUpEnabled(true)
         }
         if (!Bridge.init(this)) { finish(); return }
-        selfId = Bridge.selfId(proto)
+        selfId = account.selfId()
 
         avatar = findViewById(R.id.avatar)
         valueName = findViewById(R.id.valueName)
@@ -56,14 +57,14 @@ class ProfileActivity : BaseActivity() {
         // Publishing an avatar means encrypting it under the profile key and
         // uploading to the CDN, which is not implemented for Signal — so the
         // picker is not offered rather than silently doing nothing.
-        if (Bridge.supportsProfilePicture(proto)) {
+        if (account.supportsProfilePicture) {
             avatar.setOnClickListener { pickPhoto.launch("image/*") }
         }
         // Same guard as the avatar itself: without it, picking a photo on the
         // Signal screen fell through to the WhatsApp path and replaced the
         // WhatsApp account's picture.
         val editPhoto = findViewById<View>(R.id.editPhoto)
-        if (Bridge.supportsProfilePicture(proto)) {
+        if (account.supportsProfilePicture) {
             editPhoto.setOnClickListener { pickPhoto.launch("image/*") }
         } else {
             editPhoto.visibility = View.GONE
@@ -73,11 +74,11 @@ class ProfileActivity : BaseActivity() {
 
         // the profile name is our push name (shown to everyone), not the
         // locally-saved contact name
-        name = Bridge.myName(proto)
+        name = account.myName()
         valueName.text = name
         // Signal ids are ACIs, not phone JIDs, so each account is asked for its
         // own number rather than it being parsed back out of the id.
-        valuePhone.text = Accounts.of(proto).myPhone()
+        valuePhone.text = account.myPhone()
         loadAvatar()
         loadAbout()
     }
@@ -105,8 +106,8 @@ class ProfileActivity : BaseActivity() {
     }
 
     private fun loadAbout() {
-        Bridge.fetchMyAbout(proto) { text ->
-            if (isFinishing) return@fetchMyAbout
+        account.fetchAbout { text ->
+            if (isFinishing) return@fetchAbout
             about = text
             valueAbout.text = text
         }
@@ -126,7 +127,7 @@ class ProfileActivity : BaseActivity() {
     }
 
     private fun applyName(text: String) {
-        Bridge.setMyName(proto, text) { ok -> onNameApplied(text, ok) }
+        account.setMyName(text) { ok -> onNameApplied(text, ok) }
     }
 
     private fun onNameApplied(text: String, ok: Boolean) {
@@ -166,7 +167,7 @@ class ProfileActivity : BaseActivity() {
     }
 
     private fun applyAbout(text: String) {
-        Bridge.setAbout(proto, text) { ok -> onAboutApplied(text, ok) }
+        account.setAbout(text) { ok -> onAboutApplied(text, ok) }
     }
 
     private fun onAboutApplied(text: String, ok: Boolean) {
@@ -188,7 +189,7 @@ class ProfileActivity : BaseActivity() {
                 }
                 return@execute
             }
-            Bridge.setProfilePicture(proto, file.absolutePath) { ok ->
+            account.setProfilePicture(file.absolutePath) { ok ->
                 // This callback is posted to the MAIN thread by the bridge, so
                 // decode and delete on a worker and only touch views back here.
                 if (!ok) {

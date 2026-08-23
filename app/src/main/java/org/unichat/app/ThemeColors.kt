@@ -11,4 +11,6 @@ fun Context.themeColor(attr: Int): Int {
 
 fun Context.protocolAccentOf(proto: String): Int = getColor(Accounts.of(proto).accentRes)
 
-fun Context.protocolAccent(chatId: String): Int = protocolAccentOf(ProtoPicker.of(chatId))
+// Straight to the account: going through ProtoPicker.of resolved the id to one
+// and then looked the same one up again by name, once per chat row.
+fun Context.protocolAccent(chatId: String): Int = getColor(Accounts.ofChat(chatId).accentRes)

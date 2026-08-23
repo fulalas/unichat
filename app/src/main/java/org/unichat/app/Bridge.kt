@@ -180,7 +180,7 @@ object Bridge : EventListener {
 
     fun hasSession(): Boolean = connId >= 0 && Wmbridge.hasSession(connId)
 
-    fun hasAnySession(): Boolean = hasSession() || Tg.hasSession() || Signal.hasSession()
+    fun hasAnySession(): Boolean = Accounts.ALL.any { it.isLinked() }
 
     private fun isTg(chatId: String) = Tg.isTgId(chatId)
 
@@ -1403,18 +1403,6 @@ object Bridge : EventListener {
         notifyChatsChanged()
     }
 
-    internal fun <T> onTg(work: () -> T, onResult: (T) -> Unit) {
-        Tg.io.execute {
-            val result = work()
-            main.post { onResult(result) }
-        }
-    }
-
-    // These forward to the account behind the protocol; see Accounts.kt.
-    fun myName(proto: String): String = Accounts.of(proto).myName()
-
-    fun selfId(proto: String): String = Accounts.of(proto).selfId()
-
     fun selfIdOf(chatId: String): String = Accounts.ofChat(chatId).selfId()
 
     /** A contact's @lid alias mapped back to their phone JID. Blocking; worker
@@ -1424,27 +1412,6 @@ object Bridge : EventListener {
         if (connId < 0 || isTg(chatId) || !chatId.endsWith("@lid")) return chatId
         return Wmbridge.resolveChatId(connId, chatId).ifEmpty { chatId }
     }
-
-    fun fetchMyAbout(proto: String, onResult: (String) -> Unit) =
-        Accounts.of(proto).fetchAbout(onResult)
-
-    fun setMyName(proto: String, name: String, onResult: (Boolean) -> Unit) =
-        Accounts.of(proto).setMyName(name, onResult)
-
-    fun setAbout(proto: String, text: String, onResult: (Boolean) -> Unit) =
-        Accounts.of(proto).setAbout(text, onResult)
-
-    /** Signal has no avatar upload here yet, so the option is not offered. */
-    fun supportsProfilePicture(proto: String) = Accounts.of(proto).supportsProfilePicture
-
-    fun setProfilePicture(proto: String, jpegPath: String, onResult: (Boolean) -> Unit) =
-        Accounts.of(proto).setProfilePicture(jpegPath, onResult)
-
-    fun fetchPrivacySettings(proto: String, onResult: (Map<String, String>?) -> Unit) =
-        Accounts.of(proto).fetchPrivacySettings(onResult)
-
-    fun setPrivacySetting(proto: String, name: String, value: String, onResult: (Boolean) -> Unit) =
-        Accounts.of(proto).setPrivacySetting(name, value, onResult)
 
     fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit) = executor.execute {
         val raw = Wmbridge.getPrivacySettings(connId)
@@ -1850,11 +1817,11 @@ object Bridge : EventListener {
      * needs right now, and raise that notification.
      *
      * The flags are the things the three protocols genuinely disagree on.
-     * [notify] is false for history backfill. [fetchMedia] is false when the
-     * file is already on this device — Telegram hands one over, and our own
-     * Signal send raced its own local copy. [bump] is false for an edit, which
-     * must not reorder the chat list. [afterStore] writes the columns a shared
-     * MessageRow cannot carry, while the UI has still not been told anything.
+     * [notify] is false for history backfill. [fetchMedia] is false when our
+     * own send already has the file on this device — Signal downloading it back
+     * raced the local copy. [bump] is false for an edit, which must not reorder
+     * the chat list. [afterStore] writes the columns a shared MessageRow cannot
+     * carry, while the UI has still not been told anything.
      */
     internal fun ingestMessage(
         row: MessageRow,
@@ -1869,7 +1836,9 @@ object Bridge : EventListener {
         db.upsertMessage(row)
         afterStore()
         if (bump) db.bumpChat(row.chatId, row.timeSent)
-        if (fetchMedia && row.fileId.isNotEmpty() &&
+        // A row that already carries a path has its bytes: Telegram hands one
+        // over for media it has cached, and fetching again would be pure waste.
+        if (fetchMedia && row.fileId.isNotEmpty() && row.filePath.isEmpty() &&
             (row.msgType in PICTURE_TYPES || row.msgType == "audio")
         ) {
             // downloadFile, not the transport directly: it is what claims the
