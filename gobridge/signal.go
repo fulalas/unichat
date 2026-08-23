@@ -410,6 +410,9 @@ func SignalSyncContacts() bool {
 		return false
 	}
 	client.SyncStorage(ctx)
+	// Now that the account record is in, the account's own row can carry the
+	// name the user actually set rather than their number.
+	c.publishSelfContact()
 	c.listener.OnContactsSynced()
 	return true
 }
@@ -626,10 +629,17 @@ func (c *sgConn) handleEvent(rawEvt events.SignalEvent) bool {
 // sends no chat list on registration, so without this the app knows a name only
 // for people who have already messaged it.
 func (c *sgConn) handleContactList(evt *events.ContactList) {
+	c.mu.Lock()
+	device := c.device
+	c.mu.Unlock()
 	for _, r := range evt.Contacts {
 		if r == nil || r.ACI == uuid.Nil {
 			continue
 		}
+		// The account's own record is in the list too. Reported as an ordinary
+		// contact it cleared the is_self flag, which is what keeps the user out
+		// of their own contact search.
+		isSelf := device != nil && r.ACI == device.ACI
 		name := r.ContactName
 		if name == "" {
 			name = r.Profile.Name
@@ -646,7 +656,7 @@ func (c *sgConn) handleContactList(evt *events.ContactList) {
 		c.mu.Unlock()
 		// Bare digits: the contacts table stores the number without '+', and the
 		// query that reads it adds one back.
-		c.listener.OnContact(id, name, strings.TrimPrefix(r.E164, "+"), false, false, true)
+		c.listener.OnContact(id, name, strings.TrimPrefix(r.E164, "+"), isSelf, false, true)
 	}
 }
 
@@ -987,16 +997,27 @@ func (c *sgConn) publishSelfContact() {
 	if client == nil || device == nil {
 		return
 	}
+	// The account record, first: it is the account's own name as the user set
+	// it, and it survives this app minting a new profile key at registration —
+	// which is exactly what makes the profile fetch below come back nameless.
+	// It only exists after a storage sync, so this is published again once one
+	// has run.
 	name := ""
-	if profile, err := client.RetrieveProfileByID(context.TODO(), device.ACI, time.Hour); err == nil && profile != nil {
-		name = profile.Name
+	if rec := client.Store.AccountRecord; rec != nil {
+		name = strings.TrimSpace(rec.GetGivenName() + " " + rec.GetFamilyName())
+		if name == "" {
+			name = rec.GetUsername()
+		}
 	}
 	if name == "" {
-		// An account that never set a profile name still needs a label.
+		if profile, err := client.RetrieveProfileByID(context.TODO(), device.ACI, time.Hour); err == nil && profile != nil {
+			name = profile.Name
+		}
+	}
+	if name == "" {
+		// A number is a poor label, but it is the account and it is readable —
+		// unlike the bare ACI the row falls back to with nothing at all.
 		name = device.Number
-	}
-	if name == "" {
-		return
 	}
 	c.listener.OnContact(SignalSelfID(), name, strings.TrimPrefix(device.Number, "+"), true, false, true)
 }

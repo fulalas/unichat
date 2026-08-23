@@ -410,7 +410,19 @@ object Signal : EventListener {
         // Discovery reports a number with no name; the address book is what the
         // user actually recognises, so prefer it over an empty label.
         val label = name.ifEmpty { namesByNumber[PhoneBook.digitsOf(phone)].orEmpty() }
-        Bridge.db.upsertContact(id, label, phone, isSelf, isGroup, isSaved)
+        // Never blank out a name already stored: these arrive repeatedly (the
+        // self row on every connect, contacts on every storage sync), and an
+        // empty one would retitle the chat with its bare number or id.
+        val stored = Bridge.db.contactName(id).orEmpty()
+        // Except a "name" that is only the number, which is what an earlier
+        // version wrote for the account's own row. Keeping it would outlive the
+        // bug and block the real profile name from ever landing.
+        val worthKeeping = if (
+            stored.isNotEmpty() && phone.isNotEmpty() &&
+            PhoneBook.digitsOf(stored) == PhoneBook.digitsOf(phone)
+        ) "" else stored
+        val keep = label.ifEmpty { worthKeeping }
+        Bridge.db.upsertContact(id, keep, phone, isSelf, isGroup, isSaved)
         Bridge.notifyChatsChanged()
     }
 
