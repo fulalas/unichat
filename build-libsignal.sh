@@ -34,17 +34,6 @@ TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 # generate — invisibly at first, because a cached boring-sys output makes the
 # build skip bindgen entirely.
 export PATH="$TC/bin:$PATH"
-for CMD in cargo git protoc; do
-    command -v "$CMD" >/dev/null || { echo "libsignal: missing '$CMD'" >&2; exit 1; }
-done
-
-if [ ! -d "$SRC/.git" ]; then
-    git clone --depth 1 --branch "$VERSION" https://github.com/signalapp/libsignal.git "$SRC"
-else
-    git -C "$SRC" fetch --depth 1 origin tag "$VERSION"
-    git -C "$SRC" checkout -q "$VERSION"
-fi
-
 export ANDROID_NDK_HOME="$NDK" ANDROID_NDK_ROOT="$NDK"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/bin/aarch64-linux-android$API-clang"
 export CC_aarch64_linux_android="$TC/bin/aarch64-linux-android$API-clang"
@@ -106,6 +95,20 @@ KEY="$VERSION $RUST_TARGET $(printf '%s|%s|%s' "$RUSTFLAGS" "$CFLAGS_TARGET" \
 if [ -f "$ARCHIVE" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$KEY" ]; then
     echo "== libsignal_ffi up to date @ $VERSION ($ABI) =="
     exit 0
+fi
+
+# Only past the cache check: a correct archive is already here on most builds,
+# and demanding a Rust toolchain (and a network fetch of the source) to hand it
+# back made an APK-only change impossible on a machine without cargo.
+for CMD in cargo git protoc; do
+    command -v "$CMD" >/dev/null || { echo "libsignal: missing '$CMD'" >&2; exit 1; }
+done
+
+if [ ! -d "$SRC/.git" ]; then
+    git clone --depth 1 --branch "$VERSION" https://github.com/signalapp/libsignal.git "$SRC"
+else
+    git -C "$SRC" fetch --depth 1 origin tag "$VERSION"
+    git -C "$SRC" checkout -q "$VERSION"
 fi
 
 echo "== Building libsignal_ffi $VERSION for $ABI (LTO, this takes a few minutes) =="

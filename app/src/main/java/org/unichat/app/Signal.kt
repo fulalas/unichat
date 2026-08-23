@@ -334,11 +334,27 @@ object Signal : EventListener {
         Bridge.runOnUi { onDone(err) }
     }
 
-    fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean =
-        Wmbridge.signalSendTextQuoted(
-            chatId, text,
+    fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean {
+        val (body, styles) = styled(text)
+        return Wmbridge.signalSendTextQuoted(
+            chatId, body, styles,
             quoted?.id.orEmpty(), quoted?.text.orEmpty(), quoted?.senderId.orEmpty()
         ).isNotEmpty()
+    }
+
+    /**
+     * Splits the stored `*bold*` / `_italic_` text into what Signal sends: a
+     * plain body plus the ranges it styles, offsets in UTF-16 units — which is
+     * what a Kotlin string index already is. Sent with the markers still in, the
+     * other side showed them as literal asterisks and underscores.
+     */
+    private fun styled(text: String): Pair<String, String> {
+        val (plain, marks) = Markup.parse(text)
+        val styles = marks.joinToString(";") {
+            "${it.start},${it.end - it.start},${if (it.bold) "b" else "i"}"
+        }
+        return plain to styles
+    }
 
     fun react(msg: MessageRow, emoji: String) =
         ops { Wmbridge.signalReact(msg.chatId, msg.id, msg.senderId, emoji) }
@@ -346,8 +362,10 @@ object Signal : EventListener {
     fun delete(chatId: String, msgId: String) =
         ops { Wmbridge.signalDelete(chatId, msgId) }
 
-    fun edit(chatId: String, msgId: String, newText: String): Boolean =
-        Wmbridge.signalEdit(chatId, msgId, newText)
+    fun edit(chatId: String, msgId: String, newText: String): Boolean {
+        val (body, styles) = styled(newText)
+        return Wmbridge.signalEdit(chatId, msgId, body, styles)
+    }
 
     /**
      * Marks the chat read locally and acks the newest unread message, matching

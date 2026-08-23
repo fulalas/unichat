@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -518,7 +520,7 @@ func SignalLogout() {
 // SignalSendTextQuoted sends text, optionally as a reply. quotedId is the
 // original's timestamp and quotedSender its author, both of which Signal needs
 // to draw the quote on the other end.
-func SignalSendTextQuoted(chatId, text, quotedId, quotedText, quotedSender string) string {
+func SignalSendTextQuoted(chatId, text, styles, quotedId, quotedText, quotedSender string) string {
 	c, client, device := sgActive()
 	if client == nil || device == nil {
 		return ""
@@ -528,9 +530,11 @@ func SignalSendTextQuoted(chatId, text, quotedId, quotedText, quotedSender strin
 	// Signal identifies a message by the timestamp the sender stamped on it;
 	// there is no separate server-assigned id to report back.
 	timestamp := uint64(time.Now().UnixMilli())
+	ranges := sgStyleRanges(styles)
 	dm := &signalpb.DataMessage{
-		Body:      proto.String(text),
-		Timestamp: &timestamp,
+		Body:       proto.String(text),
+		Timestamp:  &timestamp,
+		BodyRanges: ranges,
 	}
 	if quotedId != "" {
 		if qts, err := strconv.ParseUint(quotedId, 10, 64); err == nil {
@@ -548,7 +552,9 @@ func SignalSendTextQuoted(chatId, text, quotedId, quotedText, quotedSender strin
 		return ""
 	}
 	msgID := fmt.Sprintf("%d", timestamp)
-	sgEchoOwn(c, chatId, msgID, text, "", "", int64(timestamp/1000), quotedId, quotedText)
+	// Stored with its markers, or the sender's own bubble would be the only
+	// place the formatting is missing.
+	sgEchoOwn(c, chatId, msgID, sgWithMarkers(text, ranges), "", "", int64(timestamp/1000), quotedId, quotedText)
 	return msgID
 }
 
@@ -723,7 +729,7 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 			c.listener.OnMessageDeleted(chatID, fmt.Sprintf("%d", d.GetTargetSentTimestamp()))
 			return
 		}
-		body := content.GetBody()
+		body := sgWithMarkers(content.GetBody(), content.GetBodyRanges())
 		msgID := fmt.Sprintf("%d", content.GetTimestamp())
 		quotedID, quotedText := "", ""
 		if q := content.GetQuote(); q != nil {
@@ -1054,6 +1060,111 @@ func (c *sgConn) publishSelfContact() {
 	c.listener.OnContact(SignalSelfID(), name, strings.TrimPrefix(device.Number, "+"), true, false, true)
 }
 
+// Signal keeps formatting apart from the text: the body travels plain and a
+// BodyRange marks each styled span, in UTF-16 units. The app stores WhatsApp's
+// `*bold*` / `_italic_` markers in the text itself (see Markup.kt), so the two
+// are translated here at Signal's edge, the way Tg.kt does it for Telegram.
+// Sent without this, the markers reached the other side as literal asterisks
+// and underscores.
+
+// sgStyleRanges reads the spec Kotlin builds from Markup.parse:
+// "start,length,b" runs joined by ';', offsets already in UTF-16 units.
+func sgStyleRanges(spec string) []*signalpb.BodyRange {
+	if spec == "" {
+		return nil
+	}
+	out := make([]*signalpb.BodyRange, 0, 4)
+	for _, part := range strings.Split(spec, ";") {
+		f := strings.Split(part, ",")
+		if len(f) != 3 {
+			continue
+		}
+		start, errS := strconv.ParseUint(f[0], 10, 32)
+		length, errL := strconv.ParseUint(f[1], 10, 32)
+		if errS != nil || errL != nil || length == 0 {
+			continue
+		}
+		style := signalpb.BodyRange_ITALIC
+		if f[2] == "b" {
+			style = signalpb.BodyRange_BOLD
+		}
+		s32, l32 := uint32(start), uint32(length)
+		out = append(out, &signalpb.BodyRange{
+			Start:           &s32,
+			Length:          &l32,
+			AssociatedValue: &signalpb.BodyRange_Style_{Style: style},
+		})
+	}
+	return out
+}
+
+// sgWithMarkers puts the markers back into a body that arrived with its styling
+// apart. Mirrors Markup.withMarkers, including its rule about which runs can be
+// written as markers at all: one that starts inside a word or is padded with
+// spaces would render as literal punctuation rather than styling, so it is left
+// plain instead.
+func sgWithMarkers(body string, ranges []*signalpb.BodyRange) string {
+	if body == "" || len(ranges) == 0 {
+		return body
+	}
+	// UTF-16 throughout, because that is what the offsets count.
+	units := utf16.Encode([]rune(body))
+	at := make([][]rune, len(units)+1)
+	used := false
+	for _, r := range ranges {
+		style, ok := r.GetAssociatedValue().(*signalpb.BodyRange_Style_)
+		if !ok {
+			continue
+		}
+		marker := '_'
+		switch style.Style {
+		case signalpb.BodyRange_BOLD:
+			marker = '*'
+		case signalpb.BodyRange_ITALIC:
+			marker = '_'
+		default:
+			// Spoiler, strikethrough and monospace have no marker the app
+			// stores, so the text stays plain rather than gaining a stray one.
+			continue
+		}
+		start, end := int(r.GetStart()), int(r.GetStart()+r.GetLength())
+		if start < 0 || end > len(units) || end <= start {
+			continue
+		}
+		if isSpaceUnit(units[start]) || isSpaceUnit(units[end-1]) {
+			continue
+		}
+		if start > 0 && isWordUnit(units[start-1]) {
+			continue
+		}
+		if end < len(units) && isWordUnit(units[end]) {
+			continue
+		}
+		at[start] = append(at[start], marker)
+		// A run ending where another does must close from the inside out.
+		at[end] = append([]rune{marker}, at[end]...)
+		used = true
+	}
+	if !used {
+		return body
+	}
+	out := make([]uint16, 0, len(units)+8)
+	for i := 0; i <= len(units); i++ {
+		out = append(out, utf16.Encode(at[i])...)
+		if i < len(units) {
+			out = append(out, units[i])
+		}
+	}
+	return string(utf16.Decode(out))
+}
+
+func isSpaceUnit(u uint16) bool { return unicode.IsSpace(rune(u)) }
+
+func isWordUnit(u uint16) bool {
+	r := rune(u)
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
 // sgEchoOwn writes a message we just sent into the app's own store.
 //
 // Signal never delivers a message back to the device that sent it — the sync
@@ -1288,7 +1399,7 @@ func SignalDelete(chatId string, msgId string) {
 
 // SignalEdit replaces the text of a message we sent. Signal keys the edit by
 // the original's timestamp and carries a fresh one for the edit itself.
-func SignalEdit(chatId string, msgId string, newText string) bool {
+func SignalEdit(chatId string, msgId string, newText string, styles string) bool {
 	c, client, _ := sgActive()
 	if client == nil {
 		return false
@@ -1298,11 +1409,13 @@ func SignalEdit(chatId string, msgId string, newText string) bool {
 		return false
 	}
 	now := uint64(time.Now().UnixMilli())
+	ranges := sgStyleRanges(styles)
 	edit := &signalpb.EditMessage{
 		TargetSentTimestamp: &target,
 		DataMessage: &signalpb.DataMessage{
-			Timestamp: &now,
-			Body:      proto.String(newText),
+			Timestamp:  &now,
+			Body:       proto.String(newText),
+			BodyRanges: ranges,
 		},
 	}
 	if err := sgSend(c, client, chatId, signalmeow.WrapEditMessage(edit)); err != nil {
@@ -1310,7 +1423,7 @@ func SignalEdit(chatId string, msgId string, newText string) bool {
 		return false
 	}
 	c.listener.OnMessage(
-		chatId, msgId, SignalSelfID(), newText, true, 0, false,
+		chatId, msgId, SignalSelfID(), sgWithMarkers(newText, ranges), true, 0, false,
 		"", "", 0, 0, false, true, "", "", "", "", false,
 	)
 	return true
