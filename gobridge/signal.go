@@ -2,10 +2,13 @@ package wmbridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +26,7 @@ import (
 	sgstore "go.mau.fi/mautrix-signal/pkg/signalmeow/store"
 	"go.mau.fi/mautrix-signal/pkg/signalmeow/types"
 	"go.mau.fi/util/dbutil"
+	"golang.org/x/crypto/hkdf"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -299,6 +303,102 @@ func SignalConnect() bool {
 	case <-time.After(30 * time.Second):
 		return false
 	}
+}
+
+// SignalLinkStart links this app to an existing Signal account as a companion
+// device — what Signal Desktop does — instead of registering it as the
+// account's primary.
+//
+// This is the only way to see the account's own contact list. The primary hands
+// over the account entropy pool in the provisioning message, and that is what
+// the storage service (contacts, groups, settings) is encrypted with.
+// Registering mints a fresh pool instead, which leaves the account's existing
+// contact list on the server unreadable — so a registered account knows only
+// the people number lookup can find, and never anyone who hides their number.
+//
+// The QR payload arrives through OnQrCode, for the official app to scan. The
+// linked device's own state arrives through OnStateChanged. Non-blocking.
+func SignalLinkStart(deviceName string) {
+	c := sgGet()
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	container := c.container
+	c.mu.Unlock()
+	if container == nil {
+		c.log(LogError, "link: the store is not open")
+		c.listener.OnPairError(sgErrNotInitialised)
+		return
+	}
+	if deviceName == "" {
+		deviceName = "UniChat"
+	}
+	go func() {
+		ctx := context.TODO()
+		// allowBackup false: this client does not implement the backup
+		// transfer, and asking for one makes the primary wait on it.
+		for resp := range signalmeow.PerformProvisioning(ctx, container, deviceName, false) {
+			switch resp.State {
+			case signalmeow.StateProvisioningURLReceived:
+				c.listener.OnQrCode(resp.ProvisioningURL)
+			case signalmeow.StateProvisioningDataReceived:
+				if resp.ProvisioningData == nil {
+					continue
+				}
+				c.adoptLinkedDevice(ctx, resp.ProvisioningData.ACI)
+			case signalmeow.StateProvisioningError:
+				err := resp.Err
+				if err == nil {
+					err = errors.New("link failed")
+				}
+				c.log(LogError, "link: "+err.Error())
+				c.listener.OnPairError(sgUpstream(err))
+			}
+		}
+	}()
+}
+
+// adoptLinkedDevice picks up the device provisioning has just written and makes
+// it this connection's own, then reports "linked" so the app can connect.
+func (c *sgConn) adoptLinkedDevice(ctx context.Context, aci uuid.UUID) {
+	c.mu.Lock()
+	container := c.container
+	c.mu.Unlock()
+	if container == nil {
+		return
+	}
+	device, err := container.DeviceByACI(ctx, aci)
+	if err != nil || device == nil {
+		c.log(LogError, "link: could not load the linked device")
+		c.listener.OnPairError(sgErrNotInitialised)
+		return
+	}
+	c.mu.Lock()
+	c.device = device
+	c.client = signalmeow.NewClient(device, c.logger(), c.handleEvent)
+	c.mu.Unlock()
+	c.log(LogInfo, "linked as device "+strconv.Itoa(device.DeviceID))
+	c.setState("linked")
+}
+
+// SignalSyncContacts reads the account's contact list off the storage service.
+//
+// Only a linked device can: it is encrypted with the account entropy pool the
+// primary handed over. This is where everyone who does not publish their phone
+// number comes from — number lookup alone can never see them. Blocking.
+func SignalSyncContacts() bool {
+	c, client, device := sgActive()
+	if client == nil || device == nil {
+		return false
+	}
+	if len(device.MasterKey) == 0 {
+		c.log(LogWarning, "no account key, so the stored contact list cannot be read")
+		return false
+	}
+	client.SyncStorage(context.TODO())
+	c.listener.OnContactsSynced()
+	return true
 }
 
 // SignalDisconnect drops the socket but keeps the linked device.
@@ -1176,6 +1276,50 @@ func SignalSetTyping(chatId string, typing bool) {
 	}
 }
 
+type sgKeyReading struct {
+	name string
+	key  []byte
+}
+
+// sgKeyReadings turns what SVR2 handed back into every key it could plausibly
+// be, because the payload is not self-describing and one wrong layer produces a
+// key that fails no differently from a wrong PIN.
+//
+// libsignal's hierarchy (rust/account-keys/src/lib.rs) is
+//
+//	AccountEntropyPool  --HKDF(info=svrMasterKeyInfo)-->  SvrKey  --HMAC(label)-->  storage key
+//
+// and only the SvrKey is supposed to be in SVR2. Signal has changed what it
+// stores there more than once, though, and the account's records may predate the
+// entropy pool entirely, so the pool readings are tried too: the storage
+// manifest authenticates the answer, so a wrong guess costs one request.
+func sgKeyReadings(candidates [][]byte) []sgKeyReading {
+	const svrMasterKeyInfo = "20240801_SIGNAL_SVR_MASTER_KEY"
+	out := make([]sgKeyReading, 0, len(candidates)*3)
+	for _, raw := range candidates {
+		out = append(out, sgKeyReading{name: "svr key", key: raw})
+		if derived, err := sgHKDF(raw, svrMasterKeyInfo); err == nil {
+			out = append(out, sgKeyReading{name: "entropy pool", key: derived})
+		}
+		// The pool is 64 characters of [0-9a-z], and 32 bytes written out in hex
+		// is exactly that, so a record holding the pool's bytes has to be spelt
+		// back out before the derivation sees it.
+		if hexed, err := sgHKDF([]byte(hex.EncodeToString(raw)), svrMasterKeyInfo); err == nil {
+			out = append(out, sgKeyReading{name: "entropy pool as hex", key: hexed})
+		}
+	}
+	return out
+}
+
+func sgHKDF(ikm []byte, info string) ([]byte, error) {
+	out := make([]byte, 32)
+	r := hkdf.New(sha256.New, ikm, nil, []byte(info))
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SignalProbeStorage reports whether the account still has a storage-service
 // manifest on the server, and whether our current master key can open it.
 //
@@ -1228,13 +1372,15 @@ func SignalRestoreFromPIN(pin string) string {
 	// right one decrypts the account's storage manifest.
 	var masterKey []byte
 	var lastErr error
-	for _, candidate := range candidates {
-		if _, err := client.FetchStorage(ctx, candidate, 0, nil); err == nil {
-			masterKey = candidate
+	for _, candidate := range sgKeyReadings(candidates) {
+		if _, err := client.FetchStorage(ctx, candidate.key, 0, nil); err == nil {
+			masterKey = candidate.key
+			c.log(LogInfo, "storage manifest opened with the "+candidate.name+" reading")
 			break
 		} else {
 			lastErr = err
-			c.log(LogWarning, fmt.Sprintf("key candidate (%d bytes) rejected: %v", len(candidate), err))
+			c.log(LogWarning, fmt.Sprintf(
+				"key reading %q (%d bytes) rejected: %v", candidate.name, len(candidate.key), err))
 		}
 	}
 	if masterKey == nil {

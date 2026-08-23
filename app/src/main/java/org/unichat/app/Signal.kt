@@ -81,9 +81,24 @@ object Signal : EventListener {
     fun connect() {
         if (!linked) return
         control.execute {
-            if (Wmbridge.signalConnect()) discoverContacts()
+            if (!Wmbridge.signalConnect()) return@execute
+            // The stored contact list first: it is the only source for people
+            // who do not publish their number, and it is what the official app
+            // shows. Then the address book, for anyone it does not cover.
+            Wmbridge.signalSyncContacts()
+            discoverContacts()
         }
     }
+
+    /**
+     * Links this app to the Signal account on this phone, as a second device.
+     *
+     * A linked device is handed the account's own key, so it can read the
+     * contact list Signal keeps for the account. Registering instead makes this
+     * app the account's main device with a fresh key, which leaves that list
+     * unreadable — only people findable by number ever show up.
+     */
+    fun startLink() = control.execute { Wmbridge.signalLinkStart("UniChat") }
 
     /**
      * Re-checks the address book when the user comes back to the app. Discovery
@@ -362,6 +377,15 @@ object Signal : EventListener {
 
     override fun onStateChanged(state: String) {
         this.state = state
+        // A link just completed: the device row exists now, so this account is
+        // live and can connect.
+        if (state == "linked") {
+            linked = Wmbridge.signalHasSession()
+            selfIdMemo = ""
+            Bridge.notifyAccountState(ProtoPicker.SG, state)
+            connect()
+            return
+        }
         if (state == "logged_out") {
             linked = false
             selfIdMemo = ""
@@ -427,7 +451,8 @@ object Signal : EventListener {
 
     // Companion linking is gone; this account is a primary. Part of the
     // WhatsApp-shaped listener interface, never raised for Signal.
-    override fun onQrCode(code: String) {}
+    override fun onQrCode(code: String) =
+        Bridge.notifyQrCode(ProtoPicker.SG, code)
     override fun onPairCode(code: String) {}
     override fun onPairError(code: String) {}
     override fun onContactsSynced() = Bridge.notifyChatsChanged()

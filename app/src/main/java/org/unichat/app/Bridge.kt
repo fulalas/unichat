@@ -21,7 +21,8 @@ object Bridge : EventListener {
          *  be a separate callback per protocol, so a screen listening to all of
          *  them said the same thing three times. */
         fun onAccountState(proto: String, state: String) {}
-        fun onQrCode(code: String) {}
+        /** [proto] says which account the code links. */
+        fun onQrCode(proto: String, code: String) {}
         fun onPairCode(code: String) {}
         fun onPairError(message: String) {}
         fun onSyncProgress(progress: Int) {}
@@ -1742,7 +1743,8 @@ object Bridge : EventListener {
         notifyAccountState(ProtoPicker.WA, state)
     }
 
-    override fun onQrCode(code: String) = notifyUi { it.onQrCode(code) }
+    override fun onQrCode(code: String) =
+        notifyUi { it.onQrCode(ProtoPicker.WA, code) }
 
     override fun onPairCode(code: String) = notifyUi { it.onPairCode(code) }
 
@@ -2128,6 +2130,9 @@ object Bridge : EventListener {
 
     internal fun notifyAccountState(proto: String, state: String) =
         notifyUi { it.onAccountState(proto, state) }
+
+    internal fun notifyQrCode(proto: String, code: String) =
+        notifyUi { it.onQrCode(proto, code) }
 
     /**
      * The chat list minus any paused account's rows. Behind one accessor rather

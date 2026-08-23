@@ -292,7 +292,8 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         if (isFinishing && !Bridge.hasSession()) Bridge.stopLogin()
     }
 
-    override fun onQrCode(code: String) {
+    override fun onQrCode(proto: String, code: String) {
+        if (proto != ProtoPicker.WA) return
         // The encode plus a 512x512 IntArray used to run inline on the main
         // thread on every QR rotation (~20-30s apart for the whole screen).
         Io.executor.execute {

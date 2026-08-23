@@ -17,6 +17,12 @@
     <string name="no_active_account">No active account. Check Manage accounts.</string>
     <string name="open_on_other_account">Open on another account</string>
     <string name="no_number_for_chat">No phone number for this chat</string>
+    <string name="signal_link_title">Link to Signal</string>
+    <string name="signal_link_help">Open Signal on this phone, go to Settings → Linked devices, tap + and scan this code. Your contacts and groups then come from your Signal account, the same ones the Signal app shows.</string>
+    <string name="signal_link_waiting">Getting a code…</string>
+    <string name="signal_link_scan">Scan this in Signal → Settings → Linked devices.</string>
+    <string name="signal_link_done">Signal linked</string>
+    <string name="signal_link_register_instead">No Signal app on this phone? Register the number here instead</string>
     <string name="signal_register_title">Set up Signal</string>
     <string name="signal_register_help">Enter your number with country code.</string>
     <string name="signal_phone_hint">Phone number (e.g. +5511999998888)</string>

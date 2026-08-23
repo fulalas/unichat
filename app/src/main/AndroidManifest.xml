@@ -93,6 +93,11 @@
             android:exported="false"
             android:parentActivityName=".AccountsActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
+        <activity
+            android:name=".SignalLinkActivity"
+            android:exported="false"
+            android:parentActivityName=".AccountsActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
 
         <activity
             android:name=".ShareActivity"
