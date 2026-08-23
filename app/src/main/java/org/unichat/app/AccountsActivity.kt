@@ -75,14 +75,21 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
             toggle.setOnCheckedChangeListener { _, checked -> setEnabled(proto, checked) }
             delete.setOnClickListener { confirmRemove(proto) }
             // Signal only: the contact list lives behind the account PIN, and
-            // registering left it locked. Offer the recovery once linked.
+            // registering left it locked. Offer the recovery until it is done,
+            // then say so instead of asking again — the row stays tappable, so
+            // it can still be run a second time.
             if (proto == ProtoPicker.SG && linked) {
                 row.setOnClickListener {
                     startActivity(Intent(this, SignalPinActivity::class.java))
                 }
                 // Appended, not substituted: the row still has to say whether
                 // the account is active or paused.
-                state.text = "${state.text} · ${getString(R.string.signal_restore_contacts)}"
+                val hint = if (Prefs.sgContactsRestored(this)) {
+                    getString(R.string.signal_contacts_restored)
+                } else {
+                    getString(R.string.signal_restore_contacts)
+                }
+                state.text = "${state.text} · $hint"
             }
 
             list.addView(row)

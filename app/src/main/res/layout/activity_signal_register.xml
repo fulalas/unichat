@@ -33,6 +33,14 @@
                 android:autofillHints="phoneNumber" />
 
             <Button
+                android:id="@+id/sgLinkInstead"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/signal_link_instead"
+                android:textColor="@color/accent_sg" />
+
+            <Button
                 android:id="@+id/sgSendCode"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

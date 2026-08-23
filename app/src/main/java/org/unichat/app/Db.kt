@@ -1081,6 +1081,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         }
     }
 
+    /** How many contacts one protocol has, for confirming a sync actually
+     *  brought something in. */
+    fun contactCount(prefix: String): Int = queryFirst(
+        "SELECT COUNT(*) FROM contacts WHERE is_self=0 AND id LIKE ?", arrayOf("$prefix%")
+    ) { it.getInt(0) } ?: 0
+
     fun contactPhone(id: String): String = queryFirst(
         "SELECT phone FROM contacts WHERE id=?", arrayOf(id)
     ) { if (it.isNull(0)) "" else it.getString(0) } ?: ""

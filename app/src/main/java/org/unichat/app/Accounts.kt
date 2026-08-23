@@ -208,11 +208,11 @@ private object SgAccount : Account {
     override fun myName() = Signal.myName()
     override fun myPhone() = Signal.myPhone()
 
-    // Linking, not registering: a linked device is given the account's own key
-    // and so can read the contact list Signal holds for it, which is what makes
-    // the app show the same people the official one does. That screen offers
-    // registering as the fallback for a phone with no Signal app.
-    override fun setupIntent(ctx: Context) = Intent(ctx, SignalLinkActivity::class.java)
+    // Signal registers this app as the account's primary device, which is
+    // nothing like linking a companion: its own screen owns the warning. That
+    // screen also offers linking, for anyone who would rather ride along with
+    // the Signal app than replace it.
+    override fun setupIntent(ctx: Context) = Intent(ctx, SignalRegisterActivity::class.java)
     override fun setNetworkEnabled(enabled: Boolean) =
         if (enabled) Signal.connect() else Signal.disconnect()
     override fun logout() = Signal.logout()

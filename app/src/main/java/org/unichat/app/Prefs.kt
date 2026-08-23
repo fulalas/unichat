@@ -15,6 +15,7 @@ object Prefs {
     private const val KEY_PROTO_ENABLED = "proto_enabled_"
     private const val KEY_SG_DISCOVERABLE = "sg_discoverable"
     private const val KEY_SG_READ_RECEIPTS = "sg_read_receipts"
+    private const val KEY_SG_CONTACTS_RESTORED = "sg_contacts_restored"
 
     const val FONT_MIN = 0.8f
     const val FONT_MAX = 1.6f
@@ -125,6 +126,14 @@ object Prefs {
 
     fun setSgReadReceipts(ctx: Context, on: Boolean) =
         prefs(ctx).edit().putBoolean(KEY_SG_READ_RECEIPTS, on).apply()
+
+    /** Whether the PIN has already unlocked the account's stored contact list.
+     *  Manage accounts stops offering the recovery once it has. */
+    fun sgContactsRestored(ctx: Context): Boolean =
+        prefs(ctx).getBoolean(KEY_SG_CONTACTS_RESTORED, false)
+
+    fun setSgContactsRestored(ctx: Context, done: Boolean) =
+        prefs(ctx).edit().putBoolean(KEY_SG_CONTACTS_RESTORED, done).apply()
 
     fun tgLinked(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_TG_LINKED, false)
 

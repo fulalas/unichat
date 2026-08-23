@@ -164,6 +164,7 @@ object Signal : EventListener {
             runCatching { java.io.File(ctx.filesDir, "signal").deleteRecursively() }
             if (Wmbridge.signalInit(ctx.filesDir.absolutePath + "/signal", this)) started = true
         }
+        appContext?.let { Prefs.setSgContactsRestored(it, false) }
         // Drop this protocol's rows the way a WhatsApp or Telegram unlink does,
         // or the chat list keeps listing chats no account can open any more.
         Bridge.db.clearSignalData()
@@ -306,6 +307,10 @@ object Signal : EventListener {
 
     fun restoreFromPin(pin: String, onDone: (String) -> Unit) = control.execute {
         val err = Wmbridge.signalRestoreFromPIN(pin)
+        if (err.isEmpty()) {
+            appContext?.let { Prefs.setSgContactsRestored(it, true) }
+            Bridge.notifyAccountState(ProtoPicker.SG, state)
+        }
         Bridge.runOnUi { onDone(err) }
     }
 

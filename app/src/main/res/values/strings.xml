@@ -23,6 +23,7 @@
     <string name="signal_link_scan">Scan this in Signal → Settings → Linked devices.</string>
     <string name="signal_link_done">Signal linked</string>
     <string name="signal_link_register_instead">No Signal app on this phone? Register the number here instead</string>
+    <string name="signal_link_instead">Or link to the Signal app on this phone</string>
     <string name="signal_register_title">Set up Signal</string>
     <string name="signal_register_help">Enter your number with country code.</string>
     <string name="signal_phone_hint">Phone number (e.g. +5511999998888)</string>
@@ -47,8 +48,9 @@
     <string name="signal_pin_restore">Restore</string>
     <string name="signal_pin_too_short">PIN is too short</string>
     <string name="signal_pin_working">Contacting Signal…</string>
-    <string name="signal_pin_ok">Contacts restored</string>
+    <string name="signal_pin_ok">%1$d Signal contacts restored</string>
     <string name="signal_restore_contacts">Restore contacts (PIN)</string>
+    <string name="signal_contacts_restored">Contacts restored</string>
     <string name="signal_err_not_initialised">Signal is not ready yet. Try again in a moment.</string>
     <string name="signal_err_no_session">The sign-up expired. Start again.</string>
     <string name="signal_err_code_rejected">That code was not accepted.</string>

@@ -2187,10 +2187,10 @@ index 756e673..605bb33 100644
 +}
 diff --git a/pkg/signalmeow/svr2.go b/pkg/signalmeow/svr2.go
 new file mode 100644
-index 0000000..a59a94e
+index 0000000..0000000
 --- /dev/null
 +++ b/pkg/signalmeow/svr2.go
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,299 @@
 +package signalmeow
 +
 +// Recovering the account master key from SVR2 (Secure Value Recovery v2).
@@ -2210,6 +2210,7 @@ index 0000000..a59a94e
 +	"crypto/hmac"
 +	"encoding/hex"
 +	"encoding/json"
++	"errors"
 +	"fmt"
 +	"io"
 +	"net/http"
@@ -2228,13 +2229,25 @@ index 0000000..a59a94e
 +
 +const (
 +	svr2Hostname = "svr2.signal.org"
-+	// The enclave id is part of the PIN salt, so it is not a detail that can be
-+	// left approximate: a stale one derives the wrong access key and the
-+	// restore comes back PIN_MISMATCH rather than failing cleanly. Taken from
-+	// libsignal's attest::constants (ENCLAVE_ID_SVR2_2026Q1_PROD) and must be
-+	// bumped in step with the libsignal version this links against.
-+	svr2MrEnclaveHex = "1240acbd4aa26974184844c8a46b1022d3957ac8a76c1fd8f5b1a15141ee0708"
 +)
++
++// The enclave id is part of the PIN salt, so it is not a detail that can be left
++// approximate: the wrong one derives the wrong access key, and the enclave then
++// answers about a record that is not the account's.
++//
++// Signal runs the outgoing enclave alongside the current one while records
++// migrate, and the old one keeps answering — with a stale key, which is accepted
++// by the PIN and then cannot open the storage manifest. So the current enclave
++// is tried first and the previous one only as a fallback, in the order
++// libsignal's own prod config lists them (rust/net/src/env.rs, Svr2Env
++// current/previous). Both must be bumped in step with the libsignal version
++// this links against.
++var svr2MrEnclaves = []string{
++	// ENCLAVE_ID_SVR2_2026Q2_PROD
++	"ced8217b26228e4b210c985786999d095c4958a94faf37b14acaf25c4cbb02a4",
++	// ENCLAVE_ID_SVR2_2026Q1_PROD
++	"1240acbd4aa26974184844c8a46b1022d3957ac8a76c1fd8f5b1a15141ee0708",
++}
 +
 +// SVR2RestoreError distinguishes the outcomes the user can act on from the ones
 +// they cannot.
@@ -2288,7 +2301,30 @@ index 0000000..a59a94e
 +// case is the key stored raw. The caller settles it by trying each against the
 +// storage service — the only definitive test.
 +func (cli *Client) RestoreMasterKeyFromSVR2(ctx context.Context, pin string) ([][]byte, error) {
-+	mrenclave, err := hex.DecodeString(svr2MrEnclaveHex)
++	var lastErr error
++	for _, enclave := range svr2MrEnclaves {
++		candidates, err := cli.restoreFromEnclave(ctx, pin, enclave)
++		if err == nil {
++			return candidates, nil
++		}
++		lastErr = err
++		// A wrong PIN is the user's answer and the same everywhere, so stop
++		// rather than spending another of their tries on the next enclave. Any
++		// other outcome — no record here, or a migration in progress — is worth
++		// asking the older enclave about.
++		var restoreErr SVR2RestoreError
++		if errors.As(err, &restoreErr) &&
++			restoreErr.Status == svr2pb.RestoreResponse_PIN_MISMATCH {
++			return nil, err
++		}
++	}
++	return nil, lastErr
++}
++
++func (cli *Client) restoreFromEnclave(
++	ctx context.Context, pin string, mrEnclaveHex string,
++) ([][]byte, error) {
++	mrenclave, err := hex.DecodeString(mrEnclaveHex)
 +	if err != nil {
 +		return nil, fmt.Errorf("bad enclave id: %w", err)
 +	}
@@ -2326,7 +2362,7 @@ index 0000000..a59a94e
 +		Scheme: "wss",
 +		Host:   svr2Hostname,
 +		User:   url.UserPassword(creds.Username, creds.Password),
-+		Path:   path.Join("v1", svr2MrEnclaveHex),
++		Path:   path.Join("v1", mrEnclaveHex),
 +	}).String()
 +	ws, _, err := web.OpenWebsocket(ctx, addr)
 +	if err != nil {
@@ -2441,7 +2477,6 @@ index 0000000..a59a94e
 +	}
 +	return master, nil
 +}
-+
 +
 +// normalizePIN matches what other Signal clients hash. A numeric PIN is used
 +// exactly as typed; an alphanumeric one is lowercased, which is the only

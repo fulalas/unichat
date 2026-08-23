@@ -45,6 +45,10 @@ class SignalRegisterActivity : BaseActivity() {
         status = findViewById(R.id.sgRegStatus)
         captcha = findViewById(R.id.sgCaptcha)
 
+        findViewById<View>(R.id.sgLinkInstead).setOnClickListener {
+            startActivity(android.content.Intent(this, SignalLinkActivity::class.java))
+            finish()
+        }
         sendCode.setOnClickListener { confirmTakeover() }
         verify.setOnClickListener { submitCode() }
     }
