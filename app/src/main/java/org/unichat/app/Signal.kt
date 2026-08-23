@@ -85,7 +85,13 @@ object Signal : EventListener {
             // The stored contact list first: it is the only source for people
             // who do not publish their number, and it is what the official app
             // shows. Then the address book, for anyone it does not cover.
-            Wmbridge.signalSyncContacts()
+            //
+            // Whether it reads is also what the UI goes by, rather than
+            // remembering that a PIN restore once succeeded: a key that opens
+            // the list is the same thing as the list being available, and it
+            // stays right if the account is registered again.
+            val storedList = Wmbridge.signalSyncContacts()
+            appContext?.let { Prefs.setSgContactsRestored(it, storedList) }
             discoverContacts()
         }
     }

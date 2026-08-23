@@ -396,7 +396,20 @@ func SignalSyncContacts() bool {
 		c.log(LogWarning, "no account key, so the stored contact list cannot be read")
 		return false
 	}
-	client.SyncStorage(context.TODO())
+	ctx := context.TODO()
+	// Read the manifest before syncing, because SyncStorage swallows its own
+	// errors: whether it decrypts is the only proof the stored key is the
+	// account's, and that is what tells the UI the list is available at all.
+	update, err := client.FetchStorage(ctx, device.MasterKey, 0, nil)
+	if err != nil {
+		c.log(LogWarning, "stored contact list not readable: "+err.Error())
+		return false
+	}
+	if update == nil {
+		c.log(LogInfo, "no stored contact list for this account")
+		return false
+	}
+	client.SyncStorage(ctx)
 	c.listener.OnContactsSynced()
 	return true
 }
