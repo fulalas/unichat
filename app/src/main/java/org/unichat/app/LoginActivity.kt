@@ -111,6 +111,16 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         select(requestedProto())
     }
 
+    override fun onResume() {
+        super.onResume()
+        // A protocol set up on its own screen — Signal — comes back linked with
+        // no event this screen listens for, so the just-linked step would never
+        // run and the first run was left on the QR with no way to the chat list.
+        val elsewhere = pending.firstOrNull { Accounts.of(it).isLinked() } ?: return
+        pending.remove(elsewhere)
+        onLinked(elsewhere)
+    }
+
     /** The protocol the caller asked for, or the first one still needing a
      *  link. Only ever one this screen has a panel for. */
     private fun requestedProto(): String {
@@ -356,7 +366,11 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             if (pending.remove(proto)) onLinked(proto)
             return
         }
-        if (proto != showing) return
+        // Only the WhatsApp panel takes its status from the connection. Telegram
+        // connects before it is authorised and keeps reporting connection
+        // changes afterwards, so letting them through here wiped the prompt —
+        // or the "wrong code" — that onTgAuth had just put on screen.
+        if (proto != ProtoPicker.WA || showing != ProtoPicker.WA) return
         statusText.text = when (state) {
             "connecting" -> getString(R.string.login_waiting)
             "disconnected" -> getString(R.string.state_disconnected)

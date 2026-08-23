@@ -3,6 +3,7 @@ package org.unichat.app
 import android.content.Context
 import android.util.Log
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.unichat.wmbridge.EventListener
 import org.unichat.wmbridge.Wmbridge
 
@@ -111,6 +112,11 @@ object Signal : EventListener {
         linked = false
         started = false
         selfIdMemo = ""
+        // Let [ops] drain first: a reaction or read receipt queued there is a
+        // blocking network send still writing through the store handle this is
+        // about to delete. They shared one thread before the split, so the
+        // ordering used to be free.
+        runCatching { ops.submit(Runnable {}).get(5, TimeUnit.SECONDS) }
         // On [control], after the Go side has closed the store: the media
         // and session tree is ours to remove and nothing else is holding it.
         // Then reopen, so registering again without restarting the app has a
@@ -176,6 +182,10 @@ object Signal : EventListener {
         val err = Wmbridge.signalRegisterSubmitCode(number, code)
         if (err.isEmpty()) {
             linked = true
+            // Not the state left over from before registering — which after a
+            // logout in the same run is "logged_out", the opposite of what just
+            // happened. connect() below is about to dial.
+            state = "connecting"
             Bridge.notifyAccountState(ProtoPicker.SG, state)
         }
         Bridge.runOnUi { onDone(err) }
@@ -391,6 +401,10 @@ object Signal : EventListener {
             // No row to attach it to, so the file would sit on disk unreachable.
             runCatching { java.io.File(filePath).delete() }
         }
+        // Releases the in-flight claim Bridge.downloadFile took; without it a
+        // failed download stayed unretryable for the rest of the run. Also what
+        // reports the failure and resumes playback the user asked for.
+        Bridge.onFileTransferDone(chatId, msgId, filePath, status.toInt())
         Bridge.notifyChat(chatId)
     }
 

@@ -924,7 +924,7 @@ object Tg {
             }
             Bridge.db.setFileState(msg.chatId, msg.id, done, 2)
             Bridge.notifyChatRow(msg.chatId, msg.id)
-            Bridge.onTgFileDone(msg.chatId, msg.id, done, 2)
+            Bridge.onFileTransferDone(msg.chatId, msg.id, done, 2)
         }
         return true
     }
@@ -951,7 +951,7 @@ object Tg {
     private fun failDownload(msg: MessageRow) {
         Bridge.db.setFileState(msg.chatId, msg.id, "", 3)
         Bridge.notifyChatRow(msg.chatId, msg.id)
-        Bridge.onTgFileDone(msg.chatId, msg.id, "", 3)
+        Bridge.onFileTransferDone(msg.chatId, msg.id, "", 3)
     }
 
     private fun onFile(file: JSONObject) {
@@ -968,7 +968,7 @@ object Tg {
                 for ((chatId, msgId) in targets) {
                     Bridge.db.setFileState(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
                     Bridge.notifyChatRow(chatId, msgId)
-                    Bridge.onTgFileDone(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
+                    Bridge.onFileTransferDone(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
                 }
             }
             local.optBoolean("is_downloading_active") -> {
@@ -990,7 +990,7 @@ object Tg {
                 for ((chatId, msgId) in targets) {
                     Bridge.db.setFileState(chatId, msgId, "", 3)
                     Bridge.notifyChatRow(chatId, msgId)
-                    Bridge.onTgFileDone(chatId, msgId, "", 3)
+                    Bridge.onFileTransferDone(chatId, msgId, "", 3)
                 }
             }
         }

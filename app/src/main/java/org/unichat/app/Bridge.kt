@@ -1652,7 +1652,13 @@ object Bridge : EventListener {
         notifyChatsChanged()
     }
 
-    internal fun onTgFileDone(chatId: String, msgId: String, filePath: String, status: Int) {
+    /**
+     * A transfer finished, for a protocol whose own callback does not already do
+     * this bookkeeping. Releasing the claim downloadFile took is the part that
+     * matters: without it a failed download can never be retried, because every
+     * later attempt sees the slot still held and dispatches nothing.
+     */
+    internal fun onFileTransferDone(chatId: String, msgId: String, filePath: String, status: Int) {
         val key = "$chatId/$msgId"
         downloading.remove(key)
         if (status == 3 && userRequestedDownloads.remove(key)) toastUi(R.string.download_failed)
@@ -2138,8 +2144,6 @@ object Bridge : EventListener {
 
     internal fun runOnUi(block: () -> Unit) = main.post(block)
 
-    /** Signal's post-store hook: the row is already written, this is the part
-     *  Bridge owns — refreshing open screens and raising a notification. */
     internal fun postDownloadProgress(chatId: String, msgId: String, pct: Int) =
         notifyUi { it.onDownloadProgress(chatId, msgId, pct) }
 
