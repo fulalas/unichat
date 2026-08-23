@@ -18,8 +18,7 @@ class PrivacyActivity : BaseActivity() {
     private var loaded = false
     private var proto: String = ProtoPicker.WA
     private val account get() = Accounts.of(proto)
-    private val isTg get() = proto == ProtoPicker.TG
-    private val isSg get() = proto == ProtoPicker.SG
+    private val keys get() = account.privacyKeys
     private var rendering = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -30,7 +29,7 @@ class PrivacyActivity : BaseActivity() {
         applyProtocolTheme(proto)
         setContentView(R.layout.activity_privacy)
         supportActionBar?.apply {
-            title = getString(R.string.privacy) + " — " + ProtoPicker.label(this@PrivacyActivity, proto)
+            title = getString(R.string.privacy) + " — " + account.label(this@PrivacyActivity)
             setDisplayHomeAsUpEnabled(true)
         }
         if (!Bridge.init(this)) { finish(); return }
@@ -40,71 +39,42 @@ class PrivacyActivity : BaseActivity() {
         valueAbout = findViewById(R.id.valueAbout)
         switchReadReceipts = findViewById(R.id.switchReadReceipts)
 
-        findViewById<View>(R.id.rowLastSeen).setOnClickListener { chooseLastSeenAndOnline() }
-        findViewById<View>(R.id.rowProfile).setOnClickListener {
-            chooseThreeWay(R.string.privacy_profile_photo, "profile")
+        // Each account says which rows it has; the rest are hidden rather than
+        // shown as options that cannot be applied.
+        val rowLastSeen = findViewById<View>(R.id.rowLastSeen)
+        val rowProfile = findViewById<View>(R.id.rowProfile)
+        val rowAbout = findViewById<View>(R.id.rowAbout)
+
+        rowLastSeen.visibility = if ("last" in keys) View.VISIBLE else View.GONE
+        rowLastSeen.setOnClickListener { chooseLastSeenAndOnline() }
+        rowAbout.visibility = if ("status" in keys) View.VISIBLE else View.GONE
+        rowAbout.setOnClickListener { chooseThreeWay(R.string.privacy_about, "status") }
+
+        // Signal has no per-audience choices — a profile is visible to anyone
+        // you message — so its one profile-shaped question takes this row.
+        when {
+            "profile" in keys -> rowProfile.setOnClickListener {
+                chooseThreeWay(R.string.privacy_profile_photo, "profile")
+            }
+            "discoverable" in keys -> {
+                findViewById<TextView>(R.id.labelProfile)?.setText(R.string.privacy_sg_discoverable)
+                rowProfile.setOnClickListener {
+                    choose(R.string.privacy_sg_discoverable, "discoverable", listOf("all", "none"))
+                }
+            }
+            else -> rowProfile.visibility = View.GONE
         }
-        findViewById<View>(R.id.rowAbout).setOnClickListener {
-            chooseThreeWay(R.string.privacy_about, "status")
-        }
-        switchReadReceipts.setOnCheckedChangeListener { _, checked ->
-            if (!rendering && loaded) apply("readreceipts", if (checked) "all" else "none")
-        }
-        if (isTg) {
-            // Telegram has no read-receipts toggle; hide the whole row
+
+        if ("readreceipts" in keys) {
+            switchReadReceipts.setOnCheckedChangeListener { _, checked ->
+                if (!rendering && loaded) apply("readreceipts", if (checked) "all" else "none")
+            }
+        } else {
             switchReadReceipts.visibility = View.GONE
             (switchReadReceipts.parent as? View)?.visibility = View.GONE
         }
 
-        if (isSg) {
-            renderSignal()
-            return
-        }
         load()
-    }
-
-    /**
-     * Signal's privacy model has none of the per-audience choices WhatsApp and
-     * Telegram expose — a profile is visible to anyone you message, full stop.
-     * The three settings it does have are shown instead of leaving the screen
-     * displaying options that cannot be applied.
-     *
-     * Read receipts and typing indicators are honoured locally rather than
-     * published: they live in the storage-service account record, which this
-     * account cannot write yet.
-     */
-    private fun renderSignal() {
-        findViewById<View>(R.id.rowLastSeen).visibility = View.GONE
-        findViewById<View>(R.id.rowAbout).visibility = View.GONE
-
-        val discoverRow = findViewById<View>(R.id.rowProfile)
-        findViewById<TextView>(R.id.labelProfile)?.setText(R.string.privacy_sg_discoverable)
-        valueProfile.text = getString(
-            if (Prefs.sgDiscoverable(this)) R.string.privacy_everyone else R.string.privacy_nobody
-        )
-        discoverRow.setOnClickListener { toggleDiscoverable() }
-
-        rendering = true
-        switchReadReceipts.isChecked = Prefs.sgReadReceipts(this)
-        rendering = false
-        switchReadReceipts.setOnCheckedChangeListener { _, checked ->
-            if (!rendering) Prefs.setSgReadReceipts(this, checked)
-        }
-        loaded = true
-    }
-
-    private fun toggleDiscoverable() {
-        val next = !Prefs.sgDiscoverable(this)
-        Signal.setDiscoverable(next) { ok ->
-            if (isFinishing) return@setDiscoverable
-            if (!ok) {
-                Toast.makeText(this, R.string.privacy_failed, Toast.LENGTH_LONG).show()
-                return@setDiscoverable
-            }
-            Prefs.setSgDiscoverable(this, next)
-            valueProfile.text =
-                getString(if (next) R.string.privacy_everyone else R.string.privacy_nobody)
-        }
     }
 
     private fun load() {
@@ -126,7 +96,7 @@ class PrivacyActivity : BaseActivity() {
     private fun render() {
         rendering = true
         valueLastSeen.text = label(settings["last"])
-        valueProfile.text = label(settings["profile"])
+        valueProfile.text = label(settings[if ("discoverable" in keys) "discoverable" else "profile"])
         valueAbout.text = label(settings["status"])
         switchReadReceipts.isChecked = settings["readreceipts"] == "all"
         rendering = false
@@ -159,9 +129,11 @@ class PrivacyActivity : BaseActivity() {
             .show()
     }
 
+    // Telegram derives "who can see me online" from the last-seen answer, so
+    // only an account that says it has the follow-up is asked for it.
     private fun chooseLastSeenAndOnline() {
         if (!loaded) return
-        if (isTg) {
+        if ("online" !in keys) {
             chooseThreeWay(R.string.privacy_who_last_seen, "last")
             return
         }

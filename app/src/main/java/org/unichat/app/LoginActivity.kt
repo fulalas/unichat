@@ -142,7 +142,7 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         tabs.clear()
         for (proto in pending) {
             val tab = inflater.inflate(R.layout.item_login_tab, tabRow, false) as Button
-            tab.text = ProtoPicker.label(this, proto)
+            tab.text = Accounts.of(proto).label(this)
             tab.setOnClickListener { select(proto) }
             tabRow.addView(tab)
             tabs[proto] = tab
@@ -246,8 +246,8 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         continueButton.visibility = View.VISIBLE
         val hint = getString(
             R.string.link_other_hint,
-            ProtoPicker.label(this, proto),
-            ProtoPicker.label(this, next),
+            Accounts.of(proto).label(this),
+            Accounts.of(next).label(this),
         )
         Toast.makeText(this, hint, Toast.LENGTH_LONG).show()
         select(next)

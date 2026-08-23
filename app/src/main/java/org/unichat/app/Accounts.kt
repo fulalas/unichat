@@ -48,6 +48,30 @@ interface Account {
 
     fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit)
     fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit)
+
+    /** Which rows the privacy screen shows for this account. "last" is last
+     *  seen, "online" its who-can-see-me-online follow-up, "profile" the photo
+     *  audience, "status" the About audience, "discoverable" findable by
+     *  number, "readreceipts" the switch. The screen hides what is not here. */
+    val privacyKeys: Set<String>
+
+    /**
+     * A chat id for an E.164 number (with '+'), or "" when the number has no
+     * account on this network. [Bridge.NUMBER_LOOKUP_FAILED] when it could not
+     * be asked at all. Blocking; worker threads only.
+     */
+    fun chatIdForNumber(number: String): String
+
+    /** Said when [chatIdForNumber] comes back empty. */
+    val notOnNetworkRes: Int
+
+    /**
+     * A chat id built from this protocol's own id as it appears on a contact
+     * card, or "" when the card carries none this account can use. Blocking.
+     */
+    fun chatIdForCardId(cardId: String): String
+
+    fun label(ctx: Context): String = ctx.getString(labelRes)
 }
 
 object Accounts {
@@ -58,6 +82,11 @@ object Accounts {
     // bind paths, which ask once per row, and an iterator per row is waste.
     fun of(proto: String): Account {
         for (i in ALL.indices) if (ALL[i].proto == proto) return ALL[i]
+        // WhatsApp is the fallback because it is the unprefixed protocol, but a
+        // key that reaches here is a bug: falling through to WhatsApp silently
+        // is what once opened a WhatsApp chat from a Signal card and themed
+        // Signal screens green.
+        android.util.Log.w("UniChat", "unknown protocol '$proto', using WhatsApp")
         return WaAccount
     }
 
@@ -70,6 +99,10 @@ object Accounts {
     }
 
     fun linked(): List<Account> = ALL.filter { it.isLinked() }
+
+    /** Linked and switched on. A paused account is off its network, so it can
+     *  neither send nor read a profile back. */
+    fun active(): List<Account> = ALL.filter { it.isLinked() && Bridge.protoEnabled(it.proto) }
 }
 
 private object WaAccount : Account {
@@ -108,6 +141,15 @@ private object WaAccount : Account {
         Bridge.fetchPrivacySettings(onResult)
     override fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit) =
         Bridge.setPrivacySetting(name, value, onResult)
+
+    override val privacyKeys = setOf("last", "online", "profile", "status", "readreceipts")
+
+    override fun chatIdForNumber(number: String) = Bridge.resolveNumber(number)
+    override val notOnNetworkRes = R.string.not_on_whatsapp
+
+    // A WhatsApp contact card carries the bare digits, and those are the id.
+    override fun chatIdForCardId(cardId: String) =
+        if (cardId.isEmpty()) "" else PhoneBook.digitsOf(cardId) + "@s.whatsapp.net"
 }
 
 private object TgAccount : Account {
@@ -142,6 +184,15 @@ private object TgAccount : Account {
         Tg.async({ Tg.fetchPrivacySettings() }, onResult)
     override fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit) =
         Tg.async({ Tg.setPrivacySetting(name, value) }, onResult)
+
+    // No read-receipts setting, and last seen carries its own online rule.
+    override val privacyKeys = setOf("last", "profile", "status")
+
+    override fun chatIdForNumber(number: String) = Tg.createChatByPhone(number)
+    override val notOnNetworkRes = R.string.not_on_telegram
+
+    override fun chatIdForCardId(cardId: String) =
+        cardId.toLongOrNull()?.let { Tg.createUserChat(it) }.orEmpty()
 }
 
 private object SgAccount : Account {
@@ -180,13 +231,20 @@ private object SgAccount : Account {
         Bridge.runOnUi { onResult(false) }
     }
 
-    // PrivacyActivity shows Signal its own screen and never asks for these; the
-    // WhatsApp answers used to be handed back here, which would have edited the
-    // WhatsApp account.
     override fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit) {
-        Bridge.runOnUi { onResult(null) }
+        val settings = Signal.privacySettings()
+        Bridge.runOnUi { onResult(settings) }
     }
-    override fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit) {
-        Bridge.runOnUi { onResult(false) }
-    }
+    override fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit) =
+        Signal.setPrivacy(name, value, onResult)
+
+    // None of the per-audience choices: a Signal profile is visible to anyone
+    // you message. The two it does have are its own.
+    override val privacyKeys = setOf("discoverable", "readreceipts")
+
+    override fun chatIdForNumber(number: String) = Signal.lookupNumber(number)
+    override val notOnNetworkRes = R.string.not_on_signal
+
+    // A Signal contact card carries no id this account can reuse.
+    override fun chatIdForCardId(cardId: String) = ""
 }

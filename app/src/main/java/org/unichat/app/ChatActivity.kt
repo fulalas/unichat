@@ -247,7 +247,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         pickViewOnce = savedInstanceState?.getBoolean(STATE_PICK_VIEW_ONCE) == true
         // WhatsApp chats swap the blue chat palette for the green one; must
         // happen before any view of this screen inflates
-        applyProtocolTheme(ProtoPicker.of(chatId))
+        applyProtocolTheme(Accounts.ofChat(chatId))
         setContentView(R.layout.activity_chat)
 
         if (!Bridge.init(this)) { finish(); return }
@@ -1482,7 +1482,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun startChatExport() {
-        val proto = ProtoPicker.label(this, ProtoPicker.of(chatId))
+        val proto = Accounts.ofChat(chatId).label(this)
         createExportFile.launch(
             getString(R.string.export_file_name, proto, safeDisplayFileName(chatDisplayName))
         )
@@ -2267,57 +2267,30 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         ProtoPicker.pick(this) { proto -> messageContactVia(proto, msg) }
 
     private fun messageContactVia(proto: String, msg: MessageRow) {
+        val account = Accounts.of(proto)
         val name = cardLines(msg).firstOrNull().orEmpty()
-        if (proto == ProtoPicker.SG) {
-            val number = cardPhones(msg).firstOrNull()
-                ?.let { PhoneBook.normalize(it).removePrefix("+") }.orEmpty()
-            if (number.isEmpty()) {
-                Toast.makeText(this, R.string.number_check_failed, Toast.LENGTH_SHORT).show()
-                return
-            }
-            resolveThenOpen(0, {
-                Signal.lookupNumber(number).ifEmpty { R.string.not_on_signal }
-            }) { id -> openContactChat(id, name) }
-            return
-        }
-        if (proto == ProtoPicker.TG) {
-            // Only usable when the card came from Telegram: fileId holds that
-            // protocol's own id, and a WhatsApp card's digits would parse as a
-            // Long just as happily and open a stranger's chat.
-            val userId = msg.fileId.takeIf { Tg.isTgId(chatId) }?.toLongOrNull()
-            if (userId != null) {
-                resolveThenOpen(0, {
-                    Tg.createUserChat(userId).ifEmpty { R.string.chat_open_failed }
-                }) { id -> openContactChat(id, name) }
-                return
-            }
-            // The card came from another protocol, so there is no Telegram user
-            // id on it — resolve the number instead of refusing outright.
-            val number = cardPhones(msg).firstOrNull()
-                ?.let { PhoneBook.normalize(it) }.orEmpty()
-            if (number.isEmpty()) {
-                Toast.makeText(this, R.string.number_check_failed, Toast.LENGTH_SHORT).show()
-                return
-            }
-            resolveThenOpen(0, {
-                Tg.createChatByPhone(number).ifEmpty { R.string.not_on_telegram }
-            }) { id -> openContactChat(id, name) }
-            return
-        }
-        // fileId only carries the id of the protocol the card arrived on, so it
-        // is reusable only when that is the protocol being opened.
-        val waid = msg.fileId.takeIf { !Tg.isTgId(chatId) && !Signal.isSgId(chatId) }
-            .orEmpty()
-            .ifEmpty {
-                cardPhones(msg).firstOrNull()
-                    ?.let { PhoneBook.normalize(it).removePrefix("+") }.orEmpty()
-            }
-        if (waid.isEmpty()) {
+        // fileId holds the id of the protocol the card ARRIVED on, so it is
+        // only reusable when that is the protocol being opened: a WhatsApp
+        // card's digits parse as a Telegram user id just as happily, and taking
+        // them for one opened a stranger's chat.
+        val cardId = msg.fileId.takeIf { Accounts.ofChat(chatId).proto == proto }.orEmpty()
+        val number = cardPhones(msg).firstOrNull()?.let { PhoneBook.normalize(it) }.orEmpty()
+        if (cardId.isEmpty() && number.isEmpty()) {
             Toast.makeText(this, R.string.number_check_failed, Toast.LENGTH_SHORT).show()
             return
         }
-        Bridge.rememberContact("$waid@s.whatsapp.net", name)
-        openContactChat("$waid@s.whatsapp.net", name)
+        resolveThenOpen(0, {
+            val id = account.chatIdForCardId(cardId)
+                .ifEmpty { if (number.isEmpty()) "" else account.chatIdForNumber(number) }
+            when {
+                id == Bridge.NUMBER_LOOKUP_FAILED -> R.string.number_check_failed
+                id.isEmpty() -> account.notOnNetworkRes
+                else -> id
+            }
+        }) { id ->
+            Bridge.rememberContact(id, name)
+            openContactChat(id, name)
+        }
     }
 
     private fun openContactInfo() {

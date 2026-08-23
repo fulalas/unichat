@@ -33,24 +33,27 @@ open class BaseActivity : AppCompatActivity() {
         }
     }
 
-    protected fun resolveNumberThenOpen(number: String, open: (String) -> Unit) =
-        resolveThenOpen(R.string.checking_number, {
-            val jid = Bridge.resolveNumber(number)
-            when {
-                // never say someone is not on WhatsApp because we couldn't ask
-                jid == Bridge.NUMBER_LOOKUP_FAILED -> R.string.number_check_failed
-                jid.isEmpty() -> R.string.not_on_whatsapp
-                else -> jid
-            }
-        }, open)
+    protected fun resolveNumberThenOpen(
+        account: Account, number: String, open: (String) -> Unit,
+    ) = resolveThenOpen(R.string.checking_number, {
+        val id = account.chatIdForNumber(number)
+        when {
+            // never say someone is not on the network because we couldn't ask
+            id == Bridge.NUMBER_LOOKUP_FAILED -> R.string.number_check_failed
+            id.isEmpty() -> account.notOnNetworkRes
+            else -> id
+        }
+    }, open)
 
     /**
      * Repaints a screen in its protocol's colours. Keyed on the protocol, not
      * on a two-way "is it Telegram" flag: under that flag every non-Telegram
      * chat took the WhatsApp overlay, so Signal chats came out green.
      */
-    protected fun applyProtocolTheme(proto: String) {
-        Accounts.of(proto).themeOverlayRes?.let { theme.applyStyle(it, true) }
+    protected fun applyProtocolTheme(proto: String) = applyProtocolTheme(Accounts.of(proto))
+
+    protected fun applyProtocolTheme(account: Account) {
+        account.themeOverlayRes?.let { theme.applyStyle(it, true) }
     }
 
     override fun onSupportNavigateUp(): Boolean {

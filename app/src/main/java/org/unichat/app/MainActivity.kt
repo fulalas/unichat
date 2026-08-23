@@ -48,8 +48,8 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         emptyText = findViewById(R.id.emptyText)
         adapter = ChatListAdapter(
             onClick = { chat ->
-                // an address-book result has no chat yet: ask WhatsApp for the
-                // number first, so a mistyped or non-WhatsApp number says so
+                // an address-book result has no chat yet: ask the account for
+                // the number first, so a mistyped or absent number says so
                 // instead of opening a chat that can never deliver
                 if (PhoneBook.isPhoneEntry(chat.id)) openPhoneEntry(chat)
                 else openChat(chat.id, chat.name)
@@ -245,10 +245,13 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         startActivity(intent)
     }
 
-    private fun openPhoneEntry(chat: ChatRow) {
-        resolveNumberThenOpen(PhoneBook.numberOf(chat.id)) { jid ->
-            Bridge.rememberContact(jid, chat.name)
-            openChat(jid, chat.name)
+    // Any active account, not WhatsApp: an address-book number said "not on
+    // WhatsApp" even with only Telegram and Signal linked. With one account the
+    // picker answers itself.
+    private fun openPhoneEntry(chat: ChatRow) = ProtoPicker.pick(this) { proto ->
+        resolveNumberThenOpen(Accounts.of(proto), PhoneBook.numberOf(chat.id)) { id ->
+            Bridge.rememberContact(id, chat.name)
+            openChat(id, chat.name)
         }
     }
 
@@ -411,7 +414,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     // when the linked accounts actually changed, and drop the filter with the
     // search box that held it.
     private fun refreshAccountMenu() {
-        if (ProtoPicker.linked().size == menuLinkedAccounts) return
+        if (Accounts.linked().size == menuLinkedAccounts) return
         invalidateOptionsMenu()
         if (query.isEmpty()) return
         query = ""
@@ -468,7 +471,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         menu.add(0, M_THEME, 3, R.string.theme)
         menu.add(0, M_FONT, 4, R.string.font_size)
         menu.add(0, M_ACCOUNTS, 5, R.string.manage_accounts)
-        menuLinkedAccounts = ProtoPicker.linked().size
+        menuLinkedAccounts = Accounts.linked().size
         // One entry covering add and remove, for every protocol. The old
         // "Link account" item hid itself at two accounts, which left no way to
         // reach a third once WhatsApp and Telegram were both linked.
@@ -482,7 +485,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             M_FONT -> { showFontSizeDialog(); return true }
             M_ABOUT -> { showAboutDialog(); return true }
             M_PRIVACY -> {
-                ProtoPicker.pickFrom(this, ProtoPicker.active()) { proto ->
+                ProtoPicker.pick(this) { proto ->
                     startActivity(
                         Intent(this, PrivacyActivity::class.java).putExtra("proto", proto)
                     )
@@ -490,7 +493,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 return true
             }
             M_PROFILE -> {
-                ProtoPicker.pickFrom(this, ProtoPicker.active()) { proto ->
+                ProtoPicker.pick(this) { proto ->
                     startActivity(
                         Intent(this, ProfileActivity::class.java).putExtra("proto", proto)
                     )

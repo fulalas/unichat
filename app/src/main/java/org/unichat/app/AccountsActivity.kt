@@ -41,14 +41,15 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
     private fun render() {
         list.removeAllViews()
         val inflater = LayoutInflater.from(this)
-        for (proto in ProtoPicker.ALL) {
+        for (account in Accounts.ALL) {
+            val proto = account.proto
             val row = inflater.inflate(R.layout.item_account, list, false)
-            val linked = ProtoPicker.isLinked(proto)
+            val linked = account.isLinked()
             val enabled = Prefs.protoEnabled(this, proto)
 
             row.findViewById<View>(R.id.accountDot)
                 .setBackgroundColor(protocolAccentOf(proto))
-            row.findViewById<TextView>(R.id.accountName).text = ProtoPicker.label(this, proto)
+            row.findViewById<TextView>(R.id.accountName).text = account.label(this)
             val state = row.findViewById<TextView>(R.id.accountState)
             state.text = when {
                 !linked -> getString(R.string.account_not_linked)
@@ -99,7 +100,7 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun confirmRemove(proto: String) {
-        val name = ProtoPicker.label(this, proto)
+        val name = Accounts.of(proto).label(this)
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.account_remove_title, name))
             .setMessage(R.string.account_remove_body)

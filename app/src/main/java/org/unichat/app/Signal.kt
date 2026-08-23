@@ -30,6 +30,11 @@ object Signal : EventListener {
     // steps on [control], and a read receipt after the read on [ops].
     private val control = Executors.newSingleThreadExecutor()
     private val ops = Executors.newSingleThreadExecutor()
+
+    /** Message traffic. Skipped once the account is gone: logout waits for what
+     *  is already running, but a task queued behind it would otherwise reach a
+     *  closed store, or a tree that is no longer there. */
+    private fun ops(work: () -> Unit) = ops.execute { if (linked) work() }
     // Written on [control], read from the UI thread via hasSession(); without
     // volatile the main thread could keep seeing a linked account as absent.
     @Volatile private var started = false
@@ -108,14 +113,15 @@ object Signal : EventListener {
 
 
     fun logout() = control.execute {
-        // Before signalLogout, which is what closes the store: a reaction or
-        // read receipt queued on [ops] is a blocking network send still writing
-        // through that handle. They shared one thread before the split, so this
-        // ordering used to be free. Capped, because the send may be waiting on a
-        // network that is not coming back and the account still has to go.
+        // Cleared first, so anything still queued on [ops] turns into a no-op,
+        // then wait for what is already running: signalLogout below closes the
+        // store those sends write through, and they shared one thread with this
+        // before the split, so the ordering used to be free. The wait is capped
+        // because a send may be stuck on a network that is not coming back, and
+        // the account still has to go.
+        linked = false
         runCatching { ops.submit(Runnable {}).get(5, TimeUnit.SECONDS) }
         Wmbridge.signalLogout()
-        linked = false
         started = false
         selfIdMemo = ""
         // On [control], after the Go side has closed the store: the media
@@ -229,6 +235,43 @@ object Signal : EventListener {
         Bridge.runOnUi { onResult(ok) }
     }
 
+    /**
+     * The two privacy settings Signal has, in the same shape the other
+     * protocols answer in. Read receipts and typing indicators are honoured
+     * locally rather than published: they live in the storage-service account
+     * record, which this account cannot write yet. Discoverability is the one
+     * the server does hold.
+     */
+    fun privacySettings(): Map<String, String> {
+        val ctx = appContext ?: return emptyMap()
+        return mapOf(
+            "discoverable" to if (Prefs.sgDiscoverable(ctx)) "all" else "none",
+            "readreceipts" to if (Prefs.sgReadReceipts(ctx)) "all" else "none",
+        )
+    }
+
+    fun setPrivacy(name: String, value: String, onResult: (Boolean) -> Unit) {
+        val on = value == "all"
+        val ctx = appContext
+        if (ctx == null) {
+            Bridge.runOnUi { onResult(false) }
+            return
+        }
+        when (name) {
+            "readreceipts" -> {
+                Prefs.setSgReadReceipts(ctx, on)
+                Bridge.runOnUi { onResult(true) }
+            }
+            // Stored only once the server took it, or the switch would claim a
+            // change the account never made.
+            "discoverable" -> setDiscoverable(on) { ok ->
+                if (ok) Prefs.setSgDiscoverable(ctx, on)
+                onResult(ok)
+            }
+            else -> Bridge.runOnUi { onResult(false) }
+        }
+    }
+
     fun restoreFromPin(pin: String, onDone: (String) -> Unit) = control.execute {
         val err = Wmbridge.signalRestoreFromPIN(pin)
         Bridge.runOnUi { onDone(err) }
@@ -241,10 +284,10 @@ object Signal : EventListener {
         ).isNotEmpty()
 
     fun react(msg: MessageRow, emoji: String) =
-        ops.execute { Wmbridge.signalReact(msg.chatId, msg.id, msg.senderId, emoji) }
+        ops { Wmbridge.signalReact(msg.chatId, msg.id, msg.senderId, emoji) }
 
     fun delete(chatId: String, msgId: String) =
-        ops.execute { Wmbridge.signalDelete(chatId, msgId) }
+        ops { Wmbridge.signalDelete(chatId, msgId) }
 
     fun edit(chatId: String, msgId: String, newText: String): Boolean =
         Wmbridge.signalEdit(chatId, msgId, newText)
@@ -253,8 +296,8 @@ object Signal : EventListener {
      * Marks the chat read locally and acks the newest unread message, matching
      * what the WhatsApp path does. Nothing happens when there is nothing new.
      */
-    fun markChatRead(chatId: String) = ops.execute {
-        val latest = Bridge.db.latestUnread(chatId) ?: return@execute
+    fun markChatRead(chatId: String) = ops {
+        val latest = Bridge.db.latestUnread(chatId) ?: return@ops
         Bridge.db.markChatRead(chatId)
         Bridge.notifyChatsChanged()
         val ctx = appContext
@@ -262,7 +305,7 @@ object Signal : EventListener {
     }
 
     fun setTyping(chatId: String, typing: Boolean) =
-        ops.execute { Wmbridge.signalSetTyping(chatId, typing) }
+        ops { Wmbridge.signalSetTyping(chatId, typing) }
 
     fun sendAttachment(
         chatId: String, path: String, caption: String, mime: String,

@@ -232,10 +232,30 @@ object Bridge : EventListener {
         fun avatarPath(chatId: String, big: Boolean, cachedOnly: Boolean): String
 
         val consumesStagingInput: Boolean
+
+        // Searching a chat's whole history needs a server that can read it.
+        // WhatsApp is end-to-end encrypted and Signal has no such query, so
+        // those chats are searched locally, over what has been synced — these
+        // default to "nothing here" rather than being asked per call site.
+        fun searchServer(chatId: String, query: String, fromMessageId: Long): Tg.SearchPage? = null
+        fun searchContext(chatId: String, msgId: String): List<MessageRow> = emptyList()
+        fun searchSlice(chatId: String, msgId: String, newer: Boolean): List<MessageRow> = emptyList()
+        fun chatPhotos(chatId: String, msgId: String, newer: Boolean?): List<MessageRow> = emptyList()
+        fun searchMedia(chatId: String, msgId: String): String = ""
+
+        /** Who reacted, when the server keeps that list. Null means "no server
+         *  list": the stored reactions are all there is. */
+        fun reactionSenders(msg: MessageRow): List<Pair<String, String>>? = null
+
+        /** Which media kinds can be sent view-once in this chat. */
+        fun viewOnceKinds(chatId: String): Set<String>
     }
 
     private fun protoExecutor(chatId: String) =
         if (Signal.isSgId(chatId)) sgExecutor else executor
+
+    private val WA_VIEW_ONCE = setOf("image", "video", "audio")
+    private val TG_VIEW_ONCE = setOf("image", "video")
 
     private fun proto(chatId: String): Protocol = when {
         isTg(chatId) -> TgTransport
@@ -322,6 +342,9 @@ object Bridge : EventListener {
         override fun avatarPath(chatId: String, big: Boolean, cachedOnly: Boolean) = ""
 
         override val consumesStagingInput = false
+
+        // Signal has no view-once at all, so the option must not be offered.
+        override fun viewOnceKinds(chatId: String) = emptySet<String>()
     }
 
 
@@ -487,6 +510,8 @@ object Bridge : EventListener {
         }
 
         override val consumesStagingInput: Boolean = true
+
+        override fun viewOnceKinds(chatId: String) = WA_VIEW_ONCE
     }
 
     private object TgTransport : Protocol {
@@ -565,6 +590,24 @@ object Bridge : EventListener {
         // returns before the transfer finishes) and the stored row plays back
         // from it until the daily sweep, so it must survive the send.
         override val consumesStagingInput: Boolean = false
+
+        override fun searchServer(chatId: String, query: String, fromMessageId: Long) =
+            Tg.searchChat(chatId, query, fromMessageId)
+        override fun searchContext(chatId: String, msgId: String) =
+            Tg.contextWindow(chatId, msgId)
+        override fun searchSlice(chatId: String, msgId: String, newer: Boolean) =
+            Tg.historySlice(chatId, msgId, newer)
+        override fun chatPhotos(chatId: String, msgId: String, newer: Boolean?) =
+            Tg.chatPhotos(chatId, msgId, newer)
+        override fun searchMedia(chatId: String, msgId: String) = Tg.downloadNow(chatId, msgId)
+
+        override fun reactionSenders(msg: MessageRow) = Tg.reactionSenders(msg.chatId, msg.id)
+
+        // TDLib takes a self-destruct on photo and video only, and on neither in
+        // a group or the account's own chat — where the server refuses the send
+        // it had just been offered.
+        override fun viewOnceKinds(chatId: String): Set<String> =
+            if (isGroupId(chatId) || isTgSelfChat(chatId)) emptySet() else TG_VIEW_ONCE
     }
 
     // Memoised own JID. selfId() is asked once per chat-list row bind (every row
@@ -799,13 +842,8 @@ object Bridge : EventListener {
      * in one-to-one chats only, and rejects the flag outright on anything else
      * ("Can't enable self-destruction for media"), so the option is not offered.
      */
-    fun viewOnceSupported(chatId: String, kind: String): Boolean {
-        // Signal has no view-once at all, so the option must not be offered.
-        if (Signal.isSgId(chatId)) return false
-        if (!isTg(chatId)) return kind == "image" || kind == "video" || kind == "audio"
-        if (isGroupId(chatId) || isTgSelfChat(chatId)) return false
-        return kind == "image" || kind == "video"
-    }
+    fun viewOnceSupported(chatId: String, kind: String): Boolean =
+        kind in proto(chatId).viewOnceKinds(chatId)
 
     /**
      * Telegram's own chat, by id when TDLib has published it and by the contact
@@ -820,8 +858,7 @@ object Bridge : EventListener {
 
     /** Who reacted to a message, and with what. Blocking; worker threads only. */
     fun reactionsOf(msg: MessageRow): List<Pair<String, String>> =
-        if (isTg(msg.chatId)) Tg.reactionSenders(msg.chatId, msg.id)
-        else db.reactionsOf(msg.chatId, msg.id)
+        proto(msg.chatId).reactionSenders(msg) ?: db.reactionsOf(msg.chatId, msg.id)
 
     fun sendDocument(
         chatId: String, filePath: String, fileName: String, mimeType: String, quoted: MessageRow? = null,
@@ -1009,10 +1046,10 @@ object Bridge : EventListener {
      * Blocking; worker threads only.
      */
     fun searchServer(chatId: String, query: String, fromMessageId: Long): Tg.SearchPage? =
-        if (isTg(chatId)) Tg.searchChat(chatId, query, fromMessageId) else null
+        proto(chatId).searchServer(chatId, query, fromMessageId)
 
     fun searchContext(chatId: String, msgId: String): List<MessageRow> =
-        if (isTg(chatId)) Tg.contextWindow(chatId, msgId) else emptyList()
+        proto(chatId).searchContext(chatId, msgId)
 
     /** [resolveNumber] could not ask — not "the number is not registered". */
     const val NUMBER_LOOKUP_FAILED = "failed"
@@ -1043,7 +1080,7 @@ object Bridge : EventListener {
     }
 
     fun searchSlice(chatId: String, msgId: String, newer: Boolean): List<MessageRow> =
-        if (isTg(chatId)) Tg.historySlice(chatId, msgId, newer) else emptyList()
+        proto(chatId).searchSlice(chatId, msgId, newer)
 
     /**
      * The chat's pictures around a message, for the viewer opened from a search
@@ -1052,7 +1089,7 @@ object Bridge : EventListener {
      * Empty for WhatsApp, whose server holds nothing searchable.
      */
     fun chatPhotos(chatId: String, msgId: String, newer: Boolean?): List<MessageRow> =
-        if (isTg(chatId)) Tg.chatPhotos(chatId, msgId, newer) else emptyList()
+        proto(chatId).chatPhotos(chatId, msgId, newer)
 
     /**
      * Fetches the file of a message shown in a search window. Those rows are not
@@ -1061,7 +1098,7 @@ object Bridge : EventListener {
      * Blocking.
      */
     fun searchMedia(chatId: String, msgId: String): String =
-        if (isTg(chatId)) Tg.downloadNow(chatId, msgId) else ""
+        proto(chatId).searchMedia(chatId, msgId)
 
     fun requestChatHistory(chatId: String) = proto(chatId).requestHistoryPage(chatId)
 
@@ -2105,9 +2142,10 @@ object Bridge : EventListener {
 
     fun visibleChats(): List<ChatRow> {
         val ctx = appContext ?: return db.chats()
-        val hidden = ProtoPicker.ALL.filterNot { Prefs.protoEnabled(ctx, it) }.toSet()
+        val hidden = Accounts.ALL.filterNot { Prefs.protoEnabled(ctx, it.proto) }
+            .map { it.proto }.toSet()
         if (hidden.isEmpty()) return db.chats()
-        return db.chats().filterNot { ProtoPicker.of(it.id) in hidden }
+        return db.chats().filterNot { Accounts.ofChat(it.id).proto in hidden }
     }
 
 

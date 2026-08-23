@@ -105,12 +105,16 @@ fun waMentionText(text: String, members: List<Mention>): Pair<String, List<Strin
     return out.toString() to hits.map { it.id }.distinct()
 }
 
-fun selfProtocol(ctx: android.content.Context, chatId: String): String = when {
-    chatId.isEmpty() -> ""
-    Tg.hasSession() && chatId == Tg.selfId() -> ctx.getString(R.string.telegram)
-    Signal.hasSession() && chatId == Signal.selfId() -> ctx.getString(R.string.signal)
-    chatId == Bridge.selfId() -> ctx.getString(R.string.whatsapp)
-    else -> ""
+fun selfProtocol(ctx: android.content.Context, chatId: String): String {
+    if (chatId.isEmpty()) return ""
+    for (i in Accounts.ALL.indices) {
+        val account = Accounts.ALL[i]
+        // No isLinked() check: an unlinked account has no self id, so a
+        // non-empty chat id cannot match one — and asking would cost a bridge
+        // call per chat row, which is what this is called from.
+        if (chatId == account.selfId()) return account.label(ctx)
+    }
+    return ""
 }
 
 /** True for a note to self on any protocol. */

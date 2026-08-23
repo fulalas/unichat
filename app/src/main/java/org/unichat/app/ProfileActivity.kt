@@ -40,7 +40,7 @@ class ProfileActivity : BaseActivity() {
         applyProtocolTheme(proto)
         setContentView(R.layout.activity_profile)
         supportActionBar?.apply {
-            title = getString(R.string.profile) + " — " + ProtoPicker.label(this@ProfileActivity, proto)
+            title = getString(R.string.profile) + " — " + account.label(this@ProfileActivity)
             setDisplayHomeAsUpEnabled(true)
         }
         if (!Bridge.init(this)) { finish(); return }
