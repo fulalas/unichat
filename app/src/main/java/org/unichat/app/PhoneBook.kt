@@ -60,6 +60,72 @@ object PhoneBook {
     }
 
     /**
+     * Every number in the address book, deduplicated. Feeds Signal's contact
+     * discovery, which has no other way to learn who the user knows: a freshly
+     * registered account holds no server-side contact list.
+     */
+    fun allEntries(ctx: Context, limit: Int = 2000): List<Entry> {
+        if (!granted(ctx)) return emptyList()
+        val region = deviceRegion(ctx)
+        val cols = arrayOf(
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+            ContactsContract.CommonDataKinds.Phone.NUMBER,
+        )
+        val out = ArrayList<Entry>()
+        val seen = HashSet<String>()
+        runCatching {
+            ctx.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI, cols, null, null, null
+            )?.use { c ->
+                while (c.moveToNext() && out.size < limit) {
+                    val name = c.getString(0) ?: continue
+                    val number = toE164(c.getString(1) ?: continue, region)
+                    if (number.isEmpty() || !seen.add(number)) continue
+                    out.add(Entry(name, number))
+                }
+            }
+        }
+        return out
+    }
+
+    /**
+     * Address-book numbers are mostly saved in local form, with no country
+     * code — over half of them here. [normalize] refuses to guess one, which is
+     * right when the result would open a chat, but for contact discovery it
+     * simply hid most of the address book. The platform formatter applies the
+     * device's own region, the same assumption the dialler makes.
+     */
+    private fun toE164(raw: String, region: String): String {
+        if (region.isNotEmpty()) {
+            android.telephony.PhoneNumberUtils.formatNumberToE164(raw, region)?.let {
+                return normalize(it)
+            }
+        }
+        return normalize(raw)
+    }
+
+    private fun deviceRegion(ctx: Context): String {
+        val sim = runCatching {
+            ctx.getSystemService(android.telephony.TelephonyManager::class.java)?.simCountryIso
+        }.getOrNull()
+        return (sim?.takeIf { it.isNotBlank() }
+            ?: java.util.Locale.getDefault().country).uppercase()
+    }
+
+    /** How many phone rows exist at all, to compare against [allEntries]. */
+    fun rawCount(ctx: Context): Int {
+        if (!granted(ctx)) return 0
+        var n = 0
+        runCatching {
+            ctx.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER), null, null, null
+            )?.use { n = it.count }
+        }
+        return n
+    }
+
+    /**
      * A stored number in international form, or "" when it plainly is not one.
      * Anything without a country code is dropped rather than guessed at: a
      * wrong guess would open a chat with a stranger.

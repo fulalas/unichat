@@ -9,5 +9,12 @@ fun Context.themeColor(attr: Int): Int {
     return tv.data
 }
 
-fun Context.protocolAccent(chatId: String): Int =
-    getColor(if (Tg.isTgId(chatId)) R.color.accent else R.color.accent_wa)
+fun Context.protocolAccentOf(proto: String): Int = getColor(
+    when (proto) {
+        ProtoPicker.TG -> R.color.accent
+        ProtoPicker.SG -> R.color.accent_sg
+        else -> R.color.accent_wa
+    }
+)
+
+fun Context.protocolAccent(chatId: String): Int = protocolAccentOf(ProtoPicker.of(chatId))

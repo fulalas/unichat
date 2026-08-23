@@ -17,5 +17,6 @@ class App : Application() {
         // The accent-folding table is built on first use, and its first user is
         // usually a keystroke in a search box — on the main thread, mid-typing.
         Io.files.execute { Search.fold('á') }
+        Signal.init(this)
     }
 }

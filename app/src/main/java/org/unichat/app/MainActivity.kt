@@ -19,14 +19,13 @@ import androidx.recyclerview.widget.RecyclerView
 class MainActivity : BaseActivity(), Bridge.UiListener {
 
     private companion object {
-        private const val M_LOGOUT = 1
         private const val M_SEARCH = 2
         private const val M_THEME = 3
         private const val M_FONT = 4
         private const val M_ABOUT = 5
         private const val M_PRIVACY = 6
         private const val M_PROFILE = 7
-        private const val M_ADD_ACCOUNT = 8
+        private const val M_ACCOUNTS = 9
     }
 
     private lateinit var chatList: RecyclerView
@@ -185,7 +184,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
 
     private fun reload() {
         io.execute {
-            val chats = Bridge.db.chats()
+            val chats = Bridge.visibleChats()
             runOnUiThread {
                 allChats = chats
                 applyFilter()
@@ -194,8 +193,12 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun withChatStates(chats: List<ChatRow>): List<ChatRow> = chats.map {
-        val state = Bridge.chatState(it.id) ?: ""
-        val online = !it.isGroup && Bridge.isOnline(it.id)
+        // Nothing presence-related for a note to self: reporting that you are
+        // online, or typing, to yourself is noise — and the green dot on your
+        // own row reads as another person being there.
+        val self = isSelfChat(this, it.id)
+        val state = if (self) "" else Bridge.chatState(it.id) ?: ""
+        val online = !self && !it.isGroup && Bridge.isOnline(it.id)
         if (state == it.transientState && online == it.online) it
         else it.copy(transientState = state, online = online)
     }
@@ -449,37 +452,22 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         menu.add(0, M_PRIVACY, 2, R.string.privacy)
         menu.add(0, M_THEME, 3, R.string.theme)
         menu.add(0, M_FONT, 4, R.string.font_size)
-        menu.add(0, M_ABOUT, 5, R.string.about)
+        menu.add(0, M_ACCOUNTS, 5, R.string.manage_accounts)
         menuLinkedAccounts = ProtoPicker.linked().size
-        if (menuLinkedAccounts < 2) menu.add(0, M_ADD_ACCOUNT, 6, R.string.link_account)
-        menu.add(0, M_LOGOUT, 7, R.string.logout)
+        // One entry covering add and remove, for every protocol. The old
+        // "Link account" item hid itself at two accounts, which left no way to
+        // reach a third once WhatsApp and Telegram were both linked.
+        menu.add(0, M_ABOUT, 6, R.string.about)
         return true
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
-            M_LOGOUT -> {
-                ProtoPicker.pick(this) { proto ->
-                    AlertDialog.Builder(this)
-                        .setTitle(getString(R.string.logout_account, ProtoPicker.label(this, proto)))
-                        .setMessage(R.string.logout_confirm)
-                        .setPositiveButton(android.R.string.ok) { _, _ ->
-                            // both logouts only queue work on their executors, so
-                            // the menu can't be rebuilt here — hasSession() still
-                            // says linked. onStateChanged / onTgAuth do it once
-                            // the unlink has actually landed.
-                            if (proto == ProtoPicker.TG) Tg.logout() else Bridge.logout()
-                        }
-                        .setNegativeButton(android.R.string.cancel, null)
-                        .show()
-                }
-                return true
-            }
             M_THEME -> { showThemeDialog(); return true }
             M_FONT -> { showFontSizeDialog(); return true }
             M_ABOUT -> { showAboutDialog(); return true }
             M_PRIVACY -> {
-                ProtoPicker.pick(this) { proto ->
+                ProtoPicker.pickFrom(this, ProtoPicker.editable()) { proto ->
                     startActivity(
                         Intent(this, PrivacyActivity::class.java).putExtra("proto", proto)
                     )
@@ -487,15 +475,15 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 return true
             }
             M_PROFILE -> {
-                ProtoPicker.pick(this) { proto ->
+                ProtoPicker.pickFrom(this, ProtoPicker.editable()) { proto ->
                     startActivity(
                         Intent(this, ProfileActivity::class.java).putExtra("proto", proto)
                     )
                 }
                 return true
             }
-            M_ADD_ACCOUNT -> {
-                startActivity(Intent(this, LoginActivity::class.java))
+            M_ACCOUNTS -> {
+                startActivity(Intent(this, AccountsActivity::class.java))
                 return true
             }
         }

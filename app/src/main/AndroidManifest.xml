@@ -77,6 +77,24 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
 
         <activity
+            android:name=".AccountsActivity"
+            android:exported="false"
+            android:parentActivityName=".MainActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
+
+        <activity
+            android:name=".SignalPinActivity"
+            android:exported="false"
+            android:parentActivityName=".AccountsActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
+
+        <activity
+            android:name=".SignalRegisterActivity"
+            android:exported="false"
+            android:parentActivityName=".AccountsActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
+
+        <activity
             android:name=".ShareActivity"
             android:exported="true"
             android:excludeFromRecents="true"

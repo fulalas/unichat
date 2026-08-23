@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Per-protocol chat colors. The base theme points them at the blue
-         (Telegram) set; ChatActivity applies ThemeOverlay.UniChat.Wa on top
-         for WhatsApp chats (green). Everything inside a chat screen must use
-         these attrs instead of @color/accent & friends. -->
+         (Telegram) set; a chat screen applies ThemeOverlay.UniChat.Wa (green)
+         or .Sg (violet) on top. Everything inside a chat screen must use these
+         attrs instead of @color/accent & friends, or it stays Telegram blue.
+         A new protocol needs its own overlay here AND in applyProtocolTheme. -->
     <attr name="chatAccent" format="color|reference" />
     <attr name="chatBubbleOut" format="color|reference" />
     <attr name="chatQuoteFlash" format="color|reference" />

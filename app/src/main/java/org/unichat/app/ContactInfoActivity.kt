@@ -23,7 +23,7 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         chatId = intent.getStringExtra("chatId") ?: run { finish(); return }
-        applyProtocolTheme(Tg.isTgId(chatId))
+        applyProtocolTheme(ProtoPicker.of(chatId))
         setContentView(R.layout.activity_contact_info)
         supportActionBar?.apply {
             setTitle(if (isGroup) R.string.group_info else R.string.contact_info)

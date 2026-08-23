@@ -247,7 +247,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         pickViewOnce = savedInstanceState?.getBoolean(STATE_PICK_VIEW_ONCE) == true
         // WhatsApp chats swap the blue chat palette for the green one; must
         // happen before any view of this screen inflates
-        applyProtocolTheme(Tg.isTgId(chatId))
+        applyProtocolTheme(ProtoPicker.of(chatId))
         setContentView(R.layout.activity_chat)
 
         if (!Bridge.init(this)) { finish(); return }
@@ -1458,8 +1458,14 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun showChatMenu(anchor: android.view.View) {
         val popup = android.widget.PopupMenu(this, anchor)
-        popup.menu.add(0, 1, 0, R.string.sync_all)
-        popup.menu.add(0, 2, 1, R.string.export_chat)
+        // Neither is offered for Signal: a newly registered account has no
+        // history to sync, and export is not implemented — offering it walked
+        // the user through the save dialog only to write an empty file and
+        // report failure.
+        if (!Signal.isSgId(chatId)) {
+            popup.menu.add(0, 1, 0, R.string.sync_all)
+            popup.menu.add(0, 2, 1, R.string.export_chat)
+        }
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> {
@@ -1476,7 +1482,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun startChatExport() {
-        val proto = getString(if (Tg.isTgId(chatId)) R.string.telegram else R.string.whatsapp)
+        val proto = ProtoPicker.label(this, ProtoPicker.of(chatId))
         createExportFile.launch(
             getString(R.string.export_file_name, proto, safeDisplayFileName(chatDisplayName))
         )
@@ -1525,7 +1531,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun updateSubtitle() {
         val exportCount = Bridge.exportProgress(chatId)
         val syncPct = Bridge.syncAllProgress(chatId)
-        val state = Bridge.chatState(chatId)
+        // A note to self has no other party, so presence and typing are
+        // meaningless here; progress lines still apply.
+        val self = isSelfChat(this, chatId)
+        val state = if (self) null else Bridge.chatState(chatId)
         val seeking = seekQuotedId != null
         val transient =
             exportCount >= 0 || syncPct >= 0 || seeking || state == "typing" || state == "recording"
@@ -1535,7 +1544,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             seeking -> getString(R.string.syncing_message)
             state == "typing" -> activityLine(getString(R.string.typing))
             state == "recording" -> activityLine(getString(R.string.recording_voice))
-            isGroup -> null
+            isGroup || self -> null
             Bridge.isOnline(chatId) -> getString(R.string.online)
             Bridge.lastSeenOf(chatId) > 0 ->
                 getString(R.string.last_seen, TimeFormat.compactWithTime(this, Bridge.lastSeenOf(chatId)))
@@ -2247,23 +2256,62 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     // A number without a country code is never guessed at — a wrong guess
     // would open a chat with a stranger under the card's name.
-    private fun messageContact(msg: MessageRow) {
+    /**
+     * A shared contact card is just a name and a number — it says nothing about
+     * where that person can be reached. Ask, instead of assuming the protocol
+     * the card happened to arrive on: a Signal card used to open a WhatsApp
+     * chat, because anything that was not Telegram fell through to WhatsApp.
+     * ProtoPicker skips the dialog when only one account is linked.
+     */
+    private fun messageContact(msg: MessageRow) =
+        ProtoPicker.pick(this) { proto -> messageContactVia(proto, msg) }
+
+    private fun messageContactVia(proto: String, msg: MessageRow) {
         val name = cardLines(msg).firstOrNull().orEmpty()
-        if (Tg.isTgId(chatId)) {
-            val userId = msg.fileId.toLongOrNull()
-            if (userId == null) {
-                Toast.makeText(this, R.string.not_on_telegram, Toast.LENGTH_SHORT).show()
+        if (proto == ProtoPicker.SG) {
+            val number = cardPhones(msg).firstOrNull()
+                ?.let { PhoneBook.normalize(it).removePrefix("+") }.orEmpty()
+            if (number.isEmpty()) {
+                Toast.makeText(this, R.string.number_check_failed, Toast.LENGTH_SHORT).show()
                 return
             }
-            resolveThenOpen(R.string.opening_chat, {
-                Tg.createUserChat(userId).ifEmpty { R.string.chat_open_failed }
+            resolveThenOpen(0, {
+                Signal.lookupNumber(number).ifEmpty { R.string.not_on_signal }
             }) { id -> openContactChat(id, name) }
             return
         }
-        val waid = msg.fileId.ifEmpty {
-            cardPhones(msg).firstOrNull()
-                ?.let { PhoneBook.normalize(it).removePrefix("+") }.orEmpty()
+        if (proto == ProtoPicker.TG) {
+            // Only usable when the card came from Telegram: fileId holds that
+            // protocol's own id, and a WhatsApp card's digits would parse as a
+            // Long just as happily and open a stranger's chat.
+            val userId = msg.fileId.takeIf { Tg.isTgId(chatId) }?.toLongOrNull()
+            if (userId != null) {
+                resolveThenOpen(0, {
+                    Tg.createUserChat(userId).ifEmpty { R.string.chat_open_failed }
+                }) { id -> openContactChat(id, name) }
+                return
+            }
+            // The card came from another protocol, so there is no Telegram user
+            // id on it — resolve the number instead of refusing outright.
+            val number = cardPhones(msg).firstOrNull()
+                ?.let { PhoneBook.normalize(it) }.orEmpty()
+            if (number.isEmpty()) {
+                Toast.makeText(this, R.string.number_check_failed, Toast.LENGTH_SHORT).show()
+                return
+            }
+            resolveThenOpen(0, {
+                Tg.createChatByPhone(number).ifEmpty { R.string.not_on_telegram }
+            }) { id -> openContactChat(id, name) }
+            return
         }
+        // fileId only carries the id of the protocol the card arrived on, so it
+        // is reusable only when that is the protocol being opened.
+        val waid = msg.fileId.takeIf { !Tg.isTgId(chatId) && !Signal.isSgId(chatId) }
+            .orEmpty()
+            .ifEmpty {
+                cardPhones(msg).firstOrNull()
+                    ?.let { PhoneBook.normalize(it).removePrefix("+") }.orEmpty()
+            }
         if (waid.isEmpty()) {
             Toast.makeText(this, R.string.number_check_failed, Toast.LENGTH_SHORT).show()
             return
@@ -2379,8 +2427,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         if (!labelOnly) add(R.string.forward) { pickForwardTarget(msg) }
         if (msg.fromMe && msg.msgType == "" && Bridge.canEdit(msg)) add(R.string.edit) { startEdit(msg) }
-        add(R.string.delete) { confirmDelete(listOf(msg)) }
         if (msg.text.isNotEmpty() && msg.msgType != "audio") add(R.string.copy) { copyText(msg.text) }
+        add(R.string.delete) { confirmDelete(listOf(msg)) }
         if (msg.msgType != "" && !labelOnly) add(R.string.share) { shareMessage(msg) }
         add(R.string.react) { showReactionPicker(msg) }
 

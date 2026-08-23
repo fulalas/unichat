@@ -14,8 +14,12 @@ open class BaseActivity : AppCompatActivity() {
     // resolve returns the chat id to open (String) or a string resource to
     // toast (Int); it runs on Io.lookup because it can block for up to 75s
     protected fun resolveThenOpen(progressRes: Int, resolve: () -> Any, open: (String) -> Unit) {
-        android.widget.Toast
-            .makeText(this, progressRes, android.widget.Toast.LENGTH_SHORT).show()
+        // 0 means say nothing: the chat opens quickly enough that announcing it
+        // is just a toast the user has to watch expire.
+        if (progressRes != 0) {
+            android.widget.Toast
+                .makeText(this, progressRes, android.widget.Toast.LENGTH_SHORT).show()
+        }
         Io.lookup.execute {
             val out = resolve()
             runOnUiThread {
@@ -40,8 +44,18 @@ open class BaseActivity : AppCompatActivity() {
             }
         }, open)
 
-    protected fun applyProtocolTheme(isTelegram: Boolean) {
-        if (!isTelegram) theme.applyStyle(R.style.ThemeOverlay_UniChat_Wa, true)
+    /**
+     * Repaints a screen in its protocol's colours. Keyed on the protocol, not
+     * on a two-way "is it Telegram" flag: under that flag every non-Telegram
+     * chat took the WhatsApp overlay, so Signal chats came out green.
+     */
+    protected fun applyProtocolTheme(proto: String) {
+        val overlay = when (proto) {
+            ProtoPicker.TG -> return // the base theme is already Telegram blue
+            ProtoPicker.SG -> R.style.ThemeOverlay_UniChat_Sg
+            else -> R.style.ThemeOverlay_UniChat_Wa
+        }
+        theme.applyStyle(overlay, true)
     }
 
     override fun onSupportNavigateUp(): Boolean {

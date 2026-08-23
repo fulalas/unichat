@@ -43,6 +43,61 @@ GRADLE="${GRADLE:-gradle}"
 WHATSMEOW_REPO="https://github.com/tulir/whatsmeow.git"
 WHATSMEOW_BRANCH="main"
 
+# signalmeow (Signal) rides in the same way, but pinned to a tag rather than
+# tracking main: pkg/libsignalgo is hand-written cgo against one libsignal ABI,
+# and build-libsignal.sh reads the required libsignal version out of the
+# checkout. Moving this pin means rebuilding libsignal_ffi.a, which the stamp in
+# gobridge/ext/libsignal handles automatically.
+SIGNALMEOW_REPO="https://github.com/mautrix/signal.git"
+SIGNALMEOW_TAG="v0.2608.0"
+
+ensure_signalmeow() {
+    local dest="$DIR/gobridge/ext/signal"
+    local stamp="$dest/.sg-tag"
+    local patch="$DIR/gobridge/ext/signal-local.patch"
+    if [ -d "$dest" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$SIGNALMEOW_TAG" ]; then
+        echo "== signalmeow up to date @ $SIGNALMEOW_TAG =="
+        return
+    fi
+    echo "== Fetching signalmeow @ $SIGNALMEOW_TAG =="
+    # Same staging dance as whatsmeow: swap in only on full success, so a failed
+    # fetch or patch leaves the previous checkout intact rather than nothing.
+    local staging="$dest.new"
+    rm -rf "$staging"
+    if ! git clone -q --depth 1 --branch "$SIGNALMEOW_TAG" "$SIGNALMEOW_REPO" "$staging"; then
+        rm -rf "$staging"
+        echo "signalmeow: fetch of $SIGNALMEOW_TAG failed" >&2
+        [ -d "$dest" ] && { echo "   keeping the existing checkout" >&2; return; }
+        exit 1
+    fi
+    # Unlike whatsmeow's, this patch is not optional: it is what makes the cgo
+    # link flags Android-correct (the NDK has no libstdc++), so an unpatched tree
+    # fails at link, not at runtime. Fail loudly instead of building it.
+    if ! git -C "$staging" apply "$patch"; then
+        rm -rf "$staging"
+        echo "signalmeow: signal-local.patch did not apply against $SIGNALMEOW_TAG" >&2
+        echo "   refresh gobridge/ext/signal-local.patch; the Go bridge cannot link without it" >&2
+        exit 1
+    fi
+    rm -rf "$staging/.git"
+    rm -rf "$dest"
+    mv "$staging" "$dest"
+    # Re-assert the replace before tidying. Without it tidy happily resolves
+    # mautrix-signal to the published v0.2608.0 in the module cache instead of
+    # this patched checkout — the build still succeeds, so the only symptom is
+    # the unpatched cgo flags coming back and the app dying at startup on a
+    # missing libc++_shared.so. Cost an afternoon once; not relying on go.mod
+    # keeping the line.
+    ( cd "$DIR/gobridge" &&
+      go mod edit -require=go.mau.fi/mautrix-signal@v0.0.0 \
+                  -replace=go.mau.fi/mautrix-signal=./ext/signal &&
+      go mod tidy ) || {
+        echo "signalmeow: go mod tidy failed after updating to $SIGNALMEOW_TAG" >&2
+        exit 1
+    }
+    echo "$SIGNALMEOW_TAG" > "$stamp"
+}
+
 ensure_whatsmeow() {
     local dest="$DIR/gobridge/ext/whatsmeow"
     local stamp="$dest/.wm-commit"
@@ -130,8 +185,22 @@ ensure_whatsmeow() {
 
 if [ "$APK_ONLY" != 1 ]; then
     ensure_whatsmeow
-    echo "== Building Go bridge (whatsmeow) =="
+    ensure_signalmeow
+    NDK_LLVM="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
+    # Must run after ensure_signalmeow: it reads the required libsignal version
+    # out of the signalmeow checkout.
+    "$DIR/build-libsignal.sh"
+    echo "== Building Go bridge (whatsmeow + signalmeow) =="
     cd "$DIR/gobridge"
+    # libsignalgo asks the linker for -lsignal_ffi; only this build knows where
+    # the cross-compiled archive landed. Exported rather than passed inline
+    # because gomobile shells out to go build and forwards the environment.
+    # --gc-sections here rather than in -extldflags: gomobile splits -ldflags on
+    # spaces before go build sees it, so a multi-flag -extldflags never survives
+    # as one argument. CGO_LDFLAGS reaches the same external link intact.
+    # Worth 46 MB -> 43 MB on libgojni.so, because most of libsignal_ffi.a is
+    # never reached from the bridge.
+    export CGO_LDFLAGS="-L$DIR/gobridge/ext/libsignal -Wl,--gc-sections"
     go build .
     # -androidapi must match minSdk in app/build.gradle, and the target list must
     # match its abiFilters — an APK whose native lib needs a newer API than
@@ -147,9 +216,34 @@ if [ "$APK_ONLY" != 1 ]; then
     # default) fails to load there — the APK installs and then dies with
     # UnsatisfiedLinkError at Bridge.init. build-tdlib.sh passes the same flag
     # for the TDLib libs, so both halves of the app stay loadable.
+    # -s -w drops the Go symbol table and DWARF, which gradle otherwise fails to
+    # strip ("Unable to strip the following libraries") and ships whole:
+    # 82 MB -> 46 MB of libgojni.so on its own.
     gomobile bind -target=android/arm64 -androidapi "$MIN_SDK" \
-        -ldflags="-extldflags=-Wl,-z,max-page-size=16384" \
+        -ldflags="-s -w -extldflags=-Wl,-z,max-page-size=16384" \
         -javapkg=org.unichat -o "$DIR/app/libs/wmbridge-new.aar" .
+    # libsignal drags in BoringSSL's C++ half, and the NDK clang driver will
+    # happily satisfy it with libc++_shared.so. gomobile packages only
+    # libgojni.so, so such an aar builds and installs and then dies at startup
+    # with "dlopen failed: library libc++_shared.so not found" — caught here
+    # once already, after it had been installed on a phone. Fail the build
+    # instead: the fix is -static-libstdc++ in signal-local.patch.
+    # Read the real dynamic section, not `strings`: the name of a library the
+    # binary merely mentions is not the same as one it will dlopen.
+    SO_TMP=$(mktemp -d)
+    unzip -q -o -j "$DIR/app/libs/wmbridge-new.aar" jni/arm64-v8a/libgojni.so -d "$SO_TMP"
+    BAD=$("$NDK_LLVM/bin/llvm-readelf" -d "$SO_TMP/libgojni.so" 2>/dev/null \
+        | grep -oE "libc\+\+_shared\.so|libstdc\+\+\.so" | sort -u)
+    rm -rf "$SO_TMP"
+    if [ -n "$BAD" ]; then
+        rm -f "$DIR/app/libs/wmbridge-new.aar"
+        echo "gomobile: libgojni.so needs $BAD, which is not packaged in the aar" >&2
+        echo "   the app would install and then die at Bridge.init" >&2
+        echo "   the C++ runtime libsignal pulls in must be linked statically:" >&2
+        echo "   check that gobridge/go.mod still replaces mautrix-signal with ./ext/signal," >&2
+        echo "   and that signal-local.patch applied (-lc++_static -lc++abi)" >&2
+        exit 1
+    fi
     mv "$DIR/app/libs/wmbridge-new.aar" "$DIR/app/libs/wmbridge.aar"
     if [ -f "$DIR/app/libs/wmbridge-new-sources.jar" ]; then
         mv -f "$DIR/app/libs/wmbridge-new-sources.jar" "$DIR/app/libs/wmbridge-sources.jar"

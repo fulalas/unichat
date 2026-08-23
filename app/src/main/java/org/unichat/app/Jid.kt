@@ -1,6 +1,20 @@
 package org.unichat.app
 
-fun isGroupId(id: String): Boolean = id.endsWith("@g.us") || id.startsWith("tg:-")
+fun isGroupId(id: String): Boolean =
+    id.endsWith("@g.us") || id.startsWith("tg:-") || isSgGroupId(id)
+
+// A Signal 1:1 chat is keyed by the other party's ACI — or by their PNI, marked
+// with a "pni:" tag, when contact discovery did not return an ACI. Either way it
+// is a UUID; a group is keyed by a base64 group identifier, which is not.
+fun isSgGroupId(id: String): Boolean {
+    if (!id.startsWith(Signal.PREFIX)) return false
+    // Both spellings: rows written before the prefix was corrected use
+    // lowercase, and only one can match at the front.
+    val bare = id.removePrefix(Signal.PREFIX)
+        .removePrefix(Signal.PNI_PREFIX)
+        .removePrefix("pni:")
+    return bare.length != 36
+}
 
 /** True for a phone-number JID — the only id kind that holds a real phone
  *  number. A contact's @lid alias and a group's @g.us id do not. */
@@ -94,9 +108,14 @@ fun waMentionText(text: String, members: List<Mention>): Pair<String, List<Strin
 fun selfProtocol(ctx: android.content.Context, chatId: String): String = when {
     chatId.isEmpty() -> ""
     Tg.hasSession() && chatId == Tg.selfId() -> ctx.getString(R.string.telegram)
+    Signal.hasSession() && chatId == Signal.selfId() -> ctx.getString(R.string.signal)
     chatId == Bridge.selfId() -> ctx.getString(R.string.whatsapp)
     else -> ""
 }
+
+/** True for a note to self on any protocol. */
+fun isSelfChat(ctx: android.content.Context, chatId: String): Boolean =
+    selfProtocol(ctx, chatId).isNotEmpty()
 
 fun ChatRow.displayLabelWithProto(ctx: android.content.Context): String {
     val proto = selfProtocol(ctx, id)

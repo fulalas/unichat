@@ -13,6 +13,13 @@
     <color name="quote_flash">#4D2481CC</color>
     <color name="msg_selected">#332481CC</color>
 
+    <!-- Signal's own brand blue is unusable here: it reads as Telegram. Violet
+         is the one strong hue left once blue and green are taken. -->
+    <color name="accent_sg">#6D28D9</color>
+    <color name="bubble_out_sg">#E5DBFA</color>
+    <color name="quote_flash_sg">#4D6D28D9</color>
+    <color name="msg_selected_sg">#336D28D9</color>
+
     <color name="accent_wa">#008069</color>
     <color name="bubble_out_wa">#D9FDD3</color>
     <color name="quote_flash_wa">#4D008069</color>

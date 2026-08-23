@@ -47,7 +47,7 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         chatId = intent.getStringExtra("chatId").orEmpty()
-        if (chatId.isNotEmpty()) applyProtocolTheme(Tg.isTgId(chatId))
+        if (chatId.isNotEmpty()) applyProtocolTheme(ProtoPicker.of(chatId))
         supportActionBar?.hide()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.insetsController?.hide(WindowInsets.Type.systemBars())

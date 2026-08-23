@@ -1,0 +1,30 @@
+Base-Commit: 0d5f3f457dac53707973f525809fe9c6dc926bd6 (v0.2608.0)
+
+--- a/pkg/libsignalgo/cflags.go
++++ b/pkg/libsignalgo/cflags.go
+@@ -1,3 +1,5 @@
++//go:build !android
++
+ package libsignalgo
+ 
+ /*
+new file mode 100644
+--- /dev/null
++++ b/pkg/libsignalgo/cflags_android.go
+@@ -0,0 +1,16 @@
++//go:build android
++
++package libsignalgo
++
++/*
++// Upstream links -lstdc++, which on the NDK is only a stub, while
++// libsignal_ffi.a genuinely needs a C++ runtime: BoringSSL's C++ half plus the
++// __cxa_* unwinder Rust panics go through.
++//
++// It has to be the STATIC libc++. gomobile packages only libgojni.so into the
++// aar, so a DT_NEEDED on libc++_shared.so builds and installs fine and then
++// kills the app at startup with "dlopen failed: library libc++_shared.so not
++// found" — which is how this was found, on a phone.
++#cgo LDFLAGS: -lsignal_ffi -ldl -lm -lz -lc++_static -lc++abi
++*/
++import "C"

@@ -13,6 +13,11 @@
     <color name="quote_flash">#5C6AB2F2</color>
     <color name="msg_selected">#336AB2F2</color>
 
+    <color name="accent_sg">#A78BFA</color>
+    <color name="bubble_out_sg">#3B2E63</color>
+    <color name="quote_flash_sg">#5CA78BFA</color>
+    <color name="msg_selected_sg">#33A78BFA</color>
+
     <color name="accent_wa">#00A884</color>
     <color name="bubble_out_wa">#005C4B</color>
     <color name="quote_flash_wa">#5C00A884</color>

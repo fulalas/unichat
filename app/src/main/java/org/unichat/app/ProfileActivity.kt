@@ -24,7 +24,6 @@ class ProfileActivity : BaseActivity() {
     private val io = Io.executor
     private lateinit var selfId: String
     private var proto: String = ProtoPicker.WA
-    private val isTg get() = proto == ProtoPicker.TG
     private var name: String = ""
     private var about: String = ""
 
@@ -37,7 +36,7 @@ class ProfileActivity : BaseActivity() {
         proto = intent.getStringExtra("proto") ?: ProtoPicker.WA
         // this screen belongs to one account, so it wears that
         // protocol's accent; must precede any view inflation
-        applyProtocolTheme(isTg)
+        applyProtocolTheme(proto)
         setContentView(R.layout.activity_profile)
         supportActionBar?.apply {
             title = getString(R.string.profile) + " — " + ProtoPicker.label(this@ProfileActivity, proto)
@@ -54,8 +53,21 @@ class ProfileActivity : BaseActivity() {
         avatar.clipToOutline = true
         avatar.outlineProvider = ViewOutlineProvider.BACKGROUND
 
-        avatar.setOnClickListener { pickPhoto.launch("image/*") }
-        findViewById<View>(R.id.editPhoto).setOnClickListener { pickPhoto.launch("image/*") }
+        // Publishing an avatar means encrypting it under the profile key and
+        // uploading to the CDN, which is not implemented for Signal — so the
+        // picker is not offered rather than silently doing nothing.
+        if (Bridge.supportsProfilePicture(proto)) {
+            avatar.setOnClickListener { pickPhoto.launch("image/*") }
+        }
+        // Same guard as the avatar itself: without it, picking a photo on the
+        // Signal screen fell through to the WhatsApp path and replaced the
+        // WhatsApp account's picture.
+        val editPhoto = findViewById<View>(R.id.editPhoto)
+        if (Bridge.supportsProfilePicture(proto)) {
+            editPhoto.setOnClickListener { pickPhoto.launch("image/*") }
+        } else {
+            editPhoto.visibility = View.GONE
+        }
         findViewById<View>(R.id.rowName).setOnClickListener { editName() }
         findViewById<View>(R.id.rowAbout).setOnClickListener { editAbout() }
 
@@ -63,7 +75,13 @@ class ProfileActivity : BaseActivity() {
         // locally-saved contact name
         name = Bridge.myName(proto)
         valueName.text = name
-        valuePhone.text = if (isTg) Tg.myPhone() else formatPhone(selfId)
+        // Signal ids are ACIs, not phone JIDs, so the number has to come from
+        // the account rather than be parsed back out of the id.
+        valuePhone.text = when (proto) {
+            ProtoPicker.TG -> Tg.myPhone()
+            ProtoPicker.SG -> Signal.myPhone()
+            else -> formatPhone(selfId)
+        }
         loadAvatar()
         loadAbout()
     }

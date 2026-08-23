@@ -11,13 +11,18 @@ import androidx.appcompat.app.AlertDialog
 fun Activity.targetChoices(): Pair<List<String>, List<String>> {
     val ids = ArrayList<String>()
     val labels = ArrayList<String>()
-    val chats = Bridge.db.chats()
-    // Both notes-to-self stay pinned above the chats, Telegram's always first:
-    // it is where files are sent, and ordering the two by recency (as everything
-    // below is ordered) pushed it under WhatsApp's on any day it went unused.
+    val chats = Bridge.visibleChats()
+    // Every notes-to-self stays pinned above the chats, in a fixed order —
+    // Telegram, Signal, WhatsApp — rather than by recency: Telegram's is where
+    // files are sent, and ordering these the way everything below is ordered
+    // pushed it under the others on any day it went unused.
     // selfIdBlocking, not selfId: both callers are on a worker thread, and a
     // share that started this process gets here before TDLib knows who we are.
-    val selves = listOf(if (Tg.hasSession()) Tg.selfIdBlocking() else "", Bridge.selfId())
+    val selves = listOf(
+        if (Tg.hasSession() && Bridge.protoEnabled(ProtoPicker.TG)) Tg.selfIdBlocking() else "",
+        if (Bridge.protoEnabled(ProtoPicker.SG)) Signal.selfId() else "",
+        if (Bridge.protoEnabled(ProtoPicker.WA)) Bridge.selfId() else "",
+    )
         .filter { it.isNotEmpty() }
         .distinct()
     for (self in selves) {

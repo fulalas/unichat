@@ -705,15 +705,26 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         writableDatabase.execSQL("UPDATE messages SET file_status=0 WHERE file_status=1")
     }
 
-    private fun clearProtocolData(match: String) = writableDatabase.transact {
-        execSQL("DELETE FROM messages WHERE chat_id $match 'tg:%'")
-        execSQL("DELETE FROM reactions WHERE chat_id $match 'tg:%'")
-        execSQL("DELETE FROM chats WHERE id $match 'tg:%'")
-        execSQL("DELETE FROM contacts WHERE id $match 'tg:%'")
-        execSQL("DELETE FROM deleted_chats WHERE id $match 'tg:%'")
+    /**
+     * [predicate] is built per table with the id column's name, because it is
+     * `chat_id` on messages and reactions and `id` everywhere else. Passing the
+     * column in beats rewriting the finished SQL: a blind replace of "id" would
+     * also hit any predicate whose literal happened to contain those letters.
+     */
+    private fun clearProtocolData(predicate: (String) -> String) = writableDatabase.transact {
+        execSQL("DELETE FROM messages WHERE ${predicate("chat_id")}")
+        execSQL("DELETE FROM reactions WHERE ${predicate("chat_id")}")
+        execSQL("DELETE FROM chats WHERE ${predicate("id")}")
+        execSQL("DELETE FROM contacts WHERE ${predicate("id")}")
+        execSQL("DELETE FROM deleted_chats WHERE ${predicate("id")}")
     }
 
-    fun clearWaData() = clearProtocolData("NOT LIKE")
+    fun clearSignalData() = clearProtocolData { "$it LIKE 'sg:%'" }
+
+    // WhatsApp is the protocol without a prefix, so its rows can only be named
+    // by excluding every other protocol's. Each new prefix has to be added here
+    // or unlinking WhatsApp silently wipes that protocol's chats too.
+    fun clearWaData() = clearProtocolData { "$it NOT LIKE 'tg:%' AND $it NOT LIKE 'sg:%'" }
 
     /** Renames a chat without touching its other columns. upsertChat writes
      *  `archived` too, so using it for a rename un-archived the chat. */
@@ -726,7 +737,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         )
     }
 
-    fun clearTgData() = clearProtocolData("LIKE")
+    fun clearTgData() = clearProtocolData { "$it LIKE 'tg:%'" }
 
     /**
      * Replaces a message's media reference. Telegram file ids are only valid
@@ -765,6 +776,18 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         )
     }
 
+    /**
+     * An existing chat with the person holding [phone] on one protocol, matched
+     * on the stored bare-digit number. Contact discovery answers with whichever
+     * identifier the server felt like giving, so the id it returns need not be
+     * the one an existing chat is keyed by.
+     */
+    fun chatIdByPhone(phone: String, prefix: String): String? = queryFirst(
+        "SELECT c.id FROM contacts c JOIN chats ch ON ch.id=c.id " +
+            "WHERE c.phone=? AND c.id LIKE ? LIMIT 1",
+        arrayOf(phone, "$prefix%")
+    ) { it.getString(0) }
+
     fun latestUnread(chatId: String): MessageRow? =
         oneMessage(chatId, "from_me=0 AND is_read=0", "time_sent DESC")
 
@@ -787,7 +810,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
             "(SELECT COUNT(*) FROM messages WHERE chat_id=c.id AND from_me=0 AND is_read=0) AS unread," +
             // Telegram groups/channels have negative raw ids; private chats are
             // positive. (Must match isGroupId in Jid.kt.)
-            "CASE WHEN c.id LIKE '%@g.us' OR c.id LIKE 'tg:-%' THEN 1 ELSE 0 END AS is_group," +
+            // Must agree with isGroupId(). A Signal group is any sg: id whose
+            // remainder is not a 36-char UUID, which is what the length test
+            // below expresses.
+            "CASE WHEN c.id LIKE '%@g.us' OR c.id LIKE 'tg:-%' " +
+                "OR (c.id LIKE 'sg:%' AND LENGTH(REPLACE(REPLACE(c.id,'sg:',''),'PNI:','')) <> 36) " +
+                "THEN 1 ELSE 0 END AS is_group," +
             "COALESCE(lm.from_me,0) AS last_from_me," +
             "COALESCE(lm.is_read,0) AS last_read," +
             "c.muted " +
@@ -918,6 +946,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         }
         return out
     }
+
 
     fun nextAudioMessage(chatId: String, afterMsgId: String): MessageRow? {
         val after = queryFirst(

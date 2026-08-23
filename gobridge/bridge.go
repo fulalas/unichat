@@ -373,6 +373,18 @@ func Connect(connId int) bool {
 	return true
 }
 
+// Disconnect drops the socket but keeps the pairing, so the account can be
+// paused from Manage accounts and resumed with Connect. Unlike Logout it
+// touches neither the device store nor the local rows.
+func Disconnect(connId int) {
+	c := getConn(connId)
+	if c == nil {
+		return
+	}
+	c.getClient().Disconnect()
+	c.setState("disconnected")
+}
+
 func StartLogin(connId int) bool {
 	c := getConn(connId)
 	if c == nil {

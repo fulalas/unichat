@@ -31,6 +31,7 @@ object Bridge : EventListener {
         fun onSeekResult(chatId: String, msgId: String, found: Boolean) {}
         fun onTgAuth(state: String, message: String) {}
         fun onTgStateChanged() {}
+        fun onSignalStateChanged() {}
     }
 
     private const val TAG = "UniChat"
@@ -46,6 +47,11 @@ object Bridge : EventListener {
         private set
 
     private val executor = Executors.newSingleThreadExecutor()
+    // Signal's transport blocks in place on the network, where the WhatsApp and
+    // Telegram ones hand off to workers of their own. Sharing [executor] meant
+    // one Signal send to an unreachable recipient stalled every WhatsApp and
+    // Telegram operation queued behind it for the whole HTTP timeout.
+    private val sgExecutor = Executors.newSingleThreadExecutor()
     private val mediaExecutor = Executors.newFixedThreadPool(2)
     private val notifyExecutor = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
@@ -173,7 +179,7 @@ object Bridge : EventListener {
 
     fun hasSession(): Boolean = connId >= 0 && Wmbridge.hasSession(connId)
 
-    fun hasAnySession(): Boolean = hasSession() || Tg.hasSession()
+    fun hasAnySession(): Boolean = hasSession() || Tg.hasSession() || Signal.hasSession()
 
     private fun isTg(chatId: String) = Tg.isTgId(chatId)
 
@@ -227,7 +233,96 @@ object Bridge : EventListener {
         val consumesStagingInput: Boolean
     }
 
-    private fun proto(chatId: String): Protocol = if (isTg(chatId)) TgTransport else WaTransport
+    private fun protoExecutor(chatId: String) =
+        if (Signal.isSgId(chatId)) sgExecutor else executor
+
+    private fun proto(chatId: String): Protocol = when {
+        isTg(chatId) -> TgTransport
+        Signal.isSgId(chatId) -> SgTransport
+        else -> WaTransport
+    }
+
+    /**
+     * Signal. Text, attachments, reactions, edits, deletes, quotes, receipts
+     * and typing are wired; location, contact cards, avatars and history are
+     * not, and those members are deliberate no-ops rather than crashes so a
+     * chat degrades instead of failing.
+     */
+    private object SgTransport : Protocol {
+        override fun sendText(
+            chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
+        ): Boolean = Signal.sendText(chatId, text, quoted)
+
+        // Signal has no view-once, and quoting is not wired up yet, so both are
+        // ignored rather than refused: sending without the decoration beats
+        // dropping the message.
+        override fun sendImage(
+            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
+        ): Boolean = Signal.sendAttachment(chatId, path, caption, mimeOfPath(path, "image/jpeg"))
+        override fun sendVideo(
+            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
+        ): Boolean = Signal.sendAttachment(chatId, path, caption, mimeOfPath(path, "video/mp4"))
+        override fun sendAudio(
+            chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
+            viewOnce: Boolean,
+        ): Boolean = Signal.sendAttachment(
+            chatId, path, "", mimeOfPath(path, "audio/aac"), voiceNote = true
+        )
+        override fun sendDocument(
+            chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
+        ): Boolean = Signal.sendAttachment(chatId, path, "", mime.ifEmpty { "application/octet-stream" })
+        override fun sendLocation(chatId: String, latitude: Double, longitude: Double) = false
+        override fun sendContact(chatId: String, name: String, numbers: List<String>) =
+            Signal.sendContact(chatId, name, numbers)
+
+        override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long) =
+            Signal.edit(chatId, msgId, newText)
+        // Signal sets no server-side deadline on either, unlike WhatsApp's 15
+        // minutes and 48 hours, so the menu entries stay available.
+        override val editWindowSeconds = Long.MAX_VALUE
+        override val revokeWindowSeconds = Long.MAX_VALUE
+
+        override fun deleteForEveryone(chatId: String, msgId: String) = Signal.delete(chatId, msgId)
+        // No remote call: dropping the local row is the whole of "delete for me".
+        override fun deleteForMe(chatId: String, msgId: String) {}
+        override fun react(msg: MessageRow, emoji: String) = Signal.react(msg, emoji)
+
+        // Signal has no server-side mute, but the flag still has to be written:
+        // the Wa and Tg transports are what persist it, so an empty body here
+        // meant muting a Signal chat did nothing at all.
+        override fun setMuted(chatId: String, muted: Boolean) {
+            db.setMuted(chatId, muted)
+        }
+        // Off the main thread: this is called from ChatActivity on every
+        // messages-changed burst, and the lookup is an ORDER BY over the chat.
+        // Clearing is_read locally is what stops this repeating: ChatActivity
+        // calls it on every messages-changed burst, so without it the unread
+        // badge never cleared and the same receipt went out again each time.
+        override fun markChatRead(chatId: String) = Signal.markChatRead(chatId)
+        override fun markVoicePlayed(msg: MessageRow) {}
+        override fun openChat(chatId: String) {}
+        override fun closeChat(chatId: String) = Signal.setTyping(chatId, false)
+
+        override fun requestInitialHistory(chatId: String) {}
+        override fun requestHistoryPage(chatId: String) {}
+        // Signal hands a newly registered account no history at all, so there
+        // is never a further page to fetch — saying so stops the chat asking.
+        override fun isHistoryExhausted(chatId: String) = true
+        override fun seekMessage(chatId: String, target: String, from: MessageRow, maxPages: Int) {}
+        override fun syncAllHistory(chatId: String) = false
+        // -1, not 0: both of these mean "no operation running". Returning 0 read
+        // as a live export sitting at zero messages, so every Signal chat opened
+        // with "Exporting… 0 messages fetched" under its title.
+        override fun syncAllProgress(chatId: String) = -1
+        override fun exportChat(chatId: String, uri: android.net.Uri) = false
+        override fun exportProgress(chatId: String) = -1
+
+        override fun startDownload(msg: MessageRow) = Signal.startDownload(msg)
+        override fun avatarPath(chatId: String, big: Boolean, cachedOnly: Boolean) = ""
+
+        override val consumesStagingInput = false
+    }
+
 
     private object WaTransport : Protocol {
         override fun sendText(
@@ -484,7 +579,16 @@ object Bridge : EventListener {
         return Wmbridge.getSelfId(connId).also { selfIdMemo = it }
     }
 
+    fun disconnect() = executor.execute {
+        if (connId >= 0) Wmbridge.disconnect(connId)
+    }
+
     fun connect() = executor.execute {
+        // Guarded here rather than at each call site: MainActivity, ShareActivity
+        // and WmService all reconnect on their own, so a paused account would
+        // come straight back on the next screen change.
+        val ctx = appContext
+        if (ctx != null && !Prefs.protoEnabled(ctx, ProtoPicker.WA)) return@execute
         if (state != "connected") Wmbridge.connect(connId)
     }
 
@@ -499,13 +603,13 @@ object Bridge : EventListener {
     }.start()
 
     fun sendText(chatId: String, text: String, mentions: List<Mention> = emptyList()) =
-        executor.execute {
+        protoExecutor(chatId).execute {
             if (!proto(chatId).sendText(chatId, text, null, mentions)) onSendFailed("text", chatId)
         }
 
     fun sendReply(
         chatId: String, text: String, quoted: MessageRow, mentions: List<Mention> = emptyList(),
-    ) = executor.execute {
+    ) = protoExecutor(chatId).execute {
         if (!proto(chatId).sendText(chatId, text, quoted, mentions)) {
             Log.w(TAG, "reply failed for chat $chatId")
         }
@@ -536,7 +640,7 @@ object Bridge : EventListener {
     }
 
     fun editMessage(chatId: String, msgId: String, newText: String, origTimeSent: Long) =
-        executor.execute {
+        protoExecutor(chatId).execute {
             val ok = proto(chatId).edit(chatId, msgId, newText, origTimeSent)
             if (!ok) {
                 Log.w(TAG, "edit failed")
@@ -544,15 +648,15 @@ object Bridge : EventListener {
             }
         }
 
-    fun deleteForEveryone(chatId: String, msgId: String) = executor.execute {
+    fun deleteForEveryone(chatId: String, msgId: String) = protoExecutor(chatId).execute {
         proto(chatId).deleteForEveryone(chatId, msgId)
     }
 
-    fun sendReaction(msg: MessageRow, emoji: String) = executor.execute {
+    fun sendReaction(msg: MessageRow, emoji: String) = protoExecutor(msg.chatId).execute {
         proto(msg.chatId).react(msg, emoji)
     }
 
-    fun deleteForMe(chatId: String, msgId: String) = executor.execute {
+    fun deleteForMe(chatId: String, msgId: String) = protoExecutor(chatId).execute {
         proto(chatId).deleteForMe(chatId, msgId)
         db.deleteMessage(chatId, msgId)
         notifyChat(chatId)
@@ -695,6 +799,8 @@ object Bridge : EventListener {
      * ("Can't enable self-destruction for media"), so the option is not offered.
      */
     fun viewOnceSupported(chatId: String, kind: String): Boolean {
+        // Signal has no view-once at all, so the option must not be offered.
+        if (Signal.isSgId(chatId)) return false
         if (!isTg(chatId)) return kind == "image" || kind == "video" || kind == "audio"
         if (isGroupId(chatId) || isTgSelfChat(chatId)) return false
         return kind == "image" || kind == "video"
@@ -1305,11 +1411,23 @@ object Bridge : EventListener {
 
     private fun isTgProto(proto: String) = proto == ProtoPicker.TG
 
-    fun myName(proto: String): String = if (isTgProto(proto)) Tg.myName() else myName()
+    fun myName(proto: String): String = when (proto) {
+        ProtoPicker.TG -> Tg.myName()
+        ProtoPicker.SG -> Signal.myName()
+        else -> myName()
+    }
 
-    fun selfId(proto: String): String = if (isTgProto(proto)) Tg.selfId() else selfId()
+    fun selfId(proto: String): String = when (proto) {
+        ProtoPicker.TG -> Tg.selfId()
+        ProtoPicker.SG -> Signal.selfId()
+        else -> selfId()
+    }
 
-    fun selfIdOf(chatId: String): String = if (isTg(chatId)) Tg.selfId() else selfId()
+    fun selfIdOf(chatId: String): String = when {
+        isTg(chatId) -> Tg.selfId()
+        Signal.isSgId(chatId) -> Signal.selfId()
+        else -> selfId()
+    }
 
     /** A contact's @lid alias mapped back to their phone JID. Blocking; worker
      *  threads only. Opening a chat under the alias would fork a second thread
@@ -1319,14 +1437,26 @@ object Bridge : EventListener {
         return Wmbridge.resolveChatId(connId, chatId).ifEmpty { chatId }
     }
 
-    fun fetchMyAbout(proto: String, onResult: (String) -> Unit) =
-        if (isTgProto(proto)) onTg({ Tg.fetchMyAbout() }, onResult) else fetchMyAbout(onResult)
+    fun fetchMyAbout(proto: String, onResult: (String) -> Unit) = when (proto) {
+        ProtoPicker.TG -> onTg({ Tg.fetchMyAbout() }, onResult)
+        ProtoPicker.SG -> Signal.fetchAbout(onResult)
+        else -> fetchMyAbout(onResult)
+    }
 
-    fun setMyName(proto: String, name: String, onResult: (Boolean) -> Unit) =
-        if (isTgProto(proto)) onTg({ Tg.setMyName(name) }, onResult) else setMyName(name, onResult)
+    fun setMyName(proto: String, name: String, onResult: (Boolean) -> Unit) = when (proto) {
+        ProtoPicker.TG -> onTg({ Tg.setMyName(name) }, onResult)
+        ProtoPicker.SG -> Signal.setProfile(name, null, onResult)
+        else -> setMyName(name, onResult)
+    }
 
-    fun setAbout(proto: String, text: String, onResult: (Boolean) -> Unit) =
-        if (isTgProto(proto)) onTg({ Tg.setAbout(text) }, onResult) else setAbout(text, onResult)
+    fun setAbout(proto: String, text: String, onResult: (Boolean) -> Unit) = when (proto) {
+        ProtoPicker.TG -> onTg({ Tg.setAbout(text) }, onResult)
+        ProtoPicker.SG -> Signal.setProfile(null, text, onResult)
+        else -> setAbout(text, onResult)
+    }
+
+    /** Signal has no avatar upload here yet, so the option is not offered. */
+    fun supportsProfilePicture(proto: String) = proto != ProtoPicker.SG
 
     fun setProfilePicture(proto: String, jpegPath: String, onResult: (Boolean) -> Unit) =
         if (isTgProto(proto)) onTg({ Tg.setProfilePicture(jpegPath) }, onResult)
@@ -1978,6 +2108,41 @@ object Bridge : EventListener {
         notifyUi { it.onTgAuth(state, message) }
 
     internal fun notifyTgState() = notifyUi { it.onTgStateChanged() }
+
+    internal fun notifySignalState() = notifyUi { it.onSignalStateChanged() }
+
+    /**
+     * The chat list minus any paused account's rows. Behind one accessor rather
+     * than at each call site: the share/forward picker read db.chats() directly
+     * and went on offering chats that could neither send nor receive.
+     */
+    /** Whether an account is switched on in Manage accounts. */
+    fun protoEnabled(proto: String): Boolean {
+        val ctx = appContext ?: return true
+        return Prefs.protoEnabled(ctx, proto)
+    }
+
+    fun visibleChats(): List<ChatRow> {
+        val ctx = appContext ?: return db.chats()
+        val hidden = ProtoPicker.ALL.filterNot { Prefs.protoEnabled(ctx, it) }.toSet()
+        if (hidden.isEmpty()) return db.chats()
+        return db.chats().filterNot { ProtoPicker.of(it.id) in hidden }
+    }
+
+
+    internal fun runOnUi(block: () -> Unit) = main.post(block)
+
+    /** Signal's post-store hook: the row is already written, this is the part
+     *  Bridge owns — refreshing open screens and raising a notification. */
+    internal fun onSignalMessage(
+        chatId: String, senderId: String, text: String, msgType: String,
+        timeSent: Long, fromMe: Boolean, isRead: Boolean,
+    ) {
+        notifyChat(chatId)
+        if (!fromMe && !isRead && chatId != activeChatId && !db.isMuted(chatId)) {
+            postMessageNotification(chatId, senderId, text, msgType, timeSent)
+        }
+    }
 
     internal fun postDownloadProgress(chatId: String, msgId: String, pct: Int) =
         notifyUi { it.onDownloadProgress(chatId, msgId, pct) }

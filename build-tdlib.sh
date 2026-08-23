@@ -109,6 +109,21 @@ if [ ! -f "$EXT/build-host/.prepared" ]; then
 fi
 
 STRIP="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+
+# MinSizeRel alone emits one section per translation unit, so the linker can
+# only keep or drop whole objects. Per-function sections plus --gc-sections let
+# it drop the unreached parts of TDLib's generated API.
+#
+# No -fvisibility=hidden: libtdjson.so already exports only 14 symbols, so
+# TDLib is managing visibility itself and forcing it globally could only hide
+# the td_json_client_* entry points the app resolves at runtime.
+#
+# No LTO either. CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON fails at link against
+# the NDK's own prebuilt libz.a: "module flags 'EnableSplitLTOUnit': IDs have
+# conflicting values". That archive is not ours to rebuild, so the two cannot
+# be made to agree.
+TD_SIZE_CFLAGS="-ffunction-sections -fdata-sections -fno-ident"
+TD_SIZE_LDFLAGS="-Wl,--gc-sections -Wl,--as-needed"
 for abi in "${ABIS[@]}"; do
     build_openssl "$abi"
     echo "== Building TDLib (tdjson) for $abi =="
@@ -121,7 +136,9 @@ for abi in "${ABIS[@]}"; do
         -DOPENSSL_CRYPTO_LIBRARY="$EXT/openssl-$abi/lib/libcrypto.a" \
         -DOPENSSL_SSL_LIBRARY="$EXT/openssl-$abi/lib/libssl.a" \
         -DOPENSSL_USE_STATIC_LIBS=ON \
-        -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" >/dev/null
+        -DCMAKE_C_FLAGS="$TD_SIZE_CFLAGS" \
+        -DCMAKE_CXX_FLAGS="$TD_SIZE_CFLAGS -fvisibility-inlines-hidden" \
+        -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384 $TD_SIZE_LDFLAGS" >/dev/null
     cmake --build "$EXT/build-$abi" --target tdjson -j "$JOBS"
     out="$DIR/app/src/main/jniLibs/$abi"
     mkdir -p "$out"

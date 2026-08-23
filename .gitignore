@@ -13,6 +13,11 @@ app/libs/wmbridge-sources.jar
 # whatsmeow sources fetched by build.sh (pinned, not vendored)
 gobridge/ext/whatsmeow/
 
+# signalmeow sources fetched by build.sh, and the libsignal_ffi.a that
+# build-libsignal.sh cross-compiles against them
+gobridge/ext/signal/
+gobridge/ext/libsignal/
+
 # Final APK dropped in the repo root by build.sh
 /unichat-*.apk
 

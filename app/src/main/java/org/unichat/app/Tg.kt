@@ -230,6 +230,11 @@ object Tg {
                     }
                 }
                 Bridge.notifyTgAuth("ready", "")
+                // Reapply a pause chosen in Manage accounts: TDLib comes up
+                // online every run, so the setting has to be pushed each time.
+                appContext?.let {
+                    if (!Prefs.protoEnabled(it, ProtoPicker.TG)) setNetworkEnabled(false)
+                }
                 onReady()
             }
             "authorizationStateClosed" -> {
@@ -304,6 +309,23 @@ object Tg {
     fun logout() = executor.execute {
         send(JSONObject().put("@type", "logOut"))
         appContext?.let { Prefs.setTgLinked(it, false) }
+    }
+
+    /**
+     * Pauses or resumes the account for the Manage accounts toggle. TDLib has
+     * no disconnect: telling it the device is offline is how you stop it
+     * talking to the network without logging out and losing the session.
+     */
+    fun setNetworkEnabled(enabled: Boolean) = executor.execute {
+        send(
+            JSONObject().put("@type", "setNetworkType").put(
+                "type",
+                JSONObject().put(
+                    "@type",
+                    if (enabled) "networkTypeOther" else "networkTypeNone"
+                )
+            )
+        )
     }
 
     private fun fetchMe(timeoutMs: Long = 15_000) {
@@ -1316,6 +1338,19 @@ object Tg {
 
     // TDLib requires a private chat to exist (createPrivateChat) before
     // anything can be sent to it
+    /**
+     * Opens a chat with a phone number rather than a known user id, for a
+     * contact card that arrived on another protocol. Returns "" when the number
+     * has no Telegram account or is not visible to us.
+     */
+    fun createChatByPhone(number: String): String {
+        val user = request(
+            JSONObject().put("@type", "searchUserByPhoneNumber").put("phone_number", number)
+        ) ?: return ""
+        val userId = user.optLong("id")
+        return if (userId != 0L) createUserChat(userId) else ""
+    }
+
     fun createUserChat(userId: Long): String {
         val chat = request(
             JSONObject().put("@type", "createPrivateChat").put("user_id", userId)

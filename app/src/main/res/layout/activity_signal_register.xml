@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+
+    <ScrollView
+        android:id="@+id/sgFormScroll"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="24dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/signal_register_help"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp"
+                android:paddingBottom="20dp" />
+
+            <EditText
+                android:id="@+id/sgPhone"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/signal_phone_hint"
+                android:inputType="phone"
+                android:textColor="@color/text_primary"
+                android:autofillHints="phoneNumber" />
+
+            <Button
+                android:id="@+id/sgSendCode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/signal_send_code" />
+
+            <EditText
+                android:id="@+id/sgCode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:hint="@string/signal_code_hint"
+                android:inputType="number"
+                android:visibility="gone"
+                android:textColor="@color/text_primary"
+                android:autofillHints="smsOTPCode" />
+
+            <Button
+                android:id="@+id/sgVerify"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/signal_verify"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/sgRegStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="20dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp" />
+        </LinearLayout>
+    </ScrollView>
+
+    <!-- Signal serves the captcha as a web page and returns the token through a
+         signalcaptcha: redirect, so it has to be shown in a WebView. -->
+    <WebView
+        android:id="@+id/sgCaptcha"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+</FrameLayout>

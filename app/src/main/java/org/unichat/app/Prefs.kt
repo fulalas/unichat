@@ -12,6 +12,9 @@ object Prefs {
     private const val KEY_SCROLL = "scroll_"
     private const val KEY_COMPLETE = "hist_done_"
     private const val KEY_DRAFT = "draft_"
+    private const val KEY_PROTO_ENABLED = "proto_enabled_"
+    private const val KEY_SG_DISCOVERABLE = "sg_discoverable"
+    private const val KEY_SG_READ_RECEIPTS = "sg_read_receipts"
 
     const val FONT_MIN = 0.8f
     const val FONT_MAX = 1.6f
@@ -96,6 +99,32 @@ object Prefs {
 
     fun setTgSelfId(ctx: Context, id: Long) =
         prefs(ctx).edit().putLong(KEY_TG_SELF, id).apply()
+
+    /** A paused protocol stays linked but is kept off the network. Defaults to
+     *  on, so an account is live the moment it is linked. */
+    fun protoEnabled(ctx: Context, proto: String): Boolean =
+        prefs(ctx).getBoolean(KEY_PROTO_ENABLED + proto, true)
+
+    fun setProtoEnabled(ctx: Context, proto: String, enabled: Boolean) =
+        prefs(ctx).edit().putBoolean(KEY_PROTO_ENABLED + proto, enabled).apply()
+
+    fun clearProtoEnabled(ctx: Context, proto: String) =
+        prefs(ctx).edit().remove(KEY_PROTO_ENABLED + proto).apply()
+
+    /** Mirrors the server-side account attribute; registration sets it true. */
+    fun sgDiscoverable(ctx: Context): Boolean =
+        prefs(ctx).getBoolean(KEY_SG_DISCOVERABLE, true)
+
+    fun setSgDiscoverable(ctx: Context, on: Boolean) =
+        prefs(ctx).edit().putBoolean(KEY_SG_DISCOVERABLE, on).apply()
+
+    /** Honoured locally: the account record that would publish it lives in the
+     *  storage service, which this account cannot write yet. */
+    fun sgReadReceipts(ctx: Context): Boolean =
+        prefs(ctx).getBoolean(KEY_SG_READ_RECEIPTS, true)
+
+    fun setSgReadReceipts(ctx: Context, on: Boolean) =
+        prefs(ctx).edit().putBoolean(KEY_SG_READ_RECEIPTS, on).apply()
 
     fun tgLinked(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_TG_LINKED, false)
 
