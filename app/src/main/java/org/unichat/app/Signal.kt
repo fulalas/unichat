@@ -86,6 +86,22 @@ object Signal : EventListener {
     }
 
     /**
+     * Re-checks the address book when the user comes back to the app. Discovery
+     * used to run only on connect, so anyone saved to the phone after that was
+     * invisible until the app was restarted. Throttled: it is a round trip over
+     * the socket and the address book rarely changes twice in a minute.
+     */
+    fun refreshContacts() {
+        if (!linked) return
+        val now = System.currentTimeMillis()
+        if (now - lastDiscovery < DISCOVERY_GAP_MS) return
+        discoverContacts()
+    }
+
+    @Volatile private var lastDiscovery = 0L
+    private const val DISCOVERY_GAP_MS = 60_000L
+
+    /**
      * Asks Signal which address-book numbers have accounts. A registered
      * primary starts with no contact list at all — the storage-service manifest
      * is encrypted with the previous master key, which registering replaced —
@@ -93,6 +109,7 @@ object Signal : EventListener {
      */
     fun discoverContacts() {
         val ctx = appContext ?: return
+        lastDiscovery = System.currentTimeMillis()
         control.execute {
             val entries = PhoneBook.allEntries(ctx)
             if (entries.isEmpty()) return@execute

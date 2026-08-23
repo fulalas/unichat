@@ -97,6 +97,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         }
         updateSubtitle()
         refreshAccountMenu()
+        // A contact saved to the phone while the app was in the background is
+        // only on Signal as far as this app knows once it has asked again.
+        Signal.refreshContacts()
         reload()
         syncWatchedChats()
         refreshDayIfChanged()
