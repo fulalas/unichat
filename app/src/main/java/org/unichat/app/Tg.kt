@@ -1364,9 +1364,12 @@ object Tg {
      * has no Telegram account or is not visible to us.
      */
     fun createChatByPhone(number: String): String {
+        // A failed request is not an answer: reported as "" it became "Not on
+        // Telegram", which is the one thing it must never say for a lookup that
+        // never happened.
         val user = request(
             JSONObject().put("@type", "searchUserByPhoneNumber").put("phone_number", number)
-        ) ?: return ""
+        ) ?: return Bridge.NUMBER_LOOKUP_FAILED
         val userId = user.optLong("id")
         return if (userId != 0L) createUserChat(userId) else ""
     }

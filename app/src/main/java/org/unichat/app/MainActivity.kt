@@ -339,7 +339,10 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             connected == active && waLinked && Bridge.syncProgress in 0..99 ->
                 getString(R.string.state_syncing, Bridge.syncProgress)
             connected == active -> getString(R.string.state_connected)
-            connecting > 0 -> getString(R.string.state_connecting)
+            // Still settling, not down: with three accounts one of them is
+            // often mid-dial, and calling that "disconnected" while the other
+            // two are up reads as an outage. Only nothing being up is one.
+            connected > 0 || connecting > 0 -> getString(R.string.state_connecting)
             else -> getString(R.string.state_disconnected)
         }
     }

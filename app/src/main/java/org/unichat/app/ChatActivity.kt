@@ -2284,6 +2284,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 .ifEmpty { if (number.isEmpty()) "" else account.chatIdForNumber(number) }
             when {
                 id == Bridge.NUMBER_LOOKUP_FAILED -> R.string.number_check_failed
+                // Nothing was actually asked: the card carried no id this
+                // account can use, and no number to fall back on either.
+                id.isEmpty() && number.isEmpty() -> R.string.number_check_failed
                 id.isEmpty() -> account.notOnNetworkRes
                 else -> id
             }

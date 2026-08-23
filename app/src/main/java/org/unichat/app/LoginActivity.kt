@@ -65,6 +65,10 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
      *  the just-linked flow while the user is mid-way through another form. */
     private val pending = LinkedHashSet<String>()
 
+    /** The protocol whose own setup screen this screen sent the user to. Only
+     *  that one can come back linked with no event to notice it by. */
+    private var awaitingSetup: String? = null
+
     private var qrStarted = false
     private var lastPairCode: String = ""
     private var leaving = false
@@ -117,7 +121,12 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         // A protocol set up on its own screen — Signal — comes back linked with
         // no event this screen listens for, so the just-linked step would never
         // run and the first run was left on the QR with no way to the chat list.
-        pending.firstOrNull { Accounts.of(it).isLinked() }?.let { claimLinked(it) }
+        // Only the one we sent the user to: Signal writes its link flag on its
+        // own thread, so sweeping every account here announced one linked days
+        // ago as if it had just happened.
+        val proto = awaitingSetup ?: return
+        awaitingSetup = null
+        if (Accounts.of(proto).isLinked()) claimLinked(proto)
     }
 
     /** The one place [pending] shrinks: each protocol reports a link its own
@@ -142,6 +151,11 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         tabs.clear()
         for (proto in pending) {
             val tab = inflater.inflate(R.layout.item_login_tab, tabRow, false) as Button
+            // The gap belongs BETWEEN tabs: kept on the first one it pushed the
+            // whole centred row off centre.
+            if (tabRow.childCount == 0) {
+                (tab.layoutParams as LinearLayout.LayoutParams).marginStart = 0
+            }
             tab.text = Accounts.of(proto).label(this)
             tab.setOnClickListener { select(proto) }
             tabRow.addView(tab)
@@ -151,6 +165,7 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
 
     private fun select(proto: String) {
         if (proto !in panels) {
+            awaitingSetup = proto
             startActivity(Accounts.of(proto).setupIntent(this))
             return
         }

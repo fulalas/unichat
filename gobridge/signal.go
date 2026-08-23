@@ -76,6 +76,13 @@ const (
 
 func sgUpstream(err error) string { return "upstream:" + err.Error() }
 
+// sgLookupFailed is a number lookup that could not be made, as opposed to "" —
+// "this number has no Signal account". Reported as "" it reached the user as
+// "Not on Signal", which is the one thing it must never say for a question
+// nobody asked. Kotlin tests for the same word (Bridge.NUMBER_LOOKUP_FAILED),
+// so both sides must agree.
+const sgLookupFailed = "failed"
+
 // sgRestoreError keeps the two SVR2 outcomes the user can act on — a mistyped
 // PIN and an account with no backup at all — apart from everything else, which
 // is only worth showing raw.
@@ -794,6 +801,10 @@ func SignalDiscoverContacts(numbers string) string {
 	// Only the store writes are in here: the OnContact callbacks below cross
 	// into Kotlin, which must not happen with the transaction open.
 	store := func(ctx context.Context) error {
+		// Reset first: DoTxn does not retry today, but if it ever did, appending
+		// again would report every discovered contact twice.
+		hits = hits[:0]
+		found = 0
 		for e164, entry := range resp {
 			if entry.ACI == uuid.Nil && entry.PNI == uuid.Nil {
 				continue
@@ -1370,7 +1381,7 @@ func SignalSendContact(chatId string, name string, numbers string) string {
 func SignalLookupNumber(number string) string {
 	c, client, _ := sgActive()
 	if client == nil {
-		return ""
+		return sgLookupFailed
 	}
 	e164, err := strconv.ParseUint(strings.TrimPrefix(number, "+"), 10, 64)
 	if err != nil {
@@ -1379,7 +1390,7 @@ func SignalLookupNumber(number string) string {
 	resp, err := client.LookupPhone(context.TODO(), e164)
 	if err != nil {
 		c.log(LogWarning, "number lookup failed: "+err.Error())
-		return ""
+		return sgLookupFailed
 	}
 	entry, ok := resp[e164]
 	if !ok || (entry.ACI == uuid.Nil && entry.PNI == uuid.Nil) {
