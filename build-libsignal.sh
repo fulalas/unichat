@@ -100,6 +100,25 @@ fi
 # Only past the cache check: a correct archive is already here on most builds,
 # and demanding a Rust toolchain (and a network fetch of the source) to hand it
 # back made an APK-only change impossible on a machine without cargo.
+#
+# cargo is the one of these that can be installed unattended, and on a fresh
+# machine it is the one that is missing. rustup honours CARGO_HOME/RUSTUP_HOME,
+# which env.sh points inside the toolchain directory, so this lands beside the
+# rest of the toolchain rather than in $HOME.
+if ! command -v cargo >/dev/null; then
+    command -v curl >/dev/null || {
+        echo "libsignal: cargo is missing and there is no curl to install it with" >&2
+        exit 1
+    }
+    echo "== Installing Rust (rustup, minimal profile) =="
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- --profile minimal --default-toolchain stable -y
+    # A third of the install and nothing here reads it. The nightly libsignal
+    # pins is fetched on first use and gets the same treatment next time.
+    rm -rf "${RUSTUP_HOME:-$HOME/.rustup}"/toolchains/*/share/doc 2>/dev/null || true
+    export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+fi
+
 for CMD in cargo git protoc; do
     command -v "$CMD" >/dev/null || { echo "libsignal: missing '$CMD'" >&2; exit 1; }
 done
