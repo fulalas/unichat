@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"go.mau.fi/mautrix-signal/pkg/signalmeow"
 	"go.mau.fi/mautrix-signal/pkg/signalmeow/events"
 	signalpb "go.mau.fi/mautrix-signal/pkg/signalmeow/protobuf"
+	"go.mau.fi/mautrix-signal/pkg/signalmeow/protobuf/svr2pb"
 	sgstore "go.mau.fi/mautrix-signal/pkg/signalmeow/store"
 	"go.mau.fi/mautrix-signal/pkg/signalmeow/types"
 	"go.mau.fi/util/dbutil"
@@ -54,6 +56,41 @@ var (
 // SgIDPrefix namespaces Signal rows in the shared Db, the same way Telegram
 // uses "tg:". Kotlin builds the same ids, so both sides must agree.
 const SgIDPrefix = "sg:"
+
+// Errors that reach the UI travel as codes, never as sentences: Kotlin maps them
+// through strings.xml, which is what makes them translatable. A code may carry
+// one argument after a ':'. Anything raised by signalmeow or the server has no
+// code of its own, so it rides behind "upstream:" and is shown verbatim.
+const (
+	sgErrNotInitialised = "not_initialised"
+	sgErrNoSession      = "no_session"
+	sgErrCodeRejected   = "code_rejected"
+	sgErrNotRegistered  = "not_registered"
+	sgErrNoMasterKey    = "no_master_key"
+	sgErrNoManifest     = "no_manifest"
+	sgErrManifestLocked = "manifest_locked"
+	sgErrStoreFailed    = "store_failed"
+	sgErrNoBackup       = "no_backup"
+	sgErrWrongPIN       = "wrong_pin"
+)
+
+func sgUpstream(err error) string { return "upstream:" + err.Error() }
+
+// sgRestoreError keeps the two SVR2 outcomes the user can act on — a mistyped
+// PIN and an account with no backup at all — apart from everything else, which
+// is only worth showing raw.
+func sgRestoreError(err error) string {
+	var re signalmeow.SVR2RestoreError
+	if errors.As(err, &re) {
+		switch re.Status {
+		case svr2pb.RestoreResponse_PIN_MISMATCH:
+			return fmt.Sprintf("%s:%d", sgErrWrongPIN, re.Tries)
+		case svr2pb.RestoreResponse_MISSING:
+			return sgErrNoBackup
+		}
+	}
+	return sgUpstream(err)
+}
 
 // sgActive is the guard every exported Signal call starts with: the connection,
 // its client and its device, or nils when the account is not ready. Written out
@@ -621,15 +658,15 @@ func (c *sgConn) resolveName(client *signalmeow.Client, bare string, chatID stri
 var sgRegSession string
 
 // SignalRegisterStart opens a verification session. Returns "" on success, or
-// an error string for the UI. Blocking.
+// an error code for the UI. Blocking.
 func SignalRegisterStart(number string) string {
 	c := sgGet()
 	if c == nil {
-		return "signal not initialised"
+		return sgErrNotInitialised
 	}
 	session, err := signalmeow.CreateRegistrationSession(context.TODO(), number)
 	if err != nil {
-		return err.Error()
+		return sgUpstream(err)
 	}
 	sgRegSession = session.ID
 	sgRegNeedsCaptcha = session.NeedsCaptcha()
@@ -645,11 +682,11 @@ var sgRegNeedsCaptcha bool
 // SignalRegisterSubmitCaptcha hands over the token from Signal's captcha page.
 func SignalRegisterSubmitCaptcha(token string) string {
 	if sgRegSession == "" {
-		return "no registration session"
+		return sgErrNoSession
 	}
 	_, err := signalmeow.SubmitRegistrationCaptcha(context.TODO(), sgRegSession, token)
 	if err != nil {
-		return err.Error()
+		return sgUpstream(err)
 	}
 	return ""
 }
@@ -657,10 +694,10 @@ func SignalRegisterSubmitCaptcha(token string) string {
 // SignalRegisterRequestCode asks for the code by "sms" or "voice".
 func SignalRegisterRequestCode(transport string) string {
 	if sgRegSession == "" {
-		return "no registration session"
+		return sgErrNoSession
 	}
 	if _, err := signalmeow.RequestRegistrationCode(context.TODO(), sgRegSession, transport); err != nil {
-		return err.Error()
+		return sgUpstream(err)
 	}
 	return ""
 }
@@ -670,22 +707,22 @@ func SignalRegisterRequestCode(transport string) string {
 func SignalRegisterSubmitCode(number string, code string) string {
 	c := sgGet()
 	if c == nil {
-		return "signal not initialised"
+		return sgErrNotInitialised
 	}
 	if sgRegSession == "" {
-		return "no registration session"
+		return sgErrNoSession
 	}
 	ctx := context.TODO()
 	session, err := signalmeow.SubmitRegistrationCode(ctx, sgRegSession, code)
 	if err != nil {
-		return err.Error()
+		return sgUpstream(err)
 	}
 	if !session.Verified {
-		return "that code was not accepted"
+		return sgErrCodeRejected
 	}
 	device, err := signalmeow.RegisterPrimaryDevice(ctx, c.container, number, sgRegSession)
 	if err != nil {
-		return err.Error()
+		return sgUpstream(err)
 	}
 	c.mu.Lock()
 	c.device = device
@@ -708,7 +745,7 @@ func SignalRegisterSubmitCode(number string, code string) string {
 func SignalDiscoverContacts(numbers string) string {
 	c, client, _ := sgActive()
 	if client == nil {
-		return "signal not registered"
+		return sgErrNotRegistered
 	}
 
 	var e164s []uint64
@@ -738,7 +775,7 @@ func SignalDiscoverContacts(numbers string) string {
 	resp, err := client.LookupPhone(context.TODO(), e164s...)
 	if err != nil {
 		c.log(LogError, "contact discovery failed: "+err.Error())
-		return err.Error()
+		return sgUpstream(err)
 	}
 
 	ctx := context.TODO()
@@ -1111,19 +1148,19 @@ func SignalSetTyping(chatId string, typing bool) {
 func SignalProbeStorage() string {
 	c, client, device := sgActive()
 	if client == nil || device == nil {
-		return "signal not registered"
+		return sgErrNotRegistered
 	}
 	_ = c
 	if len(device.MasterKey) == 0 {
-		return "no master key stored"
+		return sgErrNoMasterKey
 	}
 	// currentVersion 0 asks for whatever the server has.
 	update, err := client.FetchStorage(context.TODO(), device.MasterKey, 0, nil)
 	if err != nil {
-		return "fetch failed: " + err.Error()
+		return sgUpstream(err)
 	}
 	if update == nil {
-		return "server holds no manifest for this account"
+		return sgErrNoManifest
 	}
 	return fmt.Sprintf("manifest version %d, %d records readable, %d missing",
 		update.Version, len(update.NewRecords), len(update.MissingRecords))
@@ -1135,18 +1172,18 @@ func SignalProbeStorage() string {
 // Registering minted a fresh master key, so the account's existing storage
 // manifest stayed on the server unreadable — contacts the user has talked to
 // but who are not discoverable by phone number were invisible. Returns "" on
-// success, otherwise a message for the UI.
+// success, otherwise an error code for the UI.
 func SignalRestoreFromPIN(pin string) string {
 	c, client, device := sgActive()
 	if client == nil || device == nil {
-		return "signal not registered"
+		return sgErrNotRegistered
 	}
 	_ = c
 
 	ctx := context.TODO()
 	candidates, err := client.RestoreMasterKeyFromSVR2(ctx, pin)
 	if err != nil {
-		return err.Error()
+		return sgRestoreError(err)
 	}
 
 	// Settle which reading of the payload is the real key by using it: only the
@@ -1163,12 +1200,14 @@ func SignalRestoreFromPIN(pin string) string {
 		}
 	}
 	if masterKey == nil {
-		return fmt.Sprintf("key recovered but manifest not readable: %v", lastErr)
+		c.log(LogError, fmt.Sprintf("key recovered but manifest not readable: %v", lastErr))
+		return sgErrManifestLocked
 	}
 
 	device.MasterKey = masterKey
 	if err := c.container.PutDevice(ctx, &device.DeviceData); err != nil {
-		return "failed to store recovered key: " + err.Error()
+		c.log(LogError, "failed to store recovered key: "+err.Error())
+		return sgErrStoreFailed
 	}
 	// SyncStorage walks the manifest and raises a ContactList event, which is
 	// what actually fills the contact table.

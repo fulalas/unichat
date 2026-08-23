@@ -51,6 +51,26 @@ WHATSMEOW_BRANCH="main"
 SIGNALMEOW_REPO="https://github.com/mautrix/signal.git"
 SIGNALMEOW_TAG="v0.2608.0"
 
+# Both ensure_* helpers fetch into "$dest.new" and swap it in only on full
+# success. Deleting the existing tree FIRST meant any failure after that point
+# (a dropped connection mid-fetch, a patch that no longer applies) left no
+# checkout at all — and if the machine then went offline, the project became
+# unbuildable.
+swap_in_checkout() {
+    local staging="$1" dest="$2"
+    rm -rf "$staging/.git"
+    rm -rf "$dest"
+    mv "$staging" "$dest"
+}
+
+# go.mod replaces both modules with the trees under gobridge/ext, so tidy only
+# resolves them once the tree is in place. Upstream may also have added module
+# requirements; reconciling go.sum here beats failing the build with "missing
+# go.sum entry" on every later run.
+tidy_gobridge() {
+    ( cd "$DIR/gobridge" && go mod tidy ) || { echo "$1" >&2; exit 1; }
+}
+
 ensure_signalmeow() {
     local dest="$DIR/gobridge/ext/signal"
     local stamp="$dest/.sg-tag"
@@ -60,8 +80,6 @@ ensure_signalmeow() {
         return
     fi
     echo "== Fetching signalmeow @ $SIGNALMEOW_TAG =="
-    # Same staging dance as whatsmeow: swap in only on full success, so a failed
-    # fetch or patch leaves the previous checkout intact rather than nothing.
     local staging="$dest.new"
     rm -rf "$staging"
     if ! git clone -q --depth 1 --branch "$SIGNALMEOW_TAG" "$SIGNALMEOW_REPO" "$staging"; then
@@ -79,9 +97,7 @@ ensure_signalmeow() {
         echo "   refresh gobridge/ext/signal-local.patch; the Go bridge cannot link without it" >&2
         exit 1
     fi
-    rm -rf "$staging/.git"
-    rm -rf "$dest"
-    mv "$staging" "$dest"
+    swap_in_checkout "$staging" "$dest"
     # Re-assert the replace before tidying. Without it tidy happily resolves
     # mautrix-signal to the published v0.2608.0 in the module cache instead of
     # this patched checkout — the build still succeeds, so the only symptom is
@@ -90,11 +106,11 @@ ensure_signalmeow() {
     # keeping the line.
     ( cd "$DIR/gobridge" &&
       go mod edit -require=go.mau.fi/mautrix-signal@v0.0.0 \
-                  -replace=go.mau.fi/mautrix-signal=./ext/signal &&
-      go mod tidy ) || {
-        echo "signalmeow: go mod tidy failed after updating to $SIGNALMEOW_TAG" >&2
+                  -replace=go.mau.fi/mautrix-signal=./ext/signal ) || {
+        echo "signalmeow: go mod edit failed for $SIGNALMEOW_TAG" >&2
         exit 1
     }
+    tidy_gobridge "signalmeow: go mod tidy failed after updating to $SIGNALMEOW_TAG"
     echo "$SIGNALMEOW_TAG" > "$stamp"
 }
 
@@ -126,12 +142,6 @@ ensure_whatsmeow() {
     else
         echo "== Fetching whatsmeow @ ${latest:0:12} (upstream $WHATSMEOW_BRANCH) =="
     fi
-    # Fetch into a scratch directory and swap it in only once everything
-    # succeeded. Deleting the existing tree FIRST meant any failure after that
-    # point (a dropped connection mid-fetch, a patch that no longer applies) left
-    # no checkout at all — and if the machine then went offline, the
-    # "upstream unreachable and nothing fetched yet" path made the project
-    # unbuildable.
     local staging="$dest.new"
     rm -rf "$staging"
     mkdir -p "$staging"
@@ -166,16 +176,8 @@ ensure_whatsmeow() {
             echo "   refresh the patch against ${latest:0:12}" >&2
         fi
     fi
-    rm -rf "$staging/.git"
-    rm -rf "$dest"
-    mv "$staging" "$dest"
-    # upstream may have added module requirements; reconcile go.sum now rather
-    # than failing the build with "missing go.sum entry" on every later run.
-    # go.mod's replace points at $dest, so tidy needs the tree already in place.
-    ( cd "$DIR/gobridge" && go mod tidy ) || {
-        echo "whatsmeow: go mod tidy failed after updating to ${latest:0:12}" >&2
-        exit 1
-    }
+    swap_in_checkout "$staging" "$dest"
+    tidy_gobridge "whatsmeow: go mod tidy failed after updating to ${latest:0:12}"
     # Stamp LAST: the stamp is what makes later runs skip this function entirely.
     # Writing it before tidy had succeeded marked a half-updated checkout as good
     # forever — a single transient tidy failure then left every later build dying

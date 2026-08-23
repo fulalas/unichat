@@ -283,6 +283,23 @@ object Tg {
 
     @Volatile private var lastError: String = ""
 
+    /**
+     * Turns TDLib's error into text for the user. Its "message" is a code, not
+     * a sentence — the ones a person can act on are translated here, and
+     * anything else is shown behind a label so it stays diagnosable.
+     */
+    fun authErrorText(ctx: Context, message: String): String = when {
+        message.isEmpty() -> ctx.getString(R.string.tg_auth_failed)
+        message.startsWith("PHONE_NUMBER_INVALID") -> ctx.getString(R.string.tg_err_phone_invalid)
+        message.startsWith("PHONE_CODE_INVALID") -> ctx.getString(R.string.tg_err_code_invalid)
+        message.startsWith("PHONE_CODE_EXPIRED") -> ctx.getString(R.string.tg_err_code_expired)
+        message.startsWith("PASSWORD_HASH_INVALID") -> ctx.getString(R.string.tg_err_password_invalid)
+        // FLOOD_WAIT_<seconds>: the wait is the only part worth reading.
+        message.startsWith("FLOOD_WAIT_") ->
+            ctx.getString(R.string.tg_err_flood, message.removePrefix("FLOOD_WAIT_"))
+        else -> ctx.getString(R.string.tg_auth_failed_detail, message)
+    }
+
     fun startPhoneLogin(phone: String) = executor.execute {
         authStep(
             JSONObject()

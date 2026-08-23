@@ -235,7 +235,7 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             tgSendCodeButton.isEnabled = true
             tgVerifyButton.isEnabled = true
             tgPasswordButton.isEnabled = true
-            val text = message.ifEmpty { getString(R.string.tg_auth_failed) }
+            val text = Tg.authErrorText(this, message)
             statusText.text = text
             Toast.makeText(this, text, Toast.LENGTH_LONG).show()
             return

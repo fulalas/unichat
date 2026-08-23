@@ -116,10 +116,34 @@ object Signal : EventListener {
         Bridge.notifyChatsChanged()
     }
 
+    /**
+     * Turns a bridge error code into text for the user. The Go side returns
+     * codes rather than sentences so they can be translated here; an
+     * "upstream:" payload is a server or signalmeow message with no code of its
+     * own and is shown as it came.
+     */
+    fun errorText(ctx: Context, code: String): String {
+        val arg = code.substringAfter(':', "")
+        return when (code.substringBefore(':')) {
+            "not_initialised" -> ctx.getString(R.string.signal_err_not_initialised)
+            "no_session" -> ctx.getString(R.string.signal_err_no_session)
+            "code_rejected" -> ctx.getString(R.string.signal_err_code_rejected)
+            "not_registered" -> ctx.getString(R.string.signal_err_not_registered)
+            "no_master_key" -> ctx.getString(R.string.signal_err_no_master_key)
+            "no_manifest" -> ctx.getString(R.string.signal_err_no_manifest)
+            "manifest_locked" -> ctx.getString(R.string.signal_err_manifest_locked)
+            "store_failed" -> ctx.getString(R.string.signal_err_store_failed)
+            "no_backup" -> ctx.getString(R.string.signal_err_no_backup)
+            "wrong_pin" -> ctx.getString(R.string.signal_err_wrong_pin, arg)
+            "upstream" -> arg
+            else -> code
+        }
+    }
+
     // --- Registration (primary device) ----------------------------------
     // Each call blocks on the network, so they all run on [executor] and report
     // back on the main thread. An empty string means success; anything else is
-    // an error to show the user.
+    // an error code for errorText().
 
     fun registerStart(number: String, onDone: (String) -> Unit) = executor.execute {
         val err = Wmbridge.signalRegisterStart(number)

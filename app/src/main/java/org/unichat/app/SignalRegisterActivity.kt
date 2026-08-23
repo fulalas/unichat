@@ -139,10 +139,10 @@ class SignalRegisterActivity : BaseActivity() {
         verify.isEnabled = !working
     }
 
-    private fun fail(message: String) {
+    private fun fail(code: String) {
         sendCode.isEnabled = true
         verify.isEnabled = true
-        status.text = message
+        status.text = Signal.errorText(this, code)
     }
 
 

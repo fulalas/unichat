@@ -42,7 +42,7 @@ class SignalPinActivity : BaseActivity() {
                     finish()
                 } else {
                     submit.isEnabled = true
-                    status.text = err
+                    status.text = Signal.errorText(this, err)
                 }
             }
         }
