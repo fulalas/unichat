@@ -310,10 +310,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun updateSubtitle() {
-        val states = buildList {
-            if (Bridge.hasSession()) add(Bridge.state)
-            if (Tg.hasSession()) add(Tg.state)
-        }
+        // Only accounts that are switched on: a paused one never connects, and
+        // counting it kept the subtitle at "disconnected" for good.
+        val states = ProtoPicker.active().map { Accounts.of(it).state }
         supportActionBar?.subtitle = when {
             states.isEmpty() -> getString(R.string.state_disconnected)
             states.all { it == "connected" } && Bridge.hasSession() && Bridge.syncProgress in 0..99 ->
@@ -325,8 +324,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     override fun onChatsChanged() = reloadFromEvent()
-
-    override fun onTgStateChanged() = updateSubtitle()
 
     /**
      * Someone came online or went away. Re-stamps the rows from the list already
@@ -372,7 +369,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onSyncProgress(progress: Int) = updateSubtitle()
 
-    override fun onStateChanged(state: String) {
+    override fun onAccountState(proto: String, state: String) {
         updateSubtitle()
         // Android blocks activity starts from the background; when stopped,
         // leave the task alone — onStart routes to login via hasAnySession().

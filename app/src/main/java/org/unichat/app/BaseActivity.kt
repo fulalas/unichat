@@ -50,12 +50,7 @@ open class BaseActivity : AppCompatActivity() {
      * chat took the WhatsApp overlay, so Signal chats came out green.
      */
     protected fun applyProtocolTheme(proto: String) {
-        val overlay = when (proto) {
-            ProtoPicker.TG -> return // the base theme is already Telegram blue
-            ProtoPicker.SG -> R.style.ThemeOverlay_UniChat_Sg
-            else -> R.style.ThemeOverlay_UniChat_Wa
-        }
-        theme.applyStyle(overlay, true)
+        Accounts.of(proto).themeOverlayRes?.let { theme.applyStyle(it, true) }
     }
 
     override fun onSupportNavigateUp(): Boolean {

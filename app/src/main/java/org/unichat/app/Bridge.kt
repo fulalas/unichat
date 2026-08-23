@@ -17,7 +17,10 @@ object Bridge : EventListener {
         fun onContactsChanged() {}
         fun onMessagesChanged(chatId: String, rowIds: Set<String>? = null) {}
         fun onChatMerged(fromId: String, toId: String) {}
-        fun onStateChanged(state: String) {}
+        /** One account's connection changed. [proto] says which; there used to
+         *  be a separate callback per protocol, so a screen listening to all of
+         *  them said the same thing three times. */
+        fun onAccountState(proto: String, state: String) {}
         fun onQrCode(code: String) {}
         fun onPairCode(code: String) {}
         fun onPairError(message: String) {}
@@ -30,8 +33,6 @@ object Bridge : EventListener {
         fun onChatExportDone(chatId: String, messages: Int, complete: Boolean, success: Boolean) {}
         fun onSeekResult(chatId: String, msgId: String, found: Boolean) {}
         fun onTgAuth(state: String, message: String) {}
-        fun onTgStateChanged() {}
-        fun onSignalStateChanged() {}
     }
 
     private const val TAG = "UniChat"
@@ -1402,32 +1403,19 @@ object Bridge : EventListener {
         notifyChatsChanged()
     }
 
-    private fun <T> onTg(work: () -> T, onResult: (T) -> Unit) {
+    internal fun <T> onTg(work: () -> T, onResult: (T) -> Unit) {
         Tg.io.execute {
             val result = work()
             main.post { onResult(result) }
         }
     }
 
-    private fun isTgProto(proto: String) = proto == ProtoPicker.TG
+    // These forward to the account behind the protocol; see Accounts.kt.
+    fun myName(proto: String): String = Accounts.of(proto).myName()
 
-    fun myName(proto: String): String = when (proto) {
-        ProtoPicker.TG -> Tg.myName()
-        ProtoPicker.SG -> Signal.myName()
-        else -> myName()
-    }
+    fun selfId(proto: String): String = Accounts.of(proto).selfId()
 
-    fun selfId(proto: String): String = when (proto) {
-        ProtoPicker.TG -> Tg.selfId()
-        ProtoPicker.SG -> Signal.selfId()
-        else -> selfId()
-    }
-
-    fun selfIdOf(chatId: String): String = when {
-        isTg(chatId) -> Tg.selfId()
-        Signal.isSgId(chatId) -> Signal.selfId()
-        else -> selfId()
-    }
+    fun selfIdOf(chatId: String): String = Accounts.ofChat(chatId).selfId()
 
     /** A contact's @lid alias mapped back to their phone JID. Blocking; worker
      *  threads only. Opening a chat under the alias would fork a second thread
@@ -1437,38 +1425,26 @@ object Bridge : EventListener {
         return Wmbridge.resolveChatId(connId, chatId).ifEmpty { chatId }
     }
 
-    fun fetchMyAbout(proto: String, onResult: (String) -> Unit) = when (proto) {
-        ProtoPicker.TG -> onTg({ Tg.fetchMyAbout() }, onResult)
-        ProtoPicker.SG -> Signal.fetchAbout(onResult)
-        else -> fetchMyAbout(onResult)
-    }
+    fun fetchMyAbout(proto: String, onResult: (String) -> Unit) =
+        Accounts.of(proto).fetchAbout(onResult)
 
-    fun setMyName(proto: String, name: String, onResult: (Boolean) -> Unit) = when (proto) {
-        ProtoPicker.TG -> onTg({ Tg.setMyName(name) }, onResult)
-        ProtoPicker.SG -> Signal.setProfile(name, null, onResult)
-        else -> setMyName(name, onResult)
-    }
+    fun setMyName(proto: String, name: String, onResult: (Boolean) -> Unit) =
+        Accounts.of(proto).setMyName(name, onResult)
 
-    fun setAbout(proto: String, text: String, onResult: (Boolean) -> Unit) = when (proto) {
-        ProtoPicker.TG -> onTg({ Tg.setAbout(text) }, onResult)
-        ProtoPicker.SG -> Signal.setProfile(null, text, onResult)
-        else -> setAbout(text, onResult)
-    }
+    fun setAbout(proto: String, text: String, onResult: (Boolean) -> Unit) =
+        Accounts.of(proto).setAbout(text, onResult)
 
     /** Signal has no avatar upload here yet, so the option is not offered. */
-    fun supportsProfilePicture(proto: String) = proto != ProtoPicker.SG
+    fun supportsProfilePicture(proto: String) = Accounts.of(proto).supportsProfilePicture
 
     fun setProfilePicture(proto: String, jpegPath: String, onResult: (Boolean) -> Unit) =
-        if (isTgProto(proto)) onTg({ Tg.setProfilePicture(jpegPath) }, onResult)
-        else setProfilePicture(jpegPath, onResult)
+        Accounts.of(proto).setProfilePicture(jpegPath, onResult)
 
     fun fetchPrivacySettings(proto: String, onResult: (Map<String, String>?) -> Unit) =
-        if (isTgProto(proto)) onTg({ Tg.fetchPrivacySettings() }, onResult)
-        else fetchPrivacySettings(onResult)
+        Accounts.of(proto).fetchPrivacySettings(onResult)
 
     fun setPrivacySetting(proto: String, name: String, value: String, onResult: (Boolean) -> Unit) =
-        if (isTgProto(proto)) onTg({ Tg.setPrivacySetting(name, value) }, onResult)
-        else setPrivacySetting(name, value, onResult)
+        Accounts.of(proto).setPrivacySetting(name, value, onResult)
 
     fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit) = executor.execute {
         val raw = Wmbridge.getPrivacySettings(connId)
@@ -1753,7 +1729,7 @@ object Bridge : EventListener {
             // the memo must not keep claiming they are still in place
             presenceSubscribed.clear()
         }
-        notifyUi { it.onStateChanged(state) }
+        notifyAccountState(ProtoPicker.WA, state)
     }
 
     override fun onQrCode(code: String) = notifyUi { it.onQrCode(code) }
@@ -1844,32 +1820,63 @@ object Bridge : EventListener {
         quotedType: String, senderName: String, isForwarded: Boolean,
     ) {
         if (wiping) return
-        // a malformed edit/protocol message can carry an empty key; storing it
-        // would create a row that can never be matched to a real message
-        if (msgId.isEmpty()) { Log.w(TAG, "message with empty id for $chatId"); return }
         val isResend = resendPending.remove(msgId)
-        db.upsertMessage(
+        ingestMessage(
             MessageRow(
                 msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId,
                 edited = isEdited, quotedId = quotedId, quotedText = quotedText,
                 quotedType = quotedType, senderName = senderName,
                 forwarded = isForwarded, latitude = latitude, longitude = longitude
-            )
+            ),
+            // A resend is our own message coming back; it is new to the store
+            // but not news to the user.
+            notify = !isHistory && !isResend,
+            // WhatsApp media URLs expire, so live messages fetch now; history
+            // backfill downloads when scrolled into view, to avoid a download
+            // storm on initial sync.
+            fetchMedia = !isHistory,
         )
-        // an edit must not reorder the chat list; only real new messages bump it
-        if (!isEdited) db.bumpChat(chatId, timeSent)
-        // eagerly fetch images and voice notes for LIVE messages (their media
-        // URLs expire); history backfill downloads lazily when scrolled into
-        // view, to avoid a download storm on initial sync
-        if (!isHistory && (msgType in PICTURE_TYPES || msgType == "audio") && fileId.isNotEmpty()) {
-            downloadFile(MessageRow(msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId))
-        }
-        if (!isHistory && !isResend && !fromMe && !isRead &&
-            chatId != activeChatId && !db.isMuted(chatId)
+    }
+
+    /**
+     * The tail every incoming message shares, whichever protocol brought it in:
+     * store it, order the chat list, pull the media a bubble or a notification
+     * needs right now, and raise that notification.
+     *
+     * The flags are the things the three protocols genuinely disagree on.
+     * [notify] is false for history backfill. [fetchMedia] is false when the
+     * file is already on this device — Telegram hands one over, and our own
+     * Signal send raced its own local copy. [bump] is false for an edit, which
+     * must not reorder the chat list. [afterStore] writes the columns a shared
+     * MessageRow cannot carry, while the UI has still not been told anything.
+     */
+    internal fun ingestMessage(
+        row: MessageRow,
+        notify: Boolean,
+        fetchMedia: Boolean,
+        bump: Boolean = !row.edited,
+        afterStore: () -> Unit = {},
+    ) {
+        // a malformed edit/protocol message can carry an empty key; storing it
+        // would create a row that can never be matched to a real message
+        if (row.id.isEmpty()) { Log.w(TAG, "message with empty id for ${row.chatId}"); return }
+        db.upsertMessage(row)
+        afterStore()
+        if (bump) db.bumpChat(row.chatId, row.timeSent)
+        if (fetchMedia && row.fileId.isNotEmpty() &&
+            (row.msgType in PICTURE_TYPES || row.msgType == "audio")
         ) {
-            postMessageNotification(chatId, senderId, text, msgType, timeSent)
+            // downloadFile, not the transport directly: it is what claims the
+            // in-flight slot, so a second event for the same message does not
+            // start a second transfer.
+            downloadFile(row)
         }
-        notifyChat(chatId)
+        if (notify && !row.fromMe && !row.isRead &&
+            row.chatId != activeChatId && !db.isMuted(row.chatId)
+        ) {
+            postMessageNotification(row.chatId, row.senderId, row.text, row.msgType, row.timeSent)
+        }
+        notifyChat(row.chatId)
     }
 
     internal fun postMessageNotification(
@@ -2107,9 +2114,8 @@ object Bridge : EventListener {
     internal fun notifyTgAuth(state: String, message: String) =
         notifyUi { it.onTgAuth(state, message) }
 
-    internal fun notifyTgState() = notifyUi { it.onTgStateChanged() }
-
-    internal fun notifySignalState() = notifyUi { it.onSignalStateChanged() }
+    internal fun notifyAccountState(proto: String, state: String) =
+        notifyUi { it.onAccountState(proto, state) }
 
     /**
      * The chat list minus any paused account's rows. Behind one accessor rather
@@ -2134,16 +2140,6 @@ object Bridge : EventListener {
 
     /** Signal's post-store hook: the row is already written, this is the part
      *  Bridge owns — refreshing open screens and raising a notification. */
-    internal fun onSignalMessage(
-        chatId: String, senderId: String, text: String, msgType: String,
-        timeSent: Long, fromMe: Boolean, isRead: Boolean,
-    ) {
-        notifyChat(chatId)
-        if (!fromMe && !isRead && chatId != activeChatId && !db.isMuted(chatId)) {
-            postMessageNotification(chatId, senderId, text, msgType, timeSent)
-        }
-    }
-
     internal fun postDownloadProgress(chatId: String, msgId: String, pct: Int) =
         notifyUi { it.onDownloadProgress(chatId, msgId, pct) }
 

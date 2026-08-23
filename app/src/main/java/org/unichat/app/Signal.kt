@@ -33,6 +33,8 @@ object Signal : EventListener {
     // volatile the main thread could keep seeing a linked account as absent.
     @Volatile private var started = false
     @Volatile private var linked = false
+    @Volatile var state: String = "disconnected"
+        private set
     @Volatile private var appContext: Context? = null
     // Cached because selfProtocol() asks for it once per chat row, on the main
     // thread, and it only changes at register/logout. Bridge memoises the
@@ -174,7 +176,7 @@ object Signal : EventListener {
         val err = Wmbridge.signalRegisterSubmitCode(number, code)
         if (err.isEmpty()) {
             linked = true
-            Bridge.notifySignalState()
+            Bridge.notifyAccountState(ProtoPicker.SG, state)
         }
         Bridge.runOnUi { onDone(err) }
         // connect(), not the raw bridge call: it is what honours the pause
@@ -288,11 +290,12 @@ object Signal : EventListener {
     // part of the shared WhatsApp-shaped interface and stay no-ops.
 
     override fun onStateChanged(state: String) {
+        this.state = state
         if (state == "logged_out") {
             linked = false
             selfIdMemo = ""
         }
-        Bridge.notifySignalState()
+        Bridge.notifyAccountState(ProtoPicker.SG, state)
     }
 
     override fun onContact(
@@ -325,30 +328,19 @@ object Signal : EventListener {
         isHistory: Boolean, isEdited: Boolean, quotedId: String, quotedText: String,
         quotedType: String, senderName: String, isForwarded: Boolean,
     ) {
-        if (msgId.isEmpty()) return
-        Bridge.db.upsertMessage(
+        Bridge.ingestMessage(
             MessageRow(
                 msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId,
                 edited = isEdited, quotedId = quotedId, quotedText = quotedText,
                 quotedType = quotedType, senderName = senderName, forwarded = isForwarded
-            )
+            ),
+            notify = !isHistory,
+            // Never for our own send: the file is already on this device and the
+            // caller hands its path over right after. Downloading it back raced
+            // with that, and the bubble ended up pointing at nothing — a voice
+            // note you could see but not play.
+            fetchMedia = !fromMe,
         )
-        // An edit must not reorder the chat list; only genuinely new messages do.
-        if (!isEdited) Bridge.db.bumpChat(chatId, timeSent)
-        // Fetch photos and voice notes straight away, like the WhatsApp side:
-        // waiting for the bubble to scroll into view leaves it blank in the
-        // notification and the chat list preview.
-        //
-        // Never for our own send: the file is already on this device and the
-        // caller hands its path over right after. Downloading it back raced
-        // with that, and the bubble ended up pointing at nothing — a voice note
-        // you could see but not play.
-        if (!fromMe && fileId.isNotEmpty() && (msgType == "image" || msgType == "audio")) {
-            startDownload(
-                MessageRow(msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId)
-            )
-        }
-        Bridge.onSignalMessage(chatId, senderId, text, msgType, timeSent, fromMe, isRead)
     }
 
     override fun onChatState(chatId: String, userId: String, state: String) =

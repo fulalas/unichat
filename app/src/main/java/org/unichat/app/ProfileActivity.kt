@@ -75,19 +75,12 @@ class ProfileActivity : BaseActivity() {
         // locally-saved contact name
         name = Bridge.myName(proto)
         valueName.text = name
-        // Signal ids are ACIs, not phone JIDs, so the number has to come from
-        // the account rather than be parsed back out of the id.
-        valuePhone.text = when (proto) {
-            ProtoPicker.TG -> Tg.myPhone()
-            ProtoPicker.SG -> Signal.myPhone()
-            else -> formatPhone(selfId)
-        }
+        // Signal ids are ACIs, not phone JIDs, so each account is asked for its
+        // own number rather than it being parsed back out of the id.
+        valuePhone.text = Accounts.of(proto).myPhone()
         loadAvatar()
         loadAbout()
     }
-
-    private fun formatPhone(id: String): String =
-        if (isPhoneId(id) && id.substringBefore('@').isNotEmpty()) phoneLabel(id) else ""
 
     /** Pixel size of the 200dp header, the most the avatar is ever shown at.
      *  Decoding to it instead of full resolution avoids allocating an entire

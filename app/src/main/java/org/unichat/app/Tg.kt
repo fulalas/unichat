@@ -372,7 +372,7 @@ object Tg {
                     "connectionStateWaitingForNetwork" -> "disconnected"
                     else -> "connecting"
                 }
-                Bridge.notifyTgState()
+                Bridge.notifyAccountState(ProtoPicker.TG, state)
             }
             "updateNewChat" -> onNewChat(obj.getJSONObject("chat"))
             // A photo change invalidates the path we memoised for that chat —
@@ -722,30 +722,27 @@ object Tg {
     private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
         val parsed = parseMessage(msg) ?: return
         val row = parsed.row
-        Bridge.db.upsertMessage(row)
-        // upsertMessage leaves the file columns alone, so a path TDLib already
-        // has is applied separately
-        if (row.filePath.isNotEmpty()) {
-            Bridge.db.setFileState(row.chatId, row.id, row.filePath, row.fileStatus)
-        }
-        // unconditional, not only when interaction_info is present: a message
-        // whose last reaction was removed comes back carrying none, and skipping
-        // it left the stale rows in place
-        applyReactions(row.chatId, row.id, msg.optJSONObject("interaction_info"), preview = false)
-        // upsertMessage deliberately never writes `played`, so apply it here
-        if (parsed.listened) Bridge.db.setPlayed(row.chatId, row.id)
-        Bridge.db.bumpChat(row.chatId, row.timeSent)
-        if (notify && !row.fromMe && !row.isRead) {
-            if ((row.msgType in PICTURE_TYPES || row.msgType == "audio") &&
-                row.fileId.isNotEmpty() && row.filePath.isEmpty()
-            ) {
-                downloadFile(row)
+        Bridge.ingestMessage(
+            row,
+            notify = notify,
+            fetchMedia = notify && !row.fromMe && !row.isRead && row.filePath.isEmpty(),
+            // Telegram bumps even for an edit: an edited message reaches us
+            // through the same update as a new one, and skipping the bump left
+            // the chat list ordered by whenever it was first seen.
+            bump = true,
+        ) {
+            // upsertMessage leaves the file columns alone, so a path TDLib
+            // already has is applied separately
+            if (row.filePath.isNotEmpty()) {
+                Bridge.db.setFileState(row.chatId, row.id, row.filePath, row.fileStatus)
             }
-            if (row.chatId != Bridge.activeChatId && !Bridge.db.isMuted(row.chatId)) {
-                Bridge.postMessageNotification(row.chatId, row.senderId, row.text, row.msgType, row.timeSent)
-            }
+            // unconditional, not only when interaction_info is present: a
+            // message whose last reaction was removed comes back carrying none,
+            // and skipping it left the stale rows in place
+            applyReactions(row.chatId, row.id, msg.optJSONObject("interaction_info"), preview = false)
+            // upsertMessage deliberately never writes `played`, so apply it here
+            if (parsed.listened) Bridge.db.setPlayed(row.chatId, row.id)
         }
-        Bridge.notifyChat(row.chatId)
     }
 
     private fun placeholderFor(content: JSONObject): String =

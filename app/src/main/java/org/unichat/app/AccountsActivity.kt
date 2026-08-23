@@ -89,19 +89,12 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun startSetup(proto: String) {
-        startActivity(
-            if (proto == ProtoPicker.SG) Intent(this, SignalRegisterActivity::class.java)
-            else Intent(this, LoginActivity::class.java)
-        )
+        startActivity(Accounts.of(proto).setupIntent(this))
     }
 
     private fun setEnabled(proto: String, enabled: Boolean) {
         Prefs.setProtoEnabled(this, proto, enabled)
-        when (proto) {
-            ProtoPicker.TG -> Tg.setNetworkEnabled(enabled)
-            ProtoPicker.SG -> if (enabled) Signal.connect() else Signal.disconnect()
-            else -> if (enabled) Bridge.connect() else Bridge.disconnect()
-        }
+        Accounts.of(proto).setNetworkEnabled(enabled)
         render()
     }
 
@@ -116,11 +109,7 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun remove(proto: String, name: String) {
-        when (proto) {
-            ProtoPicker.TG -> Tg.logout()
-            ProtoPicker.SG -> Signal.logout()
-            else -> Bridge.logout()
-        }
+        Accounts.of(proto).logout()
         // Deliberately NOT deleting the protocol's directory here. Every logout
         // above only QUEUES work on that protocol's own executor, so wiping the
         // tree from this thread pulled the files out from under a still-running
@@ -132,9 +121,7 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
     }
 
 
-    override fun onStateChanged(state: String) = render()
-    override fun onTgStateChanged() = render()
-    override fun onSignalStateChanged() = render()
+    override fun onAccountState(proto: String, state: String) = render()
 
 
     override fun onDestroy() {

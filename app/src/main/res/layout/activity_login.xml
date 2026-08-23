@@ -12,29 +12,11 @@
         android:padding="24dp">
 
         <LinearLayout
+            android:id="@+id/tabRow"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:layout_marginTop="8dp">
-
-            <Button
-                android:id="@+id/tabWhatsApp"
-                style="?android:attr/borderlessButtonStyle"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/whatsapp"
-                android:textStyle="bold"
-                android:textColor="@color/accent" />
-
-            <Button
-                android:id="@+id/tabTelegram"
-                style="?android:attr/borderlessButtonStyle"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="16dp"
-                android:text="@string/telegram"
-                android:textColor="@color/text_secondary" />
-        </LinearLayout>
+            android:layout_marginTop="8dp" />
 
         <LinearLayout
             android:id="@+id/waPanel"

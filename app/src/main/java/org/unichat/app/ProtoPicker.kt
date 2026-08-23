@@ -10,15 +10,11 @@ object ProtoPicker {
     const val SG = "sg"
 
     /** Every protocol the app speaks, linked or not. */
-    val ALL = listOf(WA, TG, SG)
+    val ALL = Accounts.ALL.map { it.proto }
 
-    fun linked(): List<String> = buildList {
-        if (Bridge.hasSession()) add(WA)
-        if (Tg.hasSession()) add(TG)
-        if (Signal.hasSession()) add(SG)
-    }
+    fun linked(): List<String> = Accounts.linked().map { it.proto }
 
-    fun isLinked(proto: String): Boolean = proto in linked()
+    fun isLinked(proto: String): Boolean = Accounts.of(proto).isLinked()
 
     /** Linked and switched on. A paused account is disconnected from its
      *  network, so it can neither send nor read back a profile — only Manage
@@ -27,19 +23,10 @@ object ProtoPicker {
 
 
     /** Which protocol a chat id belongs to. WhatsApp is the unprefixed one. */
-    fun of(chatId: String): String = when {
-        Tg.isTgId(chatId) -> TG
-        Signal.isSgId(chatId) -> SG
-        else -> WA
-    }
+    fun of(chatId: String): String = Accounts.ofChat(chatId).proto
 
-    fun label(ctx: Context, proto: String): String = ctx.getString(
-        when (proto) {
-            TG -> R.string.telegram
-            SG -> R.string.signal
-            else -> R.string.whatsapp
-        }
-    )
+    fun label(ctx: Context, proto: String): String =
+        ctx.getString(Accounts.of(proto).labelRes)
 
     fun pick(ctx: Context, onPick: (String) -> Unit) = pickFrom(ctx, active(), onPick)
 
