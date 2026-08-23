@@ -38,10 +38,10 @@ class SignalPinActivity : BaseActivity() {
             Signal.restoreFromPin(entered) { err ->
                 if (isFinishing || isDestroyed) return@restoreFromPin
                 if (err.isEmpty()) {
-                    val count = Bridge.db.contactCount(Signal.PREFIX)
-                    Toast.makeText(
-                        this, getString(R.string.signal_pin_ok, count), Toast.LENGTH_LONG
-                    ).show()
+                    // No count: the contacts are written by the sync's own
+                    // thread and land after this returns, so anything counted
+                    // here reads zero on the first restore.
+                    Toast.makeText(this, R.string.signal_pin_ok, Toast.LENGTH_LONG).show()
                     finish()
                 } else {
                     submit.isEnabled = true

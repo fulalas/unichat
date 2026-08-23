@@ -318,7 +318,8 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         if (showing == ProtoPicker.WA) statusText.text = ""
     }
 
-    override fun onPairError(code: String) {
+    override fun onPairError(proto: String, code: String) {
+        if (proto != ProtoPicker.WA) return
         pairButton.isEnabled = true
         val message = when {
             code == "short" -> getString(R.string.pair_phone_too_short)

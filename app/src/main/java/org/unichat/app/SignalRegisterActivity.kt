@@ -68,6 +68,10 @@ class SignalRegisterActivity : BaseActivity() {
     }
 
     private fun startSession() {
+        // The session lives in the bridge and cannot be resumed from the link
+        // screen, so once a code is on its way, leaving would cost the user
+        // another SMS.
+        findViewById<View>(R.id.sgLinkInstead).visibility = View.GONE
         busy(true, R.string.signal_register_starting)
         Signal.registerStart(number) { err ->
             if (err.isNotEmpty()) return@registerStart fail(err)

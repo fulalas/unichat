@@ -90,8 +90,12 @@ object Signal : EventListener {
             // remembering that a PIN restore once succeeded: a key that opens
             // the list is the same thing as the list being available, and it
             // stays right if the account is registered again.
-            val storedList = Wmbridge.signalSyncContacts()
-            appContext?.let { Prefs.setSgContactsRestored(it, storedList) }
+            // Only ever promoted here: a transient storage-service failure
+            // would otherwise put the row back to offering a restore that has
+            // already happened. Registering again clears it instead.
+            if (Wmbridge.signalSyncContacts()) {
+                appContext?.let { Prefs.setSgContactsRestored(it, true) }
+            }
             discoverContacts()
         }
     }
@@ -106,6 +110,9 @@ object Signal : EventListener {
      */
     fun startLink() = control.execute { Wmbridge.signalLinkStart("UniChat") }
 
+    /** Abandons a link in progress, for a screen the user left. */
+    fun stopLink() = control.execute { Wmbridge.signalLinkStop() }
+
     /**
      * Re-checks the address book when the user comes back to the app. Discovery
      * used to run only on connect, so anyone saved to the phone after that was
@@ -113,7 +120,11 @@ object Signal : EventListener {
      * the socket and the address book rarely changes twice in a minute.
      */
     fun refreshContacts() {
-        if (!linked) return
+        val ctx = appContext ?: return
+        // Paused means off the network. Discovery is its own request and works
+        // while disconnected, so without this a paused account went on sending
+        // the whole address book to Signal every time the app was opened.
+        if (!linked || !Prefs.protoEnabled(ctx, ProtoPicker.SG)) return
         val now = System.currentTimeMillis()
         if (now - lastDiscovery < DISCOVERY_GAP_MS) return
         discoverContacts()
@@ -228,6 +239,9 @@ object Signal : EventListener {
         val err = Wmbridge.signalRegisterSubmitCode(number, code)
         if (err.isEmpty()) {
             linked = true
+            // A new account key: whatever the old one could read, this one
+            // cannot, so the restore is on offer again.
+            appContext?.let { Prefs.setSgContactsRestored(it, false) }
             // Not the state left over from before registering — which after a
             // logout in the same run is "logged_out", the opposite of what just
             // happened. connect() below is about to dial.
@@ -472,12 +486,14 @@ object Signal : EventListener {
         }
     }
 
-    // Companion linking is gone; this account is a primary. Part of the
-    // WhatsApp-shaped listener interface, never raised for Signal.
-    override fun onQrCode(code: String) =
-        Bridge.notifyQrCode(ProtoPicker.SG, code)
+    // Raised while linking to the Signal app as a second device: the QR to
+    // scan, or why the attempt failed. Without the error forwarded, a link that
+    // timed out left the screen on a dead code with nothing said.
+    override fun onQrCode(code: String) = Bridge.notifyQrCode(ProtoPicker.SG, code)
+    override fun onPairError(code: String) = Bridge.notifyPairError(ProtoPicker.SG, code)
+
+    // Signal has no pair-by-number flow.
     override fun onPairCode(code: String) {}
-    override fun onPairError(code: String) {}
     override fun onContactsSynced() = Bridge.notifyChatsChanged()
     override fun onMessageDeleted(chatId: String, msgId: String) {
         if (msgId.isEmpty()) return

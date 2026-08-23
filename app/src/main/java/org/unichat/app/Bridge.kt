@@ -24,7 +24,8 @@ object Bridge : EventListener {
         /** [proto] says which account the code links. */
         fun onQrCode(proto: String, code: String) {}
         fun onPairCode(code: String) {}
-        fun onPairError(message: String) {}
+        /** [proto] says which account failed to link. */
+        fun onPairError(proto: String, code: String) {}
         fun onSyncProgress(progress: Int) {}
         fun onDownloadProgress(chatId: String, msgId: String, pct: Int) {}
         fun onChatState(chatId: String, state: String) {}
@@ -255,6 +256,8 @@ object Bridge : EventListener {
     private fun protoExecutor(chatId: String) =
         if (Signal.isSgId(chatId)) sgExecutor else executor
 
+    private val sgExporting = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     private val WA_VIEW_ONCE = setOf("image", "video", "audio")
     private val TG_VIEW_ONCE = setOf("image", "video")
 
@@ -340,6 +343,9 @@ object Bridge : EventListener {
         // server-side history to walk, so what has been received is all of it.
         override fun exportChat(chatId: String, uri: android.net.Uri): Boolean {
             val ctx = appContext ?: return false
+            // One at a time per chat, like the other two: a second run wrote the
+            // same file and released the caller's write grant under the first.
+            if (!sgExporting.add(chatId)) return false
             mediaExecutor.execute {
                 var messages = 0
                 // Throwable, not Exception: the whole history goes through one
@@ -355,6 +361,7 @@ object Bridge : EventListener {
                     Log.w(TAG, "signal export write failed: $e")
                     false
                 }
+                sgExporting.remove(chatId)
                 releaseExportUri(uri)
                 notifyUi { it.onChatExportDone(chatId, messages, true, success) }
             }
@@ -1774,7 +1781,8 @@ object Bridge : EventListener {
 
     override fun onPairCode(code: String) = notifyUi { it.onPairCode(code) }
 
-    override fun onPairError(message: String) = notifyUi { it.onPairError(message) }
+    override fun onPairError(message: String) =
+        notifyUi { it.onPairError(ProtoPicker.WA, message) }
 
     override fun onSyncProgress(progress: Long) {
         syncProgress = progress.toInt()
@@ -2159,6 +2167,9 @@ object Bridge : EventListener {
 
     internal fun notifyQrCode(proto: String, code: String) =
         notifyUi { it.onQrCode(proto, code) }
+
+    internal fun notifyPairError(proto: String, code: String) =
+        notifyUi { it.onPairError(proto, code) }
 
     /**
      * The chat list minus any paused account's rows. Behind one accessor rather

@@ -553,10 +553,15 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             return
         }
         val others = ProtoPicker.active().filter { it != own }
+        // displayLabel, not name: an unresolved chat is named after its own id,
+        // and rememberContact never renames, so that id would have become this
+        // contact's title for good.
+        val label = chat.displayLabel()
+        val name = if (label == chat.id) "" else label
         ProtoPicker.pickFrom(this, others) { proto ->
             resolveNumberThenOpen(Accounts.of(proto), "+" + digits.removePrefix("+")) { id ->
-                Bridge.rememberContact(id, chat.name)
-                openChat(id, chat.name)
+                Bridge.rememberContact(id, name)
+                openChat(id, name.ifEmpty { label })
             }
         }
     }

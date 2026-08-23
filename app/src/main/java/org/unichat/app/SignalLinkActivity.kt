@@ -49,6 +49,10 @@ class SignalLinkActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onDestroy() {
         Bridge.removeListener(this)
+        // Leaving means the code on screen will never be scanned; the socket
+        // would otherwise sit there until it timed out, and a second visit
+        // would start a competing attempt.
+        if (isFinishing && !Signal.hasSession()) Signal.stopLink()
         super.onDestroy()
     }
 
@@ -75,7 +79,8 @@ class SignalLinkActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    override fun onPairError(code: String) {
+    override fun onPairError(proto: String, code: String) {
+        if (proto != ProtoPicker.SG) return
         status.text = Signal.errorText(this, code)
         progress.visibility = View.GONE
     }

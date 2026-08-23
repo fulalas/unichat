@@ -2490,3 +2490,27 @@ index 0000000..0000000
 +	}
 +	return pin
 +}
+diff --git a/pkg/signalmeow/storageservice.go b/pkg/signalmeow/storageservice.go
+index 2326e1c..7c5afca 100644
+--- a/pkg/signalmeow/storageservice.go
++++ b/pkg/signalmeow/storageservice.go
+@@ -59,6 +59,19 @@ func (cli *Client) SyncStorage(ctx context.Context) {
+ 	}
+ }
+ 
++// ProcessStorage applies an update the caller has already fetched, so a caller
++// that had to read the manifest itself — to know whether the account's key even
++// opens it — does not download the whole thing a second time.
++func (cli *Client) ProcessStorage(ctx context.Context, update *StorageUpdate) error {
++	// Same logger in the context as SyncStorage puts there: without it every
++	// diagnostic the processing emits goes to a nop logger and is simply lost.
++	log := cli.Log.With().Str("action", "sync storage").Logger()
++	ctx = log.WithContext(ctx)
++	return cli.Store.DoContactTxn(ctx, func(ctx context.Context) error {
++		return cli.processStorageInTxn(ctx, update)
++	})
++}
++
+ func (cli *Client) processStorageInTxn(ctx context.Context, update *StorageUpdate) error {
+ 	log := zerolog.Ctx(ctx)
+ 	var changedContacts []*types.Recipient

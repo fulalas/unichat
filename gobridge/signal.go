@@ -46,6 +46,9 @@ type sgConn struct {
 	path     string
 	state    string
 	cancel   context.CancelFunc
+	// Cancels a link in progress. Held so leaving the screen closes the
+	// provisioning websocket instead of leaving it waiting for a scan.
+	linkCancel context.CancelFunc
 	// Names already pushed to the listener. The storage-service sync covers
 	// saved contacts, but anyone else — and every group — is resolved lazily
 	// from the first message they send, which must not refetch on every later one.
@@ -325,6 +328,15 @@ func SignalLinkStart(deviceName string) {
 	}
 	c.mu.Lock()
 	container := c.container
+	// One at a time: leaving the previous websocket open meant two QR codes
+	// racing for the same screen, and a scan landing on the abandoned one
+	// linked the account behind the user's back.
+	if c.linkCancel != nil {
+		c.linkCancel()
+		c.linkCancel = nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.linkCancel = cancel
 	c.mu.Unlock()
 	if container == nil {
 		c.log(LogError, "link: the store is not open")
@@ -335,7 +347,7 @@ func SignalLinkStart(deviceName string) {
 		deviceName = "UniChat"
 	}
 	go func() {
-		ctx := context.TODO()
+		defer cancel()
 		// allowBackup false: this client does not implement the backup
 		// transfer, and asking for one makes the primary wait on it.
 		for resp := range signalmeow.PerformProvisioning(ctx, container, deviceName, false) {
@@ -357,6 +369,21 @@ func SignalLinkStart(deviceName string) {
 			}
 		}
 	}()
+}
+
+// SignalLinkStop abandons a link in progress, for a screen the user left.
+func SignalLinkStop() {
+	c := sgGet()
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	cancel := c.linkCancel
+	c.linkCancel = nil
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // adoptLinkedDevice picks up the device provisioning has just written and makes
@@ -409,7 +436,12 @@ func SignalSyncContacts() bool {
 		c.log(LogInfo, "no stored contact list for this account")
 		return false
 	}
-	client.SyncStorage(ctx)
+	// ProcessStorage, not SyncStorage: that would fetch the whole manifest and
+	// every record again, on every connect, for what we already have here.
+	if err := client.ProcessStorage(ctx, update); err != nil {
+		c.log(LogWarning, "storage sync failed: "+err.Error())
+		return false
+	}
 	// Now that the account record is in, the account's own row can carry the
 	// name the user actually set rather than their number.
 	c.publishSelfContact()
@@ -1407,7 +1439,10 @@ func SignalRestoreFromPIN(pin string) string {
 	var masterKey []byte
 	var lastErr error
 	for _, candidate := range sgKeyReadings(candidates) {
-		if _, err := client.FetchStorage(ctx, candidate.key, 0, nil); err == nil {
+		// update != nil as well: the server answers 204 when it holds no
+		// manifest, which is not the same as this key opening one — taking it
+		// for success stored whichever reading happened to be tried first.
+		if update, err := client.FetchStorage(ctx, candidate.key, 0, nil); err == nil && update != nil {
 			masterKey = candidate.key
 			c.log(LogInfo, "storage manifest opened with the "+candidate.name+" reading")
 			break

@@ -48,7 +48,7 @@
     <string name="signal_pin_restore">Restore</string>
     <string name="signal_pin_too_short">PIN is too short</string>
     <string name="signal_pin_working">Contacting Signal…</string>
-    <string name="signal_pin_ok">%1$d Signal contacts restored</string>
+    <string name="signal_pin_ok">Signal contacts restored</string>
     <string name="signal_restore_contacts">Restore contacts (PIN)</string>
     <string name="signal_contacts_restored">Contacts restored</string>
     <string name="signal_err_not_initialised">Signal is not ready yet. Try again in a moment.</string>
