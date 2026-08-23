@@ -172,13 +172,21 @@ private object SgAccount : Account {
     override fun setAbout(text: String, onResult: (Boolean) -> Unit) =
         Signal.setProfile(null, text, onResult)
 
+    // Refusals still answer on the main thread, like every other account here:
+    // ProfileActivity calls this from a worker and touches views in the
+    // callback, so a straight onResult() would run them off the main thread.
     override val supportsProfilePicture = false
-    override fun setProfilePicture(jpegPath: String, onResult: (Boolean) -> Unit) = onResult(false)
+    override fun setProfilePicture(jpegPath: String, onResult: (Boolean) -> Unit) {
+        Bridge.runOnUi { onResult(false) }
+    }
 
     // PrivacyActivity shows Signal its own screen and never asks for these; the
     // WhatsApp answers used to be handed back here, which would have edited the
     // WhatsApp account.
-    override fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit) = onResult(null)
-    override fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit) =
-        onResult(false)
+    override fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit) {
+        Bridge.runOnUi { onResult(null) }
+    }
+    override fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit) {
+        Bridge.runOnUi { onResult(false) }
+    }
 }

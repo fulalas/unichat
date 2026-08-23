@@ -320,8 +320,11 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         var waLinked = false
         for (account in Accounts.ALL) {
             if (!account.isLinked()) continue
-            if (account.proto == ProtoPicker.WA) waLinked = true
             if (!Bridge.protoEnabled(account.proto)) continue
+            // Below the pause check: a paused WhatsApp keeps whatever sync
+            // progress it stopped at, and reading it left the subtitle stuck on
+            // "Syncing 40%" while the only account still running was connected.
+            if (account.proto == ProtoPicker.WA) waLinked = true
             active++
             when (account.state) {
                 "connected" -> connected++

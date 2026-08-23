@@ -108,15 +108,16 @@ object Signal : EventListener {
 
 
     fun logout() = control.execute {
+        // Before signalLogout, which is what closes the store: a reaction or
+        // read receipt queued on [ops] is a blocking network send still writing
+        // through that handle. They shared one thread before the split, so this
+        // ordering used to be free. Capped, because the send may be waiting on a
+        // network that is not coming back and the account still has to go.
+        runCatching { ops.submit(Runnable {}).get(5, TimeUnit.SECONDS) }
         Wmbridge.signalLogout()
         linked = false
         started = false
         selfIdMemo = ""
-        // Let [ops] drain first: a reaction or read receipt queued there is a
-        // blocking network send still writing through the store handle this is
-        // about to delete. They shared one thread before the split, so the
-        // ordering used to be free.
-        runCatching { ops.submit(Runnable {}).get(5, TimeUnit.SECONDS) }
         // On [control], after the Go side has closed the store: the media
         // and session tree is ours to remove and nothing else is holding it.
         // Then reopen, so registering again without restarting the app has a

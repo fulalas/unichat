@@ -172,9 +172,14 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             qrStarted = true
             Bridge.startQrLogin()
         }
-        statusText.text =
-            if (proto == ProtoPicker.TG) tgStatusForState(Tg.authState)
-            else getString(R.string.login_waiting)
+        statusText.text = when {
+            proto == ProtoPicker.TG -> tgStatusForState(Tg.authState)
+            // Re-read rather than left behind: the bridge does not re-emit its
+            // state, so coming back to this tab would otherwise replace the one
+            // message that explains why the QR cannot work.
+            Bridge.state == "outdated" -> getString(R.string.state_outdated)
+            else -> getString(R.string.login_waiting)
+        }
         // renderStep, not the "ready" path: switching to this tab with Telegram
         // already linked used to re-enter the just-linked flow, bouncing back to
         // the WhatsApp tab or finishing the screen. Linking is an event, not
@@ -368,15 +373,22 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             claimLinked(proto)
             return
         }
-        // Only the WhatsApp panel takes its status from the connection. Telegram
-        // connects before it is authorised and keeps reporting connection
-        // changes afterwards, so letting them through here wiped the prompt —
-        // or the "wrong code" — that onTgAuth had just put on screen.
-        if (proto != ProtoPicker.WA || showing != ProtoPicker.WA) return
+        if (proto != ProtoPicker.WA) return
+        // Shown whichever tab is up, and never cleared: an outdated bridge means
+        // the QR will never work, and the state is not re-emitted when the user
+        // comes back to the WhatsApp tab.
+        if (state == "outdated") {
+            statusText.text = getString(R.string.state_outdated)
+            return
+        }
+        // Otherwise only the WhatsApp panel takes its status from the
+        // connection. Telegram connects before it is authorised and keeps
+        // reporting connection changes afterwards, so letting them through here
+        // wiped the prompt — or the "wrong code" — onTgAuth had just put up.
+        if (showing != ProtoPicker.WA) return
         statusText.text = when (state) {
             "connecting" -> getString(R.string.login_waiting)
             "disconnected" -> getString(R.string.state_disconnected)
-            "outdated" -> getString(R.string.state_outdated)
             // every state is mapped explicitly so internal tokens (e.g.
             // "logged_out", the expected state on this screen) never show raw
             else -> ""
