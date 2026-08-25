@@ -154,6 +154,9 @@
     <string name="nothing_to_copy">Nothing to copy</string>
     <string name="link_copied">Link copied</string>
     <string name="share">Share</string>
+    <string name="save_to_downloads">Save to Downloads</string>
+    <string name="saved_to_downloads">Saved to Downloads as %1$s</string>
+    <string name="save_failed">Could not save the file</string>
     <string name="no_avatar">No profile picture</string>
     <string name="you">You</string>
     <string name="you_proto">You (%1$s)</string>

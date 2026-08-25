@@ -1,11 +1,14 @@
 package org.unichat.app
 
+import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import java.io.File
+import java.io.IOException
 
 /** Prefixes of cacheDir staging files, shared with Bridge.cleanStaleCache's
  *  startup sweep — every staging producer must use one of these. */
@@ -60,6 +63,42 @@ fun Context.copyUriToCache(uri: Uri, prefix: String, name: String): File? {
 fun mimeOfPath(path: String, fallback: String = "application/octet-stream"): String =
     MimeTypeMap.getSingleton()
         .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: fallback
+
+/**
+ * Copies [file] into the public Downloads collection under [name], answering
+ * the name it actually landed under (MediaStore appends "(1)" and the like on a
+ * collision) or null on failure. Goes through MediaStore rather than writing a
+ * File in DIRECTORY_DOWNLOADS: from Android 10 on that path is not writable
+ * without legacy storage, and MediaStore needs no permission for its own row.
+ * IS_PENDING hides the row until the copy finishes, so a file picker never
+ * offers a half-written file.
+ */
+fun Context.copyToDownloads(file: File, name: String): String? {
+    val values = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, name)
+        put(MediaStore.Downloads.MIME_TYPE, mimeOfPath(name, mimeOfPath(file.path)))
+        put(MediaStore.Downloads.IS_PENDING, 1)
+    }
+    val uri = try {
+        contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+    } catch (_: Exception) {
+        null
+    } ?: return null
+    return try {
+        val out = contentResolver.openOutputStream(uri) ?: throw IOException("no stream")
+        out.use { sink -> file.inputStream().use { it.copyTo(sink) } }
+        contentResolver.update(
+            uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null
+        )
+        uriDisplayName(uri) ?: name
+    } catch (_: Exception) {
+        try {
+            contentResolver.delete(uri, null, null)
+        } catch (_: Exception) {
+        }
+        null
+    }
+}
 
 private const val FILE_PROVIDER_AUTHORITY = "org.unichat.app.fileprovider"
 

@@ -2433,17 +2433,61 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val labelOnly = msg.msgType in LABEL_ONLY_TYPES && msg.text.isBlank()
 
         add(R.string.reply) { startReply(msg) }
-        if (msg.msgType == "contact" && msg.text.isNotBlank()) {
-            add(R.string.add_to_contacts) { addContact(msg) }
-        }
+        add(R.string.react) { showReactionPicker(msg) }
+        if (msg.text.isNotEmpty() && msg.msgType != "audio") add(R.string.copy) { copyText(msg.text) }
+        // only a type whose body is a file on disk; a contact card or a location
+        // carries text, and a label-only row has no body on this device at all
+        if (msg.msgType in FILE_MEDIA_TYPES) add(R.string.save_to_downloads) { saveToDownloads(msg) }
+        if (msg.msgType != "" && !labelOnly) add(R.string.share) { shareMessage(msg) }
         if (!labelOnly) add(R.string.forward) { pickForwardTarget(msg) }
         if (msg.fromMe && msg.msgType == "" && Bridge.canEdit(msg)) add(R.string.edit) { startEdit(msg) }
-        if (msg.text.isNotEmpty() && msg.msgType != "audio") add(R.string.copy) { copyText(msg.text) }
         add(R.string.delete) { confirmDelete(listOf(msg)) }
-        if (msg.msgType != "" && !labelOnly) add(R.string.share) { shareMessage(msg) }
-        add(R.string.react) { showReactionPicker(msg) }
 
         showActionDialog(actions)
+    }
+
+    private fun saveToDownloads(msg: MessageRow) {
+        if (isStillSending(msg)) {
+            Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (msg.filePath.isEmpty()) {
+            downloadWithToast(msg)
+            return
+        }
+        val file = File(msg.filePath)
+        val name = downloadFileName(msg)
+        io.execute {
+            val saved = copyToDownloads(file, name)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (saved != null) {
+                    Toast.makeText(this, getString(R.string.saved_to_downloads, saved), Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, R.string.save_failed, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    // Only a document's text is its file name — on every other media type it is
+    // the caption (or, for audio, the duration), which would name the file with
+    // a sentence.
+    private fun downloadFileName(msg: MessageRow): String {
+        val ext = File(msg.filePath).extension.lowercase()
+        fun withExt(base: String) =
+            if (ext.isEmpty() || base.endsWith(".$ext", ignoreCase = true)) base else "$base.$ext"
+        if (msg.msgType == "document" && msg.text.isNotBlank()) {
+            return withExt(safeDisplayFileName(msg.text))
+        }
+        val prefix = when {
+            msg.msgType in PICTURE_TYPES -> "IMG"
+            msg.msgType == "video" -> "VID"
+            else -> "AUD"
+        }
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+            .format(java.util.Date(msg.timeSent * 1000))
+        return withExt("${prefix}_$stamp")
     }
 
     private fun showReactionList(msg: MessageRow) {
