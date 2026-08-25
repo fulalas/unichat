@@ -1191,7 +1191,13 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
      * left every attachment blank.
      */
     private fun fetchWindowMedia(msg: MessageRow, userInitiated: Boolean = false) {
-        if (msg.fileId.isEmpty() || msg.filePath.isNotEmpty()) return
+        // A stored path can outlive its file (our own sends reference the
+        // cacheDir staging copy, swept after a day), and the window merge
+        // prefers the stored row — so the row arrived here claiming
+        // "downloaded", was skipped, and stayed blank with nothing (bind or
+        // tap) ever fetching it again.
+        val hasFile = msg.filePath.isNotEmpty() && File(msg.filePath).exists()
+        if (msg.fileId.isEmpty() || hasFile) return
         // one automatic try per file: a failed row still binds with an empty
         // path, so every scroll past it would start another blocking fetch. A
         // tap always retries.
@@ -1201,6 +1207,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         adapter.refreshRows(mapOf(msg.id to msg.copy(fileStatus = 1)))
         windowMedia.execute {
             val path = Bridge.searchMedia(msg.chatId, msg.id)
+            // heal the stored row too (no-op when the window row was never
+            // stored): leaving the swept path in the DB repeats this whole
+            // dance on every later visit, search or normal
+            if (path.isNotEmpty()) Bridge.db.setFileState(msg.chatId, msg.id, path, 2)
             runOnUiThread {
                 windowFetching.remove(msg.id)
                 if (!windowMode || isFinishing || isDestroyed) return@runOnUiThread
