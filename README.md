@@ -14,8 +14,8 @@ How each one signs in:
 
 ## Features
 
-- Every account in one chat list, with avatars, snippets, timestamps, unread
-  badges and live "typing… / recording voice…" indicators
+- Every account in one chat list, with avatars, snippets, timestamps and
+  unread badges
 - Text, photos, videos, voice messages (play and record), documents, stickers,
   locations and contact cards; **bold** and *italic* when you select text
 - Search chats from the list; search messages inside a chat, going further back
@@ -40,8 +40,9 @@ How each one signs in:
   one account linked, account actions ask which one
 - Privacy settings per account: last seen and online, profile picture, About,
   read receipts, and being findable by your number
-- A green dot on the avatar in the chat list marks who is online right now,
-  and the chat itself shows online, last seen, typing and recording
+- Presence on both screens: the chat list puts a green dot on the avatar of
+  whoever is online and swaps the snippet for "typing… / recording voice…" as
+  it happens; the chat itself adds last seen
 - History: Telegram loads the newest messages when you open a chat; WhatsApp
   syncs the last 20 per chat at link time and pulls older ones from your phone;
   Signal starts empty and fills up as messages arrive
