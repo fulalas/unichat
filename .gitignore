@@ -29,3 +29,6 @@ app/src/main/jniLibs/
 
 # weekly upstream-poll stamp
 gobridge/ext/.upstream-checked
+
+# TDLib sources, fetched by build-tdlib.sh (tracks upstream master)
+tdjson/td/

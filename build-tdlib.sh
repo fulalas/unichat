@@ -32,38 +32,43 @@ done
 
 EXT="$DIR/tdjson/ext"
 TD_SRC="$DIR/tdjson/td"
-# Must match the tdjson/td gitlink in git: a source tree downloaded as a zip has
-# no gitlink to read it from, so the commit is spelled out here as well. Update
-# both together or a zip build compiles a different TDLib than a git one.
-TD_COMMIT=d1085f9cebc5a62379991ae1652673954f229c1f
 TD_URL=https://github.com/tdlib/td.git
+TD_BRANCH=master
+TD_STAMP="$TD_SRC/.td-commit"
 
-# TDLib is a submodule, not vendored, so it is fetched on demand. GitHub's zip
-# of this repo carries neither .git nor the submodule contents, and telling
-# those users to run `git submodule update` left them with no way to build at
-# all; clone the pinned commit directly instead.
-if [ ! -f "$TD_SRC/CMakeLists.txt" ]; then
-    echo "== Fetching TDLib @ $TD_COMMIT =="
-    command -v git >/dev/null || { echo "TDLib: git is required to fetch it" >&2; exit 1; }
-    if [ -e "$DIR/.git" ] && [ -f "$DIR/.gitmodules" ]; then
-        git -C "$DIR" submodule update --init --recursive tdjson/td
+# TDLib tracks upstream's tip, like whatsmeow, rather than a hash written down
+# here: a pinned commit only ever moved when someone remembered to edit it, and
+# it had to be kept in step with a git submodule that a downloaded zip does not
+# carry at all. build.sh polls weekly and only calls this script when the tip
+# has actually moved.
+command -v git >/dev/null || { echo "TDLib: git is required to fetch it" >&2; exit 1; }
+TD_WANT="${TD_COMMIT:-}"
+[ -n "$TD_WANT" ] || TD_WANT=$(git ls-remote "$TD_URL" "refs/heads/$TD_BRANCH" 2>/dev/null | cut -f1)
+if [ -z "$TD_WANT" ]; then
+    # Offline is only fatal with nothing to fall back on; otherwise build what
+    # is already checked out rather than refusing to build at all.
+    [ -f "$TD_SRC/CMakeLists.txt" ] || { echo "TDLib: upstream unreachable and nothing fetched yet" >&2; exit 1; }
+    echo "== TDLib: upstream unreachable; using the existing checkout =="
+    TD_WANT=$(cat "$TD_STAMP" 2>/dev/null)
+elif [ "$(cat "$TD_STAMP" 2>/dev/null)" != "$TD_WANT" ] || [ ! -f "$TD_SRC/CMakeLists.txt" ]; then
+    echo "== Fetching TDLib @ ${TD_WANT:0:12} (upstream $TD_BRANCH) =="
+    rm -rf "$TD_SRC"
+    mkdir -p "$TD_SRC"
+    git -C "$TD_SRC" init -q
+    git -C "$TD_SRC" remote add origin "$TD_URL"
+    # by SHA and shallow, so this costs one commit rather than TDLib's history;
+    # a server that refuses a SHA fetch falls back to a full clone
+    if git -C "$TD_SRC" fetch -q --depth 1 origin "$TD_WANT" 2>/dev/null; then
+        git -C "$TD_SRC" checkout -q FETCH_HEAD
     else
         rm -rf "$TD_SRC"
-        mkdir -p "$TD_SRC"
-        git -C "$TD_SRC" init -q
-        git -C "$TD_SRC" remote add origin "$TD_URL"
-        # by SHA, shallow, so this costs one commit rather than TDLib's history;
-        # servers that refuse a SHA fetch fall back to a full clone
-        if git -C "$TD_SRC" fetch -q --depth 1 origin "$TD_COMMIT" 2>/dev/null; then
-            git -C "$TD_SRC" checkout -q FETCH_HEAD
-        else
-            rm -rf "$TD_SRC"
-            git clone -q "$TD_URL" "$TD_SRC"
-            git -C "$TD_SRC" checkout -q "$TD_COMMIT"
-        fi
+        git clone -q "$TD_URL" "$TD_SRC" || { echo "TDLib: clone failed" >&2; exit 1; }
+        git -C "$TD_SRC" checkout -q "$TD_WANT" || { echo "TDLib: checkout failed" >&2; exit 1; }
     fi
     [ -f "$TD_SRC/CMakeLists.txt" ] || { echo "TDLib: fetch failed" >&2; exit 1; }
+    echo "$TD_WANT" > "$TD_STAMP"
 fi
+
 mkdir -p "$EXT"
 
 if ! command -v gperf >/dev/null && [ ! -x "$EXT/hosttools/bin/gperf" ]; then
@@ -131,7 +136,7 @@ build_openssl() {
 # update left the new C++ compiling against the old generated API and the build
 # died on "no member named ... in namespace td::td_api". The per-ABI tree goes
 # too, since its objects were compiled against those same headers.
-TD_HAVE=$(git -C "$TD_SRC" rev-parse HEAD 2>/dev/null || echo "$TD_COMMIT")
+TD_HAVE=$(cat "$TD_STAMP" 2>/dev/null || git -C "$TD_SRC" rev-parse HEAD)
 if [ "$(cat "$EXT/build-host/.prepared" 2>/dev/null)" != "$TD_HAVE" ]; then
     echo "== TDLib host stage (prepare_cross_compiling) @ ${TD_HAVE:0:12} =="
     rm -rf "$EXT/build-host"

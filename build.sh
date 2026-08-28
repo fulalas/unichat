@@ -318,19 +318,26 @@ for abi in "${TD_ABIS[@]}"; do
         fi
     done
 done
+# The tip is resolved here and handed down, so the weekly stamp governs TDLib
+# the same way it governs the other two — build-tdlib.sh would otherwise poll
+# again on its own.
+TD_REBUILD=0
 if [ ${#TD_MISSING[@]} -gt 0 ]; then
-    echo "== TDLib libs missing for ${TD_MISSING[*]}; running build-tdlib.sh =="
-    "$DIR/build-tdlib.sh" "${TD_MISSING[@]}"
+    echo "== TDLib libs missing for ${TD_MISSING[*]} =="
+    TD_REBUILD=1
 elif [ "$APK_ONLY" != 1 ] && week_due; then
-    # Reported, not taken: moving the TDLib pin recompiles it from source, which
-    # is an hour this build has no business spending without being asked.
-    TD_PINNED=$(sed -n 's/^TD_COMMIT=\(.*\)/\1/p' "$DIR/build-tdlib.sh" | head -1)
     TD_LATEST=$(git ls-remote https://github.com/tdlib/td.git refs/heads/master 2>/dev/null | cut -f1)
-    if [ -n "$TD_LATEST" ] && [ "$TD_LATEST" != "$TD_PINNED" ]; then
-        echo "== TDLib: upstream master is ${TD_LATEST:0:12}, pinned ${TD_PINNED:0:12} =="
-        echo "   to take it: set TD_COMMIT in build-tdlib.sh, then ./build-tdlib.sh"
+    if [ -n "$TD_LATEST" ] && [ "$TD_LATEST" != "$(cat "$DIR/tdjson/td/.td-commit" 2>/dev/null)" ]; then
+        echo "== TDLib: upstream master moved to ${TD_LATEST:0:12}; rebuilding =="
+        TD_MISSING=("${TD_ABIS[@]}")
+        TD_REBUILD=1
+        export TD_COMMIT="$TD_LATEST"
     fi
 fi
+if [ "$TD_REBUILD" = 1 ]; then
+    "$DIR/build-tdlib.sh" "${TD_MISSING[@]}"
+fi
+
 [ "$APK_ONLY" != 1 ] && mark_checked
 
 echo "== Building release APK =="
