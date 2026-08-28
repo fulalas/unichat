@@ -3,16 +3,40 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+def tgProps = new Properties()
+def tgFile = rootProject.file('telegram.properties')
+if (tgFile.exists()) {
+    tgFile.withInputStream { tgProps.load(it) }
+} else {
+    throw new GradleException(
+        "telegram.properties not found.\n" +
+        "  cp telegram.properties.template telegram.properties\n" +
+        "  then fill in your own api_id and api_hash from https://my.telegram.org"
+    )
+}
+def tgApiId = tgProps.getProperty('api_id', '').trim()
+def tgApiHash = tgProps.getProperty('api_hash', '').trim()
+if (!tgApiId || !tgApiHash) {
+    throw new GradleException("telegram.properties: api_id and api_hash must both be set")
+}
+
 android {
     namespace 'org.unichat.app'
     compileSdk 35
 
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
+        buildConfigField "int", "TG_API_ID", tgApiId
+        buildConfigField "String", "TG_API_HASH", "\"${tgApiHash}\""
+
         applicationId "org.unichat.app"
         minSdk 29
         targetSdk 35
-        versionCode 182
-        versionName "0.44.7"
+        versionCode 185
+        versionName "0.45.2"
         ndk {
             // arm64 only: the three-ABI APK carried ~50 MB of native libraries no
             // real device could ever load. Must stay in step with build.sh's

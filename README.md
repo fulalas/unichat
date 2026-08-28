@@ -1,52 +1,57 @@
 # UniChat
 
-Minimal native Android client for **WhatsApp and Telegram in one app**.
-WhatsApp goes over the real multi-device protocol through
-[whatsmeow](https://github.com/tulir/whatsmeow) (the same Go library that powers
-[nchat](https://github.com/d99kris/nchat)), compiled for Android with
-`gomobile`. Telegram goes over the official
-[TDLib](https://github.com/tdlib/td) JSON interface (vendored in `tdjson/td`,
-built for Android by `build-tdlib.sh`). Both feed one Kotlin app built with
-classic XML Views — no Compose, no bloat.
+Minimal native Android client for **Telegram, Signal and WhatsApp in one app**.
 
-Link either account alone or both at once: their chats share one list, one
-local database and the same screens, with a small badge marking which service a
-chat belongs to.
+- Telegram uses the official [TDLib](https://github.com/tdlib/td) (submodule
+  `tdjson/td`, built by `build-tdlib.sh`).
+- Signal uses [signalmeow](https://github.com/mautrix/signal) over Signal's own
+  `libsignal` (built by `build-libsignal.sh`).
+- WhatsApp uses the real multi-device protocol through
+  [whatsmeow](https://github.com/tulir/whatsmeow), compiled for Android with
+  `gomobile`.
 
-WhatsApp links as a **companion device** (like WhatsApp Web): your phone's
-official WhatsApp keeps working normally. Telegram signs in as a normal
-Telegram client with your phone number (no secret chats).
+One Kotlin app with classic XML Views — no Compose, no bloat.
+
+Link one account or all three: their chats share one list, one local database
+and the same screens, with a small badge marking which service a chat belongs
+to.
+
+WhatsApp and Signal link as a **second device**, so the app on your phone keeps
+working. Telegram signs in as a normal client with your phone number (no secret
+chats).
 
 ## Features
 
-- WhatsApp login by QR code **and** pairing code (pairing codes auto-refresh,
-  so the code on screen is always valid); Telegram login by phone number →
-  login code → two-step password when your account has one
-- Both accounts in one chat list, with avatars, snippets, timestamps, unread
+- Every account in one chat list, with avatars, snippets, timestamps, unread
   badges, a per-service badge and live "typing… / recording voice…" indicators
-- Search box to filter chats
-- Edit your own profile — avatar, name and About — from the ⋮ menu; with both
-  accounts linked, account actions (profile, privacy, logout) ask which one
-- Link the second account later from ⋮ → Link account
-- Conversations with text, images (uncropped, tap for fullscreen), voice
-  messages (play and record) and documents (tap to open)
-- Presence in the chat header: online / last seen / typing / recording
-- Tap a message for its actions (reply, forward, edit, copy, react, share); tap
-  a reply's quote to jump to the original — fetched from the server (or your
-  phone, on WhatsApp) if it isn't synced yet
-- Select several messages (long-press, then tap) to forward, copy or delete
-  them together (forwards keep their original order; delete only when all yours)
-- Appears in Android's share sheet: share text, images or any file from other
+- Search chats from the list; search messages inside a chat, going further back
+  on demand
+- Text, photos, videos, voice messages (play and record), documents, stickers,
+  locations and contact cards; **bold** and *italic* when you select text
+- Link previews with title, description and picture
+- Tap a message for its actions: reply, react, copy, forward, share, save to
+  Downloads, edit, delete. Tap a reply's quote to jump to the original
+- Select several messages (long-press, then drag or tap) to forward, copy or
+  delete them together
+- View-once photos and videos, where the service allows them
+- Appears in Android's share sheet: send text, photos or any file from other
   apps straight into a chat
-- Per-chat incoming-message notifications for both services (sender, avatar,
-  preview, grouped; suppressed for the chat currently on screen, for muted
-  chats and during history backfill)
-- Lean history sync: WhatsApp syncs the last 20 messages per chat at link time
-  (older ones come from your phone, which must be online); Telegram pulls the
-  newest 60 messages when you open a chat. Both fetch older pages on demand
-- Local SQLite history shared by the two services, foreground service to stay
-  connected (with a hidden, transparent status-bar icon), true-black OLED dark
-  theme
+- Notifications per chat for all three services, with sender, avatar and
+  preview, quiet for the chat on screen and for muted chats
+- Export a chat to a text file; mute, delete or open a chat on your other
+  account
+- Edit your profile — picture, name and About — from the ⋮ menu. With more than
+  one account linked, account actions ask which one
+- Presence in the chat header: online, last seen, typing, recording
+- History: Telegram loads the newest messages when you open a chat; WhatsApp
+  syncs the last 20 per chat at link time and pulls older ones from your phone;
+  Signal starts empty and fills up as messages arrive
+- Local SQLite history shared by the three services, a foreground service to
+  stay connected (with a hidden status-bar icon), font size setting and a
+  true-black OLED dark theme
+
+Signal is the youngest of the three: no message history from before you linked,
+no chat pictures, and locations and contact cards can be received but not sent.
 
 ## Prerequisites
 
@@ -54,11 +59,14 @@ Telegram client with your phone number (no secret chats).
 - JDK 17
 - Android SDK: platform 35, build-tools 35, NDK r27
 - Gradle 8.13 (or set `$GRADLE` to your gradle binary)
-- For the TDLib step (`build-tdlib.sh`, run automatically on a fresh clone):
-  CMake 3.x plus a host C/C++ toolchain (`make`, `gcc`/`g++`) — it builds
-  TDLib's host stage and, if `gperf` is not installed, gperf itself
-- Network access on that first build: it downloads OpenSSL 3.3.2 and gperf 3.1
-  (whatsmeow is fetched from GitHub too — it is not vendored)
+- `git` and `protoc`, for the Signal step
+- CMake 3.x and a host C/C++ toolchain (`make`, `gcc`/`g++`), for the Telegram
+  step — it also builds `gperf` if you don't have it
+- Network access on the first build: it downloads OpenSSL, gperf, whatsmeow,
+  signalmeow and libsignal, none of which are committed here
+
+Rust is needed for Signal too, but `build-libsignal.sh` installs it with rustup
+if `cargo` is missing.
 
 If you keep the toolchain in a sibling `../toolchain/env.sh`, `build.sh` sources
 it automatically; otherwise point `$UNICHAT_ENV` at your own env script or just
@@ -67,14 +75,22 @@ containing `sdk.dir`).
 
 ## Building
 
-TDLib is a git submodule (`tdjson/td`), not vendored — check it out first:
+TDLib is a submodule — check it out first:
 
 ```sh
 git submodule update --init --recursive
 ```
 
-whatsmeow is not committed either: `build.sh` fetches it into
-`gobridge/ext/whatsmeow` and applies `gobridge/ext/whatsmeow-local.patch`.
+Telegram needs an app id of your own, which is not in this repo. Get one at
+[my.telegram.org](https://my.telegram.org) → API development tools (platform
+Android), then:
+
+```sh
+cp telegram.properties.template telegram.properties   # then fill it in
+```
+
+The build stops and tells you so if that file is missing. Keep it out of git —
+Telegram bans an id that shows up as several apps.
 
 ```sh
 ./build.sh                   # full build: Go bridge + aar + release APK
@@ -82,87 +98,60 @@ whatsmeow is not committed either: `build.sh` fetches it into
 ./build.sh --no-install      # don't install onto a connected device afterwards
 ```
 
-Every invocation produces a release build and drops the final APK in the
-repo root as `unichat-<version>.apk` (version from `versionName` in
-`app/build.gradle`, e.g. `unichat-0.6.0.apk`).
+Every build is a release build and drops the APK in the repo root as
+`unichat-<version>.apk`, named after `versionName` in `app/build.gradle`.
 
-The Telegram native libs are not in git: on a fresh clone `build.sh` notices
-they are missing and runs `./build-tdlib.sh` first, which compiles OpenSSL and
-TDLib from source for arm64-v8a. That takes a long time — but only once:
-intermediates are cached in `tdjson/ext/` and the libs land in
-`app/src/main/jniLibs/<abi>/`. It can also be run on its own, optionally for a
-subset of ABIs:
+The first build is slow: it compiles OpenSSL, TDLib and libsignal from source
+for arm64. That happens only once — the results are cached in `tdjson/ext/` and
+`gobridge/ext/libsignal/`, and the Telegram libs land in
+`app/src/main/jniLibs/`. Both steps can also be run on their own:
 
 ```sh
 ./build-tdlib.sh                          # arm64-v8a armeabi-v7a x86_64
 ./build-tdlib.sh arm64-v8a                # just one (the APK then needs the rest)
+./build-libsignal.sh
 ```
 
-**A build installs automatically** whenever a device is attached and in `device`
-state — pass `--no-install` to skip that. With no device connected the build
-just prints the command to run later:
+**A build installs automatically** when a device is attached — pass
+`--no-install` to skip it. With no device connected it prints the command to run
+later:
 
 ```sh
 source ../toolchain/env.sh
 adb install -r unichat-<version>.apk
 ```
 
-Updates install in place and keep both sessions — no need to link again — as
-long as the APK is signed with `keystore/unichat.keystore` (build.sh does this
-automatically). Bump `versionCode`/`versionName` in `app/build.gradle` for each
-release.
+Updates install in place and keep your sessions, as long as the APK is signed
+with `keystore/unichat.keystore` (build.sh does this). Bump
+`versionCode`/`versionName` in `app/build.gradle` for each release.
 
 ## Logging in
 
-The login screen has one tab per service. Linking just one is enough; the other
-can be added later from ⋮ → **Link account**.
-
-### WhatsApp
-
-1. Install and open UniChat.
-2. Either scan the QR code with the phone that runs your official WhatsApp
-   (WhatsApp → Settings → Linked devices → Link a device), or type your phone
-   number (international format, e.g. `34612345678`) and tap
-   **Get pairing code**, then enter the code in the WhatsApp notification
-   "Enter code to link new device".
-3. Enter the code within ~2 minutes; if it rotates, use whatever code the app
-   currently shows — it is always valid.
-4. After linking, recent history syncs in seconds; opening a chat pulls older
-   messages from your phone.
+The login screen has one tab per service. One is enough; the others can be added
+later from ⋮ → **Link account**.
 
 ### Telegram
 
-1. Open the **Telegram** tab and type your phone number in international
-   format, then tap **Send code**.
-2. Enter the login code Telegram sends you (in the Telegram app on another
-   device, or by SMS).
-3. If your account has two-step verification, type its password when asked.
-4. Chats appear as TDLib loads them; opening a chat fetches its recent
-   messages.
+1. Type your phone number with country code and tap **Send code**.
+2. Enter the code Telegram sends you, in the Telegram app on another device or
+   by SMS.
+3. If your account has two-step verification, type its password.
 
-## Architecture notes
+### Signal
 
-- `gobridge/bridge.go` exposes a small gomobile-friendly API
-  (`Init/StartLogin/RequestPairCode/SendTextMessage/SendImageMessage/
-  SendAudioMessage/SendDocumentMessage/DownloadFile/RequestChatHistory/
-  SubscribePresence/SetMyName/SetAbout/SetProfilePicture/...`) plus an
-  `EventListener` callback interface implemented in Kotlin (`Bridge.kt`).
-- Media tokens: incoming media messages carry an opaque `fileId`
-  (`img:`/`vid:`/`aud:`/`doc:`/`stk:` + the marshalled protobuf); `DownloadFile`
-  reconstructs the proto and downloads/decrypts via whatsmeow. Location messages
-  reuse the same field for their `lat,lng` coordinates instead.
-- Voice notes are recorded as Opus in Ogg (`MediaRecorder`, API 29+) and sent
-  as WhatsApp push-to-talk messages.
-- The WhatsApp login socket dies ~160 s after showing unscanned QR codes;
-  the bridge restarts it automatically and re-issues pairing codes.
-- Telegram: `Tg.kt` drives TDLib over its JSON interface — one thread runs the
-  receive loop for every update, blocking request/response pairs are matched by
-  `"@extra"`. `tdjson/jni/tdjni.c` is the JNI shim behind `TdJson.kt`; it passes
-  byte arrays in both directions because JNI's modified UTF-8 (CESU-8 for emoji)
-  is not valid UTF-8 for TDLib.
-- Shared store: Telegram rows live in the same tables as WhatsApp ones under
-  `tg:`-prefixed ids, so the chat list, chat screen and notifications work for
-  both without protocol-specific screens.
-- Local storage: `unichat.db` (chats/contacts/messages for both services),
-  `files/wm/` (whatsmeow session, avatars, media) and `files/tg/` (TDLib
-  database and downloaded Telegram files).
+1. Open Signal on this phone, go to **Settings → Linked devices**, tap **+** and
+   scan the code UniChat shows. Your contacts and groups come from your account.
+2. No Signal app on this phone? Tap **Register the number here instead** and
+   verify by SMS. This signs that number out of the official Signal app.
+3. To pull your contact list from your account, use **Restore contacts (PIN)**
+   and type your Signal PIN.
+
+### WhatsApp
+
+1. Scan the QR code with the phone that runs your WhatsApp (WhatsApp →
+   Settings → Linked devices → Link a device), or type your phone number with
+   country code, tap **Get pairing code** and enter it in the WhatsApp
+   notification.
+2. Codes refresh on their own, so whatever is on screen is always valid.
+3. Recent messages sync in seconds; opening a chat pulls older ones from your
+   phone, which has to be online.

@@ -24,14 +24,6 @@ object Tg {
     private fun chatIdOf(id: String): Long = id.removePrefix(PREFIX).toLongOrNull() ?: 0L
     private fun idFor(raw: Long): String = PREFIX + raw
 
-    private val API_ID = String(byteArrayOf(0x31, 0x30, 0x34, 0x31, 0x32, 0x30, 0x32, 0x37))
-    private val API_HASH = decodeHex(
-        "3536373261353832633265666532643939363232326636343237386563616163"
-    )
-
-    private fun decodeHex(hex: String): String =
-        hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray().decodeToString()
-
     @Volatile private var clientId: Int = -1
     @Volatile private var appContext: Context? = null
     @Volatile var state: String = "disconnected"
@@ -207,8 +199,8 @@ object Tg {
                         .put("files_directory", "$dir/files")
                         .put("use_message_database", true)
                         .put("use_secret_chats", false)
-                        .put("api_id", API_ID.toInt())
-                        .put("api_hash", API_HASH)
+                        .put("api_id", BuildConfig.TG_API_ID)
+                        .put("api_hash", BuildConfig.TG_API_HASH)
                         .put("system_language_code", "en")
                         .put("device_model", "Android")
                         .put("application_version", appVersion)
