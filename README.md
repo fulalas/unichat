@@ -10,7 +10,7 @@ How each one signs in:
 - **Telegram** — standalone app — uses [TDLib](https://github.com/tdlib/td)
 - **Signal** — standalone app or linked as a second device — uses [signalmeow](https://github.com/mautrix/signal)
 - **WhatsApp** — **companion device** (like WhatsApp Web), so the official
-  WhatsApp app must be installed on your phone — uses [whatsmeow](https://github.com/tulir/whatsmeow)
+  WhatsApp app must be installed on your other device — uses [whatsmeow](https://github.com/tulir/whatsmeow)
 
 ## Features
 
@@ -44,7 +44,8 @@ How each one signs in:
   whoever is online and swaps the snippet for "typing… / recording voice…" as
   it happens; the chat itself adds last seen
 - History: Telegram loads the newest messages when you open a chat; WhatsApp
-  syncs the last 20 per chat at link time and pulls older ones from your phone;
+  syncs the last 20 per chat at link time and pulls older ones from your other
+  device;
   Signal starts empty and fills up as messages arrive
 - Light and dark themes, or follow the device; the dark one is true black for
   OLED. Font size is yours to set too
@@ -61,7 +62,8 @@ How each one signs in:
 - Telegram: no secret chats
 - Signal: no avatars, and a location goes as a map link, since Signal has no
   location message of its own
-- WhatsApp: needs the official app on your phone, and it has to be online the
+- WhatsApp: needs the official app on your other device, and it has to be
+  online the
   first time you load old messages
 
 ## Logging in
@@ -83,23 +85,24 @@ The Signal tab opens **Set up Signal**. Either:
 - **Standalone** — type your number, tap **Send code**, confirm **Replace
   Signal?**, then enter the code from the SMS and tap **Verify and register**.
   No Signal app needed, but that number is signed out of the official app.
-- **With the Signal app on the phone** — tap **Or link to the Signal app on
-  this phone**, then in Signal open **Settings → Linked devices**, tap **+** and
-  scan the code UniChat shows.
+- **With the Signal app on this device** — tap **Or link to the Signal app on
+  this device**, then in Signal open **Settings → Linked devices**, tap **+**
+  and scan the code UniChat shows.
 
-Signing up here only shows chats with people saved in your phone. For the rest,
-tap ⋮ → **Manage accounts**, tap the Signal row and type your Signal PIN. Old
-messages never come back, and that's by Signal's design.
+Signing up here only shows chats with people from your device's contacts who
+let others find them by number on Signal. For the rest, tap ⋮ → **Manage
+accounts**, tap the Signal row and type your Signal PIN. Old messages never come
+back, and that's by Signal's design.
 
 ### WhatsApp
 
-1. Scan the QR code with the phone that runs your WhatsApp (WhatsApp →
+1. Scan the QR code with the device that runs your WhatsApp (WhatsApp →
    Settings → Linked devices → Link a device), or type your phone number with
    country code, tap **Get pairing code** and enter it in the WhatsApp
    notification.
 2. Codes refresh on their own, so whatever is on screen is always valid.
 3. Recent messages sync in seconds; opening a chat pulls older ones from your
-   phone, which has to be online.
+   other device, which has to be online.
 
 ## Building
 

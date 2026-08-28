@@ -1301,7 +1301,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     /**
      * Says what was actually searched. A WhatsApp chat is searched locally, so
-     * "no matches" only ever means "none in what is on this phone" — naming the
+     * "no matches" only ever means "none in what is on this device" — naming the
      * oldest message it reached keeps that honest, and the button fetches more.
      */
     private fun updateCoverage() {
