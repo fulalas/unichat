@@ -334,6 +334,9 @@ object Signal : EventListener {
         Bridge.runOnUi { onDone(err) }
     }
 
+    fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
+        Wmbridge.signalSendLocation(chatId, latitude, longitude).isNotEmpty()
+
     fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean {
         val (body, styles) = styled(text)
         return Wmbridge.signalSendTextQuoted(

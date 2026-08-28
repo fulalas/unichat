@@ -757,6 +757,25 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 			}
 			return
 		}
+		// Before the empty-body test: a card carries no body of its own, so it
+		// fell through and the message went missing outright — no bubble, not
+		// even a placeholder.
+		if text := sgContactText(content.GetContact()); text != "" {
+			c.listener.OnMessage(
+				chatID, msgID, senderID, text,
+				fromMe, timeSent, false, "contact", "",
+				0, 0, false, false, quotedID, quotedText, "", "", false,
+			)
+			return
+		}
+		if lat, lng, ok := sgParseMapLink(body); ok {
+			c.listener.OnMessage(
+				chatID, msgID, senderID, "",
+				fromMe, timeSent, false, "location", "",
+				lat, lng, false, false, quotedID, quotedText, "", "", false,
+			)
+			return
+		}
 		if body == "" {
 			// Reactions, receipts and timer changes all arrive as DataMessages
 			// with no body; those are handled elsewhere or not at all yet.
@@ -1655,6 +1674,116 @@ func SignalMyPhone() string {
 		return ""
 	}
 	return c.device.Number
+}
+
+// sgParseMapLink turns the map link our own Signal location sends into
+// coordinates again, so both ends show a location card instead of a raw URL.
+// Deliberately strict — the whole body must be the link, in the exact form
+// Bridge.mapLink writes — because any looser match would swallow a plain
+// message that merely mentions a map.
+func sgParseMapLink(body string) (float64, float64, bool) {
+	coords, hasPrefix := strings.CutPrefix(strings.TrimSpace(body), sgMapLinkPrefix)
+	// CutPrefix's own flag, not a comparison against the untrimmed body: that
+	// test passed for any message with surrounding whitespace and no prefix at
+	// all, so a plain "-23.5505,-46.6333\n" became a location card and the text
+	// the person actually wrote was thrown away.
+	if !hasPrefix {
+		return 0, 0, false
+	}
+	latText, lngText, found := strings.Cut(coords, ",")
+	if !found {
+		return 0, 0, false
+	}
+	lat, err := strconv.ParseFloat(latText, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	lng, err := strconv.ParseFloat(lngText, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	if lat < -90 || lat > 90 || lng < -180 || lng > 180 {
+		return 0, 0, false
+	}
+	return lat, lng, true
+}
+
+const sgMapLinkPrefix = "https://maps.google.com/?q="
+
+// sgContactText renders incoming cards as "name\nnumber…", the body shape the
+// app's contact row, its preview and the Add-contact action all read back — the
+// same one SignalSendContact writes for our own sends.
+func sgContactText(cards []*signalpb.DataMessage_Contact) string {
+	var people []string
+	for _, card := range cards {
+		var lines []string
+		if name := strings.TrimSpace(sgContactName(card)); name != "" {
+			lines = append(lines, name)
+		}
+		for _, phone := range card.GetNumber() {
+			if value := strings.TrimSpace(phone.GetValue()); value != "" {
+				lines = append(lines, value)
+			}
+		}
+		if len(lines) > 0 {
+			people = append(people, strings.Join(lines, "\n"))
+		}
+	}
+	// A blank line between people, so the app never reads the next person's name
+	// as another number of the one before. The WhatsApp side splits the same way.
+	return strings.Join(people, "\n\n")
+}
+
+func sgContactName(card *signalpb.DataMessage_Contact) string {
+	name := card.GetName()
+	if nick := name.GetNickname(); nick != "" {
+		return nick
+	}
+	parts := []string{name.GetGivenName(), name.GetMiddleName(), name.GetFamilyName()}
+	var named []string
+	for _, part := range parts {
+		if part != "" {
+			named = append(named, part)
+		}
+	}
+	if len(named) > 0 {
+		return strings.Join(named, " ")
+	}
+	if org := card.GetOrganization(); org != "" {
+		return org
+	}
+	// No name at all still has to render as something: an empty body would make
+	// the row fall back to "no body" and vanish, which is the bug this fixes.
+	if len(card.GetNumber()) > 0 {
+		return card.GetNumber()[0].GetValue()
+	}
+	return ""
+}
+
+// SignalSendLocation sends a location as the map link Signal clients can open,
+// and echoes it back as a location row. Going through SignalSendTextQuoted
+// instead left the sender looking at a raw URL while the recipient saw a card —
+// and a later forward of that row took the plain-text path.
+func SignalSendLocation(chatId string, latitude float64, longitude float64) string {
+	c, client, _ := sgActive()
+	if client == nil {
+		return ""
+	}
+	// Must match Bridge.mapLink and sgParseMapLink exactly, in both directions.
+	text := fmt.Sprintf("%s%.6f,%.6f", sgMapLinkPrefix, latitude, longitude)
+	timestamp := uint64(time.Now().UnixMilli())
+	dm := &signalpb.DataMessage{Body: proto.String(text), Timestamp: &timestamp}
+	if err := sgSend(c, client, chatId, signalmeow.WrapDataMessage(dm)); err != nil {
+		c.log(LogError, "location send failed: "+err.Error())
+		return ""
+	}
+	msgID := fmt.Sprintf("%d", timestamp)
+	c.listener.OnMessage(
+		chatId, msgID, SignalSelfID(), "", true, int64(timestamp/1000), false,
+		"location", "", latitude, longitude, false, false, "", "", "", "", false,
+	)
+	c.listener.OnChat(chatId, "", 0, false, int64(timestamp/1000))
+	return msgID
 }
 
 // SignalSendContact sends a contact card. numbers is comma-separated.

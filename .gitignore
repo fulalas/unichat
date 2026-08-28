@@ -26,3 +26,6 @@ local.properties
 telegram.properties
 tdjson/ext/
 app/src/main/jniLibs/
+
+# weekly upstream-poll stamp
+gobridge/ext/.upstream-checked

@@ -58,6 +58,22 @@ WHATSMEOW_BRANCH="main"
 SIGNALMEOW_REPO="https://github.com/mautrix/signal.git"
 SIGNALMEOW_TAG="v0.2608.0"
 
+# Upstream is polled once a week, not once a build: whatsmeow used to hit the
+# network on every run while signalmeow and TDLib sat on their pins forever, so
+# the two libraries carrying the Signal protocol drifted behind while only
+# WhatsApp stayed current. ISO year-week, so the window rolls over on a Monday
+# rather than 7 days after whenever the last build happened to be.
+UPDATE_STAMP="$DIR/gobridge/ext/.upstream-checked"
+week_due() { [ "$(cat "$UPDATE_STAMP" 2>/dev/null)" != "$(date +%G-W%V)" ]; }
+mark_checked() { mkdir -p "$(dirname "$UPDATE_STAMP")"; date +%G-W%V > "$UPDATE_STAMP"; }
+
+# Plain version tags only: signalmeow also publishes -rc and helper tags, and
+# sort -V happily ranks those above the release we want.
+latest_tag() {
+    git ls-remote --tags --refs "$1" 2>/dev/null |
+        sed 's#.*refs/tags/##' | grep -E '^v[0-9]+(\.[0-9]+)*$' | sort -V | tail -1
+}
+
 # Both ensure_* helpers fetch into "$dest.new" and swap it in only on full
 # success. Deleting the existing tree FIRST meant any failure after that point
 # (a dropped connection mid-fetch, a patch that no longer applies) left no
@@ -82,6 +98,22 @@ ensure_signalmeow() {
     local dest="$DIR/gobridge/ext/signal"
     local stamp="$dest/.sg-tag"
     local patch="$DIR/gobridge/ext/signal-local.patch"
+    local pinned="$SIGNALMEOW_TAG" have
+    have=$(cat "$stamp" 2>/dev/null)
+    # Whatever is already checked out wins over the hardcoded pin for the rest
+    # of the week: the adopted tag was only ever held in this variable, so the
+    # next build of the same week re-read the pin, saw the stamp disagree, and
+    # re-cloned the OLDER tag — an upgrade on Monday, a silent downgrade on
+    # Tuesday, every week.
+    [ -n "$have" ] && SIGNALMEOW_TAG="$have"
+    if week_due; then
+        local newest
+        newest=$(latest_tag "$SIGNALMEOW_REPO")
+        if [ -n "$newest" ] && [ "$newest" != "$SIGNALMEOW_TAG" ]; then
+            echo "== signalmeow: upstream has $newest (was $SIGNALMEOW_TAG) =="
+            SIGNALMEOW_TAG="$newest"
+        fi
+    fi
     if [ -d "$dest" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$SIGNALMEOW_TAG" ]; then
         echo "== signalmeow up to date @ $SIGNALMEOW_TAG =="
         return
@@ -101,8 +133,21 @@ ensure_signalmeow() {
     if ! git -C "$staging" apply "$patch"; then
         rm -rf "$staging"
         echo "signalmeow: signal-local.patch did not apply against $SIGNALMEOW_TAG" >&2
-        echo "   refresh gobridge/ext/signal-local.patch; the Go bridge cannot link without it" >&2
-        exit 1
+        # Only fatal for a tag someone chose. An automatic weekly bump landing on
+        # a release the patch predates would otherwise kill every build until
+        # someone refreshed it by hand — the calendar must not break the build.
+        if [ "$SIGNALMEOW_TAG" != "$pinned" ]; then
+            echo "   staying on $pinned; refresh the patch to take $SIGNALMEOW_TAG" >&2
+            SIGNALMEOW_TAG="$pinned"
+            [ "$have" = "$pinned" ] && return
+        else
+            echo "   refresh gobridge/ext/signal-local.patch; the Go bridge cannot link without it" >&2
+            exit 1
+        fi
+        staging="$dest.new"
+        rm -rf "$staging"
+        git clone -q --depth 1 --branch "$SIGNALMEOW_TAG" "$SIGNALMEOW_REPO" "$staging" || exit 1
+        git -C "$staging" apply "$patch" || { echo "signalmeow: $pinned no longer patches" >&2; exit 1; }
     fi
     swap_in_checkout "$staging" "$dest"
     # Re-assert the replace before tidying. Without it tidy happily resolves
@@ -126,6 +171,10 @@ ensure_whatsmeow() {
     local stamp="$dest/.wm-commit"
     local patch="$DIR/gobridge/ext/whatsmeow-local.patch"
     local lsout latest
+    if [ -d "$dest" ] && ! week_due; then
+        echo "== whatsmeow up to date @ $(cut -c1-12 "$stamp" 2>/dev/null) =="
+        return
+    fi
     # Separate ls-remote's exit status from its output: a non-zero exit means the
     # remote is unreachable (offline); a zero exit with empty output means the
     # branch doesn't exist — a hard error, never a reason to build something stale.
@@ -272,7 +321,17 @@ done
 if [ ${#TD_MISSING[@]} -gt 0 ]; then
     echo "== TDLib libs missing for ${TD_MISSING[*]}; running build-tdlib.sh =="
     "$DIR/build-tdlib.sh" "${TD_MISSING[@]}"
+elif [ "$APK_ONLY" != 1 ] && week_due; then
+    # Reported, not taken: moving the TDLib pin recompiles it from source, which
+    # is an hour this build has no business spending without being asked.
+    TD_PINNED=$(sed -n 's/^TD_COMMIT=\(.*\)/\1/p' "$DIR/build-tdlib.sh" | head -1)
+    TD_LATEST=$(git ls-remote https://github.com/tdlib/td.git refs/heads/master 2>/dev/null | cut -f1)
+    if [ -n "$TD_LATEST" ] && [ "$TD_LATEST" != "$TD_PINNED" ]; then
+        echo "== TDLib: upstream master is ${TD_LATEST:0:12}, pinned ${TD_PINNED:0:12} =="
+        echo "   to take it: set TD_COMMIT in build-tdlib.sh, then ./build-tdlib.sh"
+    fi
 fi
+[ "$APK_ONLY" != 1 ] && mark_checked
 
 echo "== Building release APK =="
 cd "$DIR"

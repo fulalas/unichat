@@ -268,8 +268,8 @@ object Bridge : EventListener {
     }
 
     /**
-     * Signal. Text, attachments, reactions, edits, deletes, quotes, receipts
-     * and typing are wired; location, contact cards, avatars and history are
+     * Signal. Text, attachments, reactions, edits, deletes, quotes, receipts,
+     * typing, contact cards and location are wired; avatars and history are
      * not, and those members are deliberate no-ops rather than crashes so a
      * chat degrades instead of failing.
      */
@@ -296,7 +296,12 @@ object Bridge : EventListener {
         override fun sendDocument(
             chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
         ): Boolean = Signal.sendAttachment(chatId, path, "", mime.ifEmpty { "application/octet-stream" })
-        override fun sendLocation(chatId: String, latitude: Double, longitude: Double) = false
+        // Signal carries no location message, so it goes as the map link the
+        // Signal app itself falls back to, in the one form signal.go parses
+        // back into coordinates.
+        override fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
+            Signal.sendLocation(chatId, latitude, longitude)
+
         override fun sendContact(chatId: String, name: String, numbers: List<String>) =
             Signal.sendContact(chatId, name, numbers)
 

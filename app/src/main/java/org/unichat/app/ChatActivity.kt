@@ -2671,7 +2671,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val intent = Intent(Intent.ACTION_SEND)
         if (msg.msgType == "location") {
             val coords = msg.coordinates()
-            val link = "https://maps.google.com/?q=$coords"
+            val link = MAP_LINK_PREFIX + coords
             intent.type = "text/plain"
             intent.putExtra(
                 Intent.EXTRA_TEXT,

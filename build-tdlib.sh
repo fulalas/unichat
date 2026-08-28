@@ -32,12 +32,37 @@ done
 
 EXT="$DIR/tdjson/ext"
 TD_SRC="$DIR/tdjson/td"
-# TDLib is a submodule, not vendored: a fresh clone has an empty directory here
-# until it is checked out.
+# Must match the tdjson/td gitlink in git: a source tree downloaded as a zip has
+# no gitlink to read it from, so the commit is spelled out here as well. Update
+# both together or a zip build compiles a different TDLib than a git one.
+TD_COMMIT=d1085f9cebc5a62379991ae1652673954f229c1f
+TD_URL=https://github.com/tdlib/td.git
+
+# TDLib is a submodule, not vendored, so it is fetched on demand. GitHub's zip
+# of this repo carries neither .git nor the submodule contents, and telling
+# those users to run `git submodule update` left them with no way to build at
+# all; clone the pinned commit directly instead.
 if [ ! -f "$TD_SRC/CMakeLists.txt" ]; then
-    echo "TDLib sources missing at tdjson/td." >&2
-    echo "Run: git submodule update --init --recursive" >&2
-    exit 1
+    echo "== Fetching TDLib @ $TD_COMMIT =="
+    command -v git >/dev/null || { echo "TDLib: git is required to fetch it" >&2; exit 1; }
+    if [ -e "$DIR/.git" ] && [ -f "$DIR/.gitmodules" ]; then
+        git -C "$DIR" submodule update --init --recursive tdjson/td
+    else
+        rm -rf "$TD_SRC"
+        mkdir -p "$TD_SRC"
+        git -C "$TD_SRC" init -q
+        git -C "$TD_SRC" remote add origin "$TD_URL"
+        # by SHA, shallow, so this costs one commit rather than TDLib's history;
+        # servers that refuse a SHA fetch fall back to a full clone
+        if git -C "$TD_SRC" fetch -q --depth 1 origin "$TD_COMMIT" 2>/dev/null; then
+            git -C "$TD_SRC" checkout -q FETCH_HEAD
+        else
+            rm -rf "$TD_SRC"
+            git clone -q "$TD_URL" "$TD_SRC"
+            git -C "$TD_SRC" checkout -q "$TD_COMMIT"
+        fi
+    fi
+    [ -f "$TD_SRC/CMakeLists.txt" ] || { echo "TDLib: fetch failed" >&2; exit 1; }
 fi
 mkdir -p "$EXT"
 
@@ -101,11 +126,19 @@ build_openssl() {
     rm -rf "openssl-build-$abi"
 }
 
-if [ ! -f "$EXT/build-host/.prepared" ]; then
-    echo "== TDLib host stage (prepare_cross_compiling) =="
+# Stamped with the TDLib commit, not just touched: this stage GENERATES
+# td_api.h/telegram_api.h from the .tl scheme, so keeping it across a source
+# update left the new C++ compiling against the old generated API and the build
+# died on "no member named ... in namespace td::td_api". The per-ABI tree goes
+# too, since its objects were compiled against those same headers.
+TD_HAVE=$(git -C "$TD_SRC" rev-parse HEAD 2>/dev/null || echo "$TD_COMMIT")
+if [ "$(cat "$EXT/build-host/.prepared" 2>/dev/null)" != "$TD_HAVE" ]; then
+    echo "== TDLib host stage (prepare_cross_compiling) @ ${TD_HAVE:0:12} =="
+    rm -rf "$EXT/build-host"
+    for abi in "${ABIS[@]}"; do rm -rf "$EXT/build-$abi"; done
     cmake -S "$TD_SRC" -B "$EXT/build-host" -DCMAKE_BUILD_TYPE=Release >/dev/null
     cmake --build "$EXT/build-host" --target prepare_cross_compiling -j "$JOBS"
-    touch "$EXT/build-host/.prepared"
+    echo "$TD_HAVE" > "$EXT/build-host/.prepared"
 fi
 
 STRIP="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"

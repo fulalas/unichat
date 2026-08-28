@@ -27,7 +27,7 @@ Do this before building; `build.sh` names the output APK after `versionName`, so
 
 ## Building
 
-- Once a day update whatsmeow lib from upstream
+- Once a week update whatsmeow lib from upstream
 - Full build (Go bridge + APK): `bash -c 'source ../toolchain/env.sh && ./build.sh'`
 - APK only (no Go changes): `bash -c 'source ../toolchain/env.sh && ./build.sh --apk-only'`
 - Install: `source ../toolchain/env.sh && adb install -r unichat-<version>.apk`

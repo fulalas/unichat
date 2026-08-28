@@ -46,6 +46,11 @@ data class MessageRow(
 fun MessageRow.coordinates(): String =
     if (msgType == "location") "%.6f,%.6f".format(java.util.Locale.US, latitude, longitude) else ""
 
+fun mapLink(latitude: Double, longitude: Double): String =
+    MAP_LINK_PREFIX + "%.6f,%.6f".format(java.util.Locale.US, latitude, longitude)
+
+const val MAP_LINK_PREFIX = "https://maps.google.com/?q="
+
 data class SenderInfo(val senderId: String, val fromMe: Boolean, val senderName: String)
 
 /** What a reply shows of the message it answers, read from our own copy of it. */
