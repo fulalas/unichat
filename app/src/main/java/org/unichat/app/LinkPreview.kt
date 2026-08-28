@@ -35,18 +35,7 @@ object LinkPreview {
     private const val MAX_DESCRIPTION = 320
     const val IMAGE_DIR = "linkprev"
 
-    /**
-     * Sites gate their Open Graph tags on the crawler token every link-preview
-     * client sends, and answer anything else with an app shell or a bot check:
-     * IMDb replied 202 with an empty body to both a plain browser agent and an
-     * agent naming only this app, so its links never got a card. This app's own
-     * name rides along after the token, which sites match as a substring.
-     *
-     * It is also what makes previews cheap: YouTube serves a crawler its tags in
-     * the first 3 KB, against ~690 KB of script for anyone else.
-     */
-    private const val USER_AGENT =
-        "facebookexternalhit/1.1 UniChat/1.0 (+https://github.com/fulalas/unichat)"
+    private const val USER_AGENT = "TelegramBot (like TwitterBot)"
 
     class Row(
         val url: String,
