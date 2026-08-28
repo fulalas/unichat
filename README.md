@@ -87,8 +87,9 @@ The Signal tab opens **Set up Signal**. Either:
   this phone**, then in Signal open **Settings → Linked devices**, tap **+** and
   scan the code UniChat shows.
 
-Your contact list stays locked behind your Signal PIN. To pull it in: ⋮ →
-**Manage accounts**, tap the Signal row, type the PIN.
+Signing up here only shows chats with people saved in your phone. For the rest,
+tap ⋮ → **Manage accounts**, tap the Signal row and type your Signal PIN. Old
+messages never come back, and that's by Signal's design.
 
 ### WhatsApp
 
