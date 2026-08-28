@@ -66,7 +66,7 @@ How each one signs in:
 
 - No voice or video calls; a call you get shows as a line in the chat
 - No creating groups, and no group admin
-- No stickers or pre-selection of GIFs
+- No stickers or GIFs repository — they can be received and viewed though
 - No internal video player — when tapping a video, the external player
   installed on the device will open the video
 - Polls, events, group invites and live location show as labels — you can't
