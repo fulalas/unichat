@@ -131,3 +131,9 @@ Android), then:
 ```sh
 cp telegram.properties.template telegram.properties   # then fill it in
 ```
+
+## Donate
+
+Please consider donating to the UniChat project:
+
+[https://paypal.me/fulalas](https://paypal.me/fulalas)
