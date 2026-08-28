@@ -12,6 +12,13 @@ for arg in "$@"; do
     esac
 done
 
+if [ ! -f "$DIR/telegram.properties" ]; then
+    echo "telegram.properties not found." >&2
+    echo "  cp telegram.properties.template telegram.properties" >&2
+    echo "  then fill in your own api_id and api_hash from https://my.telegram.org" >&2
+    exit 1
+fi
+
 adb_bin() {
     local sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
     local adb="${sdk:+$sdk/platform-tools/adb}"

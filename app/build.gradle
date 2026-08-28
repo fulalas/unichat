@@ -16,8 +16,11 @@ if (tgFile.exists()) {
 }
 def tgApiId = tgProps.getProperty('api_id', '').trim()
 def tgApiHash = tgProps.getProperty('api_hash', '').trim()
-if (!tgApiId || !tgApiHash) {
-    throw new GradleException("telegram.properties: api_id and api_hash must both be set")
+if (!(tgApiId ==~ /^[0-9]+$/)) {
+    throw new GradleException("telegram.properties: api_id must be digits only, got '${tgApiId}'")
+}
+if (!(tgApiHash ==~ /^[0-9a-fA-F]{32}$/)) {
+    throw new GradleException("telegram.properties: api_hash must be 32 hex characters")
 }
 
 android {
@@ -35,8 +38,8 @@ android {
         applicationId "org.unichat.app"
         minSdk 29
         targetSdk 35
-        versionCode 185
-        versionName "0.45.2"
+        versionCode 186
+        versionName "0.45.3"
         ndk {
             // arm64 only: the three-ABI APK carried ~50 MB of native libraries no
             // real device could ever load. Must stay in step with build.sh's

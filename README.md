@@ -107,8 +107,8 @@ for arm64. That happens only once — the results are cached in `tdjson/ext/` an
 `app/src/main/jniLibs/`. Both steps can also be run on their own:
 
 ```sh
-./build-tdlib.sh                          # arm64-v8a armeabi-v7a x86_64
-./build-tdlib.sh arm64-v8a                # just one (the APK then needs the rest)
+./build-tdlib.sh                          # arm64-v8a, the only one the APK ships
+./build-tdlib.sh armeabi-v7a x86_64       # other ABIs, if you change abiFilters
 ./build-libsignal.sh
 ```
 
