@@ -12,6 +12,17 @@ How each one signs in:
 - **WhatsApp** — **companion device** (the official WhatsApp app must be
   installed on the device) via [whatsmeow](https://github.com/tulir/whatsmeow)
 
+<table border="0" cellpadding="0" cellspacing="0" style="border-collapse: collapse;">
+    <tr>
+      <td><img src="https://github.com/user-attachments/assets/6c02dc0d-cb4e-41d9-8ab7-441ac9531c45"></td>
+      <td><img src="https://github.com/user-attachments/assets/99c8303a-eb3c-4e4c-90d3-ad018c79fc48"></td>
+    </tr>
+    <tr>
+      <td><img src="https://github.com/user-attachments/assets/b7d65b0e-85e7-4e0b-b8f1-7b66fafc00b3"></td>
+      <td><img src="https://github.com/user-attachments/assets/3e4030cc-fd7a-4949-880d-4d6917061bc5"></td>
+    </tr>
+  </table>
+
 ## Features
 
 - Every account in one chat list, with avatars, snippets, timestamps and
