@@ -74,9 +74,8 @@ How each one signs in:
 - Telegram: no secret chats
 - Signal: no avatars, and a location goes as a map link, since Signal has no
   location message of its own
-- WhatsApp: needs the official app on your other device, and it has to be
-  online the
-  first time you load old messages
+- WhatsApp: needs the official app on the device, and it has to be
+  online to load old messages
 
 ## Logging in
 
