@@ -16,8 +16,9 @@ How each one signs in:
 
 - Every account in one chat list, with avatars, snippets, timestamps and
   unread badges
-- Text, photos, videos, voice messages (play and record), documents, stickers,
-  locations and contact cards; **bold** and *italic* when you select text
+- Text, photos, videos, voice messages (play and record), documents, stickers
+  (view only), locations and contact cards; **bold** and *italic* for text
+- Voice messages play in sequence even when the screen is off
 - Search chats from the list; search messages inside a chat, going further back
   on demand
 - Link previews with title, description and picture
@@ -43,10 +44,7 @@ How each one signs in:
 - Presence on both screens: the chat list puts a green dot on the avatar of
   whoever is online and swaps the snippet for "typing… / recording voice…" as
   it happens; the chat itself adds last seen
-- History: Telegram loads the newest messages when you open a chat; WhatsApp
-  syncs the last 20 per chat at link time and pulls older ones from your other
-  device;
-  Signal starts empty and fills up as messages arrive
+- Share contact's avatar
 - Light and dark themes, or follow the device; the dark one is true black for
   OLED. Font size is yours to set too
 - Local SQLite history shared by the three services, and a foreground service
@@ -57,6 +55,9 @@ How each one signs in:
 
 - No voice or video calls; a call you get shows as a line in the chat
 - No creating groups, and no group admin
+- No stickers or pre-selection of GIFs
+- No internal video player — when tapping a video, the external player
+  installed on the device will open the video
 - Polls, events, group invites and live location show as labels — you can't
   create or answer them
 - Telegram: no secret chats
