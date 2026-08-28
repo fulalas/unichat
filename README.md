@@ -7,10 +7,10 @@ and the same screens, with a different accent color for each.
 
 How each one signs in:
 
-- **Telegram** — standalone app — uses [TDLib](https://github.com/tdlib/td)
-- **Signal** — standalone app or linked as a second device — uses [signalmeow](https://github.com/mautrix/signal)
-- **WhatsApp** — **companion device** (like WhatsApp Web), so the official
-  WhatsApp app must be installed on your other device — uses [whatsmeow](https://github.com/tulir/whatsmeow)
+- **Telegram** — standalone via [TDLib](https://github.com/tdlib/td)
+- **Signal** — standalone or linked as a second device via [signalmeow](https://github.com/mautrix/signal)
+- **WhatsApp** — **companion device** (the official WhatsApp app must be
+  installed on the device) via [whatsmeow](https://github.com/tulir/whatsmeow)
 
 ## Features
 
