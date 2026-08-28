@@ -882,7 +882,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onDownloadProgress(chatId: String, msgId: String, pct: Int) {
         if (chatId != this.chatId) return
-        adapter.setVideoProgress(messageList, msgId, pct)
+        adapter.setDownloadProgress(messageList, msgId, pct)
     }
 
     override fun onChatMerged(fromId: String, toId: String) {
@@ -2388,6 +2388,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun downloadWithToast(msg: MessageRow) {
+        // A tap on a transfer that is already running must not read as a second
+        // download: nothing is re-issued (Bridge holds the in-flight claim), so
+        // repeating the toast was the only thing that happened, and it looked
+        // exactly like a fresh start.
+        val running = if (windowMode) msg.id in windowFetching
+        else Bridge.isDownloading(msg.chatId, msg.id)
         // a search window's rows have no DB row for the transfer to report on
         if (windowMode) {
             pendingWindowOpen = msg.id
@@ -2395,7 +2401,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         } else {
             Bridge.downloadFile(msg, userInitiated = true)
         }
-        Toast.makeText(this, R.string.downloading, Toast.LENGTH_SHORT).show()
+        // the row shows the spinner from here on; without this it changed
+        // nothing until the file landed
+        adapter.refreshDownloadState(messageList, msg.id)
+        if (!running) Toast.makeText(this, R.string.downloading, Toast.LENGTH_SHORT).show()
     }
 
     /**
@@ -2447,11 +2456,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun saveToDownloads(msg: MessageRow) {
-        if (isStillSending(msg)) {
+        if (Bridge.isSendInFlight(msg)) {
             Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
             return
         }
-        if (msg.filePath.isEmpty()) {
+        if (!Bridge.fileOnDisk(msg)) {
             downloadWithToast(msg)
             return
         }
@@ -2673,11 +2682,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         // a contact card's body is text, not a file on disk
         if (msg.msgType != "" && msg.msgType != "contact") {
-            if (isStillSending(msg)) {
+            if (Bridge.isSendInFlight(msg)) {
                 Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
                 return
             }
-            if (msg.filePath.isEmpty()) {
+            if (!Bridge.fileOnDisk(msg)) {
                 downloadWithToast(msg)
                 return
             }
@@ -2716,12 +2725,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             }
         }
     }
-
-    // A just-sent media message renders from its cacheDir staging file until
-    // the upload finishes; that file is deleted right after, so re-sends must
-    // wait for the permanent media copy to take its place.
-    private fun isStillSending(msg: MessageRow): Boolean =
-        msg.fromMe && Bridge.isStagingPath(msg.filePath)
 
     private var actionMode: androidx.appcompat.view.ActionMode? = null
 
@@ -2798,8 +2801,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         for (msg in msgs) {
             if (msg.msgType in LABEL_ONLY_TYPES && msg.text.isBlank()) continue
             val isFileMedia = msg.msgType in FILE_MEDIA_TYPES
-            if (isFileMedia && isStillSending(msg)) { stillSending = true; continue }
-            if (isFileMedia && msg.filePath.isEmpty()) {
+            if (isFileMedia && Bridge.isSendInFlight(msg)) { stillSending = true; continue }
+            // A stored path outlives its file (a swept staging copy of our own
+            // send): the forward reported "forwarded" and then failed to upload.
+            if (isFileMedia && !Bridge.fileOnDisk(msg)) {
                 Bridge.downloadFile(msg, userInitiated = true)
                 downloading = true
                 continue

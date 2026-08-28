@@ -215,15 +215,27 @@ class MessageAdapter(
         // by message, not by path: one Telegram file can back several rows, and
         // matching on the path lit up every copy as "playing"
         val current = AudioPlayer.currentMsgId == msg.id && AudioPlayer.currentChatId == msg.chatId
+        val downloading = isDownloading(msg)
+        holder.audioButton.visibility = if (downloading) View.GONE else View.VISIBLE
+        holder.audioSpinner.visibility = if (downloading) View.VISIBLE else View.GONE
         // setImageResource reloads the drawable even for an unchanged id, and this
         // runs 4x/second per visible row for the whole clip
-        val icon = if (current && AudioPlayer.isPlaying) R.drawable.ic_pause else R.drawable.ic_play
+        val icon = when {
+            msg.filePath.isEmpty() -> R.drawable.ic_download
+            current && AudioPlayer.isPlaying -> R.drawable.ic_pause
+            else -> R.drawable.ic_play
+        }
         if (holder.audioIconRes != icon) {
             holder.audioIconRes = icon
             holder.audioButton.setImageResource(icon)
-            holder.audioButton.contentDescription = holder.audioButton.context.getString(
-                if (icon == R.drawable.ic_pause) R.string.pause else R.string.play
-            )
+            holder.audioButtonFrame.contentDescription =
+                holder.audioButton.context.getString(
+                    when (icon) {
+                        R.drawable.ic_download -> R.string.download
+                        R.drawable.ic_pause -> R.string.pause
+                        else -> R.string.play
+                    }
+                )
         }
         val speedLabel = speedLabel(AudioPlayer.speed)
         if (holder.audioSpeed.text != speedLabel) holder.audioSpeed.text = speedLabel
@@ -238,22 +250,61 @@ class MessageAdapter(
 
     private var quoteNames: Map<String, QuotedPreview> = emptyMap()
 
-    private val videoDownloadPct = HashMap<String, Int>()
+    private val downloadPct = HashMap<String, Int>()
 
-    fun setVideoProgress(recycler: RecyclerView, msgId: String, pct: Int) {
-        videoDownloadPct[msgId] = pct
+    fun setDownloadProgress(recycler: RecyclerView, msgId: String, pct: Int) {
+        downloadPct[msgId] = pct
+        refreshDownloadState(recycler, msgId)
+    }
+
+    // A tap that starts a transfer changes nothing the list rebinds on — the
+    // status write happens later, on the transport's own worker — so the row
+    // must be told directly. Without this, only video showed anything, and that
+    // only because progress callbacks kept arriving; every other type sat
+    // unchanged until the file landed, so a second tap looked like the only way
+    // to make it move.
+    fun refreshDownloadState(recycler: RecyclerView, msgId: String) {
         for (i in 0 until recycler.childCount) {
             val holder = recycler.getChildViewHolder(recycler.getChildAt(i)) as? Holder ?: continue
             val msg = holder.current ?: continue
-            if (msg.id != msgId || msg.msgType != "video" || msg.filePath.isNotEmpty()) continue
-            applyVideoState(holder, msg)
+            if (msg.id != msgId || msg.filePath.isNotEmpty()) continue
+            when (msg.msgType) {
+                "video" -> applyVideoState(holder, msg)
+                "audio" -> applyAudioState(holder, msg)
+                "document" -> applyDocumentState(holder, msg)
+                in PICTURE_TYPES -> applyImageState(holder, msg)
+            }
         }
+    }
+
+    // Both signals, because neither covers the other: Bridge's claim is taken on
+    // the tap, while file_status is written later on the transport's own worker
+    // (so a status-only test showed nothing for the first moments after a tap),
+    // and a search-window row carries a status with no claim behind it at all.
+    private fun isDownloading(msg: MessageRow): Boolean {
+        val live = msg.filePath.isEmpty() &&
+            (Bridge.isDownloading(msg.chatId, msg.id) || msg.fileStatus == 1)
+        // A percentage is only ever a label for a live transfer, never proof of
+        // one: a download that reached 40% and then failed kept its entry, so
+        // the row spun for good and a document read "Downloading 40%" where it
+        // should have read "Download failed".
+        if (!live) downloadPct.remove(msg.id)
+        return live
+    }
+
+    private fun applyImageState(holder: Holder, msg: MessageRow) {
+        holder.imageSpinner.visibility = if (isDownloading(msg)) View.VISIBLE else View.GONE
+    }
+
+    private fun applyDocumentState(holder: Holder, msg: MessageRow) {
+        val ctx = holder.text.context
+        holder.text.text = highlighted(ctx, "📎 " + msg.text + downloadSuffix(ctx, msg))
     }
 
     private fun applyVideoState(holder: Holder, msg: MessageRow) {
         val downloaded = msg.filePath.isNotEmpty()
-        val pct = videoDownloadPct[msg.id]
-        val downloading = !downloaded && (msg.fileStatus == 1 || pct != null)
+        val pct = downloadPct[msg.id]
+        val downloading = isDownloading(msg)
         holder.videoIcon.visibility = if (downloading) View.GONE else View.VISIBLE
         holder.videoIcon.setImageResource(if (downloaded) R.drawable.ic_play else R.drawable.ic_download)
         holder.videoButton.contentDescription = holder.videoButton.context.getString(
@@ -264,7 +315,6 @@ class MessageAdapter(
         holder.videoSpinner.visibility =
             if (downloading && pct == null) View.VISIBLE else View.GONE
         if (pct != null) holder.videoProgress.progress = pct
-        if (downloaded) videoDownloadPct.remove(msg.id)
     }
 
     /**
@@ -281,9 +331,12 @@ class MessageAdapter(
         // and the bubble stayed blank for good. A vanished file is not a
         // download — Bridge drops the dead reference and fetches it again.
         val gone = msg.filePath.isNotEmpty() && !File(msg.filePath).exists()
-        if (gone || (msg.filePath.isEmpty() && (msg.fileStatus == 0 || msg.fileStatus == 3))) {
-            onNeedDownload(msg, false)
-        }
+        // Status 1 included: it survives a process death mid-transfer, and
+        // skipping it left a row showing a spinner for a download that had
+        // stopped existing, which nothing would ever restart. Bridge's in-flight
+        // claim keeps this from disturbing a transfer that IS running.
+        val pending = msg.fileStatus == 0 || msg.fileStatus == 1 || msg.fileStatus == 3
+        if (gone || (msg.filePath.isEmpty() && pending)) onNeedDownload(msg, false)
     }
 
     private fun fmtSecs(ms: Int): String = TimeFormat.mmss(ms / 1000)
@@ -302,11 +355,14 @@ class MessageAdapter(
         val imageFrame: FrameLayout = view.findViewById(R.id.imageFrame)
         val image: ImageView = view.findViewById(R.id.messageImage)
         val imageTime: TextView = view.findViewById(R.id.imageTime)
+        val imageSpinner: android.widget.ProgressBar = view.findViewById(R.id.imageSpinner)
         val forwardedLabel: TextView = view.findViewById(R.id.forwardedLabel)
         val quotePreview: TextView = view.findViewById(R.id.quotePreview)
         val audioRow: LinearLayout = view.findViewById(R.id.audioRow)
         val audioMeta: LinearLayout = view.findViewById(R.id.audioMeta)
+        val audioButtonFrame: View = view.findViewById(R.id.audioButtonFrame)
         val audioButton: ImageView = view.findViewById(R.id.audioButton)
+        val audioSpinner: android.widget.ProgressBar = view.findViewById(R.id.audioSpinner)
         val audioSeek: SeekBar = view.findViewById(R.id.audioSeek)
         val audioDuration: TextView = view.findViewById(R.id.audioDuration)
         val audioUnplayedDot: View = view.findViewById(R.id.audioUnplayedDot)
@@ -468,8 +524,15 @@ class MessageAdapter(
             if (tapWhileSelecting()) return@setOnClickListener
             val m = holder.current ?: return@setOnClickListener
             // a path whose file is gone opens an empty viewer: fetch instead
-            if (m.filePath.isNotEmpty() && File(m.filePath).exists()) onImageClick(m)
-            else onNeedDownload(m, true)
+            if (m.filePath.isNotEmpty() && File(m.filePath).exists()) {
+                onImageClick(m)
+            } else {
+                onNeedDownload(m, true)
+                // the tap's own row, repainted here: these two handlers do not
+                // go through ChatActivity's download-with-toast path, so nothing
+                // else showed the spinner until a progress callback landed
+                applyImageState(holder, m)
+            }
         }
         holder.quotePreview.setOnClickListener {
             if (tapWhileSelecting()) return@setOnClickListener
@@ -507,7 +570,9 @@ class MessageAdapter(
             holder.current?.let(onVideoOpen)
         }
         holder.videoRow.setOnLongClickListener(longPress)
-        holder.audioButton.setOnClickListener {
+        // on the frame, not the icon: the icon is hidden while the spinner runs,
+        // and a gone view takes no taps
+        holder.audioButtonFrame.setOnClickListener {
             if (tapWhileSelecting()) return@setOnClickListener
             val m = holder.current ?: return@setOnClickListener
             // the stored path can be stale (a swept Telegram staging copy);
@@ -516,8 +581,10 @@ class MessageAdapter(
                 AudioPlayer.playPause(m.filePath, m.chatId, m.id)
             } else {
                 onNeedDownload(m, true)
+                applyAudioState(holder, m)
             }
         }
+        holder.audioButtonFrame.setOnLongClickListener(longPress)
         holder.reactionPill.setOnClickListener {
             if (tapWhileSelecting()) return@setOnClickListener
             holder.current?.let(onReactionsClick)
@@ -607,7 +674,10 @@ class MessageAdapter(
 
     private fun downloadSuffix(ctx: android.content.Context, msg: MessageRow): String = when {
         msg.filePath.isNotEmpty() -> ""
-        msg.fileStatus == 1 -> " — " + ctx.getString(R.string.downloading)
+        isDownloading(msg) -> {
+            val pct = downloadPct[msg.id]
+            " — " + ctx.getString(R.string.downloading) + if (pct == null) "" else " $pct%"
+        }
         msg.fileStatus == 3 -> " — " + ctx.getString(R.string.download_failed)
         else -> ""
     }
@@ -825,6 +895,7 @@ class MessageAdapter(
                 if (bareSticker) holder.bubble.background = null
                 ImageLoader.load(msg, holder.image)
                 maybeAutoDownload(msg)
+                applyImageState(holder, msg)
                 if (msg.text.isEmpty()) holder.text.visibility = View.GONE
                 else holder.text.text = highlighted(ctx, msg.text)
             }
@@ -834,13 +905,13 @@ class MessageAdapter(
                 holder.text.visibility = View.GONE
                 holder.audioUnplayedDot.visibility = if (msg.played) View.GONE else View.VISIBLE
                 holder.audioRow.minimumWidth = holder.text.maxWidth
-                applyAudioState(holder, msg)
                 holder.audioSeek.isEnabled = msg.filePath.isNotEmpty()
+                // before the state pass, so a download it starts is already
+                // claimed by the time the spinner is decided
                 maybeAutoDownload(msg)
+                applyAudioState(holder, msg)
             }
-            "document" -> {
-                holder.text.text = highlighted(ctx, "📎 " + msg.text + downloadSuffix(ctx, msg))
-            }
+            "document" -> applyDocumentState(holder, msg)
             "video" -> {
                 holder.text.visibility = View.GONE
                 holder.videoRow.visibility = View.VISIBLE

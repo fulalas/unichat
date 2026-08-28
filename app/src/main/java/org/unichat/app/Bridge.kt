@@ -924,6 +924,19 @@ object Bridge : EventListener {
         return filePath.startsWith(cacheDir.path + "/")
     }
 
+    // Only a protocol that consumes the staging copy: WhatsApp deletes it the
+    // moment the upload returns and swaps the row to the permanent media file,
+    // so a staging path there means in-flight. Telegram and Signal never swap —
+    // their rows keep pointing at the staging file for its whole life, and
+    // reading "staging path" as "in-flight" there made every video, photo and
+    // document the user had sent permanently unforwardable, unshareable and
+    // unsaveable.
+    fun isSendInFlight(msg: MessageRow): Boolean =
+        msg.fromMe && proto(msg.chatId).consumesStagingInput && isStagingPath(msg.filePath)
+
+    fun fileOnDisk(msg: MessageRow): Boolean =
+        msg.filePath.isNotEmpty() && java.io.File(msg.filePath).exists()
+
     private fun cleanStaleCache(ctx: Context) {
         val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
         ctx.cacheDir.listFiles()?.forEach { f ->
@@ -1046,6 +1059,13 @@ object Bridge : EventListener {
     // whole backing array.
     private val autoRetriedFailures: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private const val MAX_RETRY_MEMO = 4096
+
+    // The stored file_status is no substitute: 1 survives a process death
+    // mid-transfer, and it is written by the transport's own worker, so it is
+    // still 0 for the first moments after a tap — long enough for the bubble to
+    // show nothing and for the user to tap again.
+    fun isDownloading(chatId: String, msgId: String): Boolean =
+        downloading.contains("$chatId/$msgId")
 
     fun downloadFile(msg: MessageRow, userInitiated: Boolean = false): Boolean {
         // A stored path outlives its file (our own Telegram sends reference the
