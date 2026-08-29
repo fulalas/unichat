@@ -102,7 +102,16 @@ fun Context.copyToDownloads(file: File, name: String): String? {
 
 private const val FILE_PROVIDER_AUTHORITY = "org.unichat.app.fileprovider"
 
-fun Context.providedFile(file: File, fallbackMime: String): Pair<Uri, String> {
-    val uri = FileProvider.getUriForFile(this, FILE_PROVIDER_AUTHORITY, file)
+/** Null for a file outside the roots declared in res/xml/file_paths.xml.
+ *  getUriForFile throws IllegalArgumentException for those, and every caller is
+ *  a tap: a media directory missing from that file took the whole app down
+ *  instead of the one action. */
+fun Context.providedFile(file: File, fallbackMime: String): Pair<Uri, String>? {
+    val uri = try {
+        FileProvider.getUriForFile(this, FILE_PROVIDER_AUTHORITY, file)
+    } catch (e: IllegalArgumentException) {
+        android.util.Log.w("Files", "no FileProvider root for ${file.path}", e)
+        return null
+    }
     return uri to mimeOfPath(file.path, fallbackMime)
 }

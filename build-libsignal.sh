@@ -6,7 +6,13 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 [ -f "$DIR/../toolchain/env.sh" ] && source "$DIR/../toolchain/env.sh"
 
-API=29   # must match minSdk in app/build.gradle
+# Read from app/build.gradle, never written down twice: a native library built
+# against a newer API than minSdk installs fine and then dies at Bridge.init,
+# and a second copy of the number only stays right until someone bumps one of
+# them. build.sh reads it the same way for the gomobile bind.
+API=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*\([0-9]*\).*/\1/p' \
+    "$DIR/app/build.gradle" | head -1)
+: "${API:?could not read minSdk from app/build.gradle}"
 ABI=arm64-v8a
 RUST_TARGET=aarch64-linux-android
 
@@ -89,7 +95,10 @@ export CXXFLAGS_aarch64_linux_android="$CFLAGS_TARGET -fvisibility-inlines-hidde
 # Key the cache on the flags too, not just the version: editing RUSTFLAGS above
 # and getting the previous archive back is a silent no-op that reads as "the
 # flags did nothing".
-KEY="$VERSION $RUST_TARGET $(printf '%s|%s|%s' "$RUSTFLAGS" "$CFLAGS_TARGET" \
+# API is in the key too: it is baked into the target triple every compiler
+# invocation above uses, so leaving it out meant raising minSdk handed back the
+# archive built against the old one and printed "up to date".
+KEY="$VERSION $RUST_TARGET $API $(printf '%s|%s|%s' "$RUSTFLAGS" "$CFLAGS_TARGET" \
     "$CARGO_PROFILE_RELEASE_LTO/$CARGO_PROFILE_RELEASE_CODEGEN_UNITS/$CARGO_PROFILE_RELEASE_OPT_LEVEL/$CARGO_PROFILE_RELEASE_STRIP" \
     | md5sum | cut -c1-12)"
 if [ -f "$ARCHIVE" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$KEY" ]; then

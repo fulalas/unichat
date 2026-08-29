@@ -4,5 +4,10 @@
     <!-- TDLib's files_directory (Tg.init); Telegram media is stored here and
          is handed to other apps through providedFile() exactly like wm/ media -->
     <files-path name="tg" path="tg/" />
+    <!-- signalmeow's store directory (Signal.init); received attachments land in
+         signal/media and are handed to other apps through providedFile() the
+         same way. Missing here, opening or sharing one threw
+         IllegalArgumentException out of getUriForFile. -->
+    <files-path name="signal" path="signal/" />
     <cache-path name="cache" path="." />
 </paths>

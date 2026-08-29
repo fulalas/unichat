@@ -22,7 +22,9 @@ class ProfileActivity : BaseActivity() {
     private lateinit var valuePhone: TextView
 
     private val io = Io.executor
-    private lateinit var selfId: String
+    // Empty until loadIdentity answers: resolving it is a blocking bridge call,
+    // so it cannot be read on the main thread during onCreate.
+    private var selfId: String = ""
     private var proto: String = ProtoPicker.WA
     private val account get() = Accounts.of(proto)
     private var name: String = ""
@@ -44,7 +46,6 @@ class ProfileActivity : BaseActivity() {
             setDisplayHomeAsUpEnabled(true)
         }
         if (!Bridge.init(this)) { finish(); return }
-        selfId = account.selfId()
 
         avatar = findViewById(R.id.avatar)
         valueName = findViewById(R.id.valueName)
@@ -72,15 +73,36 @@ class ProfileActivity : BaseActivity() {
         findViewById<View>(R.id.rowName).setOnClickListener { editName() }
         findViewById<View>(R.id.rowAbout).setOnClickListener { editAbout() }
 
-        // the profile name is our push name (shown to everyone), not the
-        // locally-saved contact name
-        name = account.myName()
-        valueName.text = name
-        // Signal ids are ACIs, not phone JIDs, so each account is asked for its
-        // own number rather than it being parsed back out of the id.
-        valuePhone.text = account.myPhone()
-        loadAvatar()
+        loadIdentity()
         loadAbout()
+    }
+
+    /**
+     * The three of these are blocking: WhatsApp's name is a gomobile hop that
+     * takes the process-wide Go lock, and Signal's id and number are JNI calls
+     * with a SQLite read behind the name. Run on the main thread they froze the
+     * screen for as long as the bridge took to answer.
+     *
+     * loadAvatar waits for [selfId], which is resolved here.
+     */
+    private fun loadIdentity() {
+        io.execute {
+            val id = account.selfId()
+            // the profile name is our push name (shown to everyone), not the
+            // locally-saved contact name
+            val myName = account.myName()
+            // Signal ids are ACIs, not phone JIDs, so each account is asked for
+            // its own number rather than it being parsed back out of the id.
+            val phone = account.myPhone()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                selfId = id
+                name = myName
+                valueName.text = myName
+                valuePhone.text = phone
+                loadAvatar()
+            }
+        }
     }
 
     /** Pixel size of the 200dp header, the most the avatar is ever shown at.

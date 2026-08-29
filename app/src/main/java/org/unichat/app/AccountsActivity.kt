@@ -38,62 +38,83 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
         render()
     }
 
+    // Rows by protocol, so a state change repaints the one row it belongs to.
+    // Rebuilding the whole list instead tore the switch down from inside its own
+    // OnCheckedChangeListener, and an account-state event landing mid-gesture
+    // destroyed the thumb under the finger.
+    private val rows = HashMap<String, View>()
+
     private fun render() {
         list.removeAllViews()
+        rows.clear()
         val inflater = LayoutInflater.from(this)
         for (account in Accounts.ALL) {
             val proto = account.proto
             val row = inflater.inflate(R.layout.item_account, list, false)
-            val linked = account.isLinked()
-            val enabled = Prefs.protoEnabled(this, proto)
+            rows[proto] = row
 
             row.findViewById<View>(R.id.accountDot)
                 .setBackgroundColor(protocolAccentOf(proto))
             row.findViewById<TextView>(R.id.accountName).text = account.label(this)
-            val state = row.findViewById<TextView>(R.id.accountState)
-            state.text = when {
-                !linked -> getString(R.string.account_not_linked)
-                enabled -> getString(R.string.account_active)
-                else -> getString(R.string.account_paused)
-            }
 
-            val link = row.findViewById<Button>(R.id.accountLink)
-            val toggle = row.findViewById<SwitchCompat>(R.id.accountSwitch)
-            val delete = row.findViewById<ImageButton>(R.id.accountDelete)
-
-            // Link is the only action that makes sense before an account
-            // exists; pause and remove would both have nothing to act on.
-            link.visibility = if (linked) View.GONE else View.VISIBLE
-            toggle.visibility = if (linked) View.VISIBLE else View.GONE
-            delete.visibility = if (linked) View.VISIBLE else View.GONE
-
-            link.setOnClickListener { startSetup(proto) }
-            // Set the state before the listener, or restoring it here fires the
-            // listener and immediately toggles the account again.
-            toggle.setOnCheckedChangeListener(null)
-            toggle.isChecked = enabled
-            toggle.setOnCheckedChangeListener { _, checked -> setEnabled(proto, checked) }
-            delete.setOnClickListener { confirmRemove(proto) }
-            // Signal only: the contact list lives behind the account PIN, and
-            // registering left it locked. Offer the recovery until it is done,
-            // then say so instead of asking again — the row stays tappable, so
-            // it can still be run a second time.
-            if (proto == ProtoPicker.SG && linked) {
-                row.setOnClickListener {
-                    startActivity(Intent(this, SignalPinActivity::class.java))
-                }
-                // Appended, not substituted: the row still has to say whether
-                // the account is active or paused.
-                val hint = if (Prefs.sgContactsRestored(this)) {
-                    getString(R.string.signal_contacts_restored)
-                } else {
-                    getString(R.string.signal_restore_contacts)
-                }
-                state.text = "${state.text} · $hint"
-            }
-
+            // Attached once here; bindRow owns everything that changes.
+            row.findViewById<Button>(R.id.accountLink)
+                .setOnClickListener { startSetup(proto) }
+            row.findViewById<ImageButton>(R.id.accountDelete)
+                .setOnClickListener { confirmRemove(proto) }
+            bindRow(account, row)
             list.addView(row)
         }
+    }
+
+    private fun bindRow(account: Account, row: View) {
+        val proto = account.proto
+        val linked = account.isLinked()
+        val enabled = Prefs.protoEnabled(this, proto)
+        val state = row.findViewById<TextView>(R.id.accountState)
+        state.text = when {
+            !linked -> getString(R.string.account_not_linked)
+            enabled -> getString(R.string.account_active)
+            else -> getString(R.string.account_paused)
+        }
+        // Signal only: the contact list lives behind the account PIN, and
+        // registering left it locked. Offer the recovery until it is done,
+        // then say so instead of asking again — the row stays tappable, so
+        // it can still be run a second time.
+        if (proto == ProtoPicker.SG && linked) {
+            row.setOnClickListener {
+                startActivity(Intent(this, SignalPinActivity::class.java))
+            }
+            // Appended, not substituted: the row still has to say whether
+            // the account is active or paused.
+            val hint = if (Prefs.sgContactsRestored(this)) {
+                getString(R.string.signal_contacts_restored)
+            } else {
+                getString(R.string.signal_restore_contacts)
+            }
+            state.text = "${state.text} · $hint"
+        } else {
+            row.setOnClickListener(null)
+            row.isClickable = false
+        }
+        // Link is the only action that makes sense before an account
+        // exists; pause and remove would both have nothing to act on.
+        row.findViewById<Button>(R.id.accountLink).visibility =
+            if (linked) View.GONE else View.VISIBLE
+        row.findViewById<ImageButton>(R.id.accountDelete).visibility =
+            if (linked) View.VISIBLE else View.GONE
+        val toggle = row.findViewById<SwitchCompat>(R.id.accountSwitch)
+        toggle.visibility = if (linked) View.VISIBLE else View.GONE
+        // Set the state before the listener, or restoring it here fires the
+        // listener and immediately toggles the account again.
+        toggle.setOnCheckedChangeListener(null)
+        toggle.isChecked = enabled
+        toggle.setOnCheckedChangeListener { _, checked -> setEnabled(proto, checked) }
+    }
+
+    private fun refreshRow(proto: String) {
+        val row = rows[proto] ?: return
+        bindRow(Accounts.of(proto), row)
     }
 
     private fun startSetup(proto: String) {
@@ -103,7 +124,7 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
     private fun setEnabled(proto: String, enabled: Boolean) {
         Prefs.setProtoEnabled(this, proto, enabled)
         Accounts.of(proto).setNetworkEnabled(enabled)
-        render()
+        refreshRow(proto)
     }
 
     private fun confirmRemove(proto: String) {
@@ -129,7 +150,9 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
     }
 
 
-    override fun onAccountState(proto: String, state: String) = render()
+    // Only the account that changed: a full rebuild here destroyed whatever
+    // switch the user happened to have under their finger.
+    override fun onAccountState(proto: String, state: String) = refreshRow(proto)
 
 
     override fun onDestroy() {

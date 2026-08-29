@@ -628,9 +628,21 @@ func Logout(connId int) {
 			c.log(LogError, fmt.Sprintf("store delete after failed logout %v", err))
 		}
 	}
-	c.resetDevice()
+	ok := c.resetDevice()
+	// logged_out first either way: the account really is gone, and that is what
+	// moves the app off the chat list. StateStoreBroken then says the client
+	// could not be rebuilt, so the login screen explains the dead QR instead of
+	// showing one that can never succeed.
 	c.setState("logged_out")
+	if !ok {
+		c.setState(StateStoreBroken)
+	}
 }
+
+// StateStoreBroken is reported when the device store could not be reopened
+// after a logout or a remote unlink. Linking again needs the process restarted.
+// Kotlin matches on this exact word (LoginActivity).
+const StateStoreBroken = "store_broken"
 
 // resetDevice rebuilds the client on a fresh device store. A logout — ours or a
 // remote unlink (events.LoggedOut) — poisons the device's in-memory stores, so
@@ -639,7 +651,7 @@ func Logout(connId int) {
 // the per-session caches, which otherwise leak into the next account: stale read
 // watermarks marked its incoming messages already-read, and an armed media-retry
 // timer fired into the new session.
-func (c *conn) resetDevice() {
+func (c *conn) resetDevice() bool {
 	ctx := context.TODO()
 	c.getClient().Disconnect()
 	for _, pending := range c.takeAllPendingMediaRetries() {
@@ -653,14 +665,23 @@ func (c *conn) resetDevice() {
 	c.historyActive = false
 	c.historyForExport = false
 	mx.Unlock()
+	// Answers whether the client really was replaced. Both failures used to
+	// return quietly, leaving the poisoned client in place while Logout went on
+	// to report "logged_out": the app moved to the login screen and every QR
+	// round after that failed with ErrDeviceDeleted for the rest of the
+	// process, with nothing but a log line to say why.
 	deviceStore, err := c.container.GetFirstDevice(ctx)
 	if err != nil {
 		c.log(LogError, fmt.Sprintf("dev store error after logout %v", err))
-		return
+		return false
 	}
-	if client := newDeviceClient(c.id, c, deviceStore); client != nil {
-		c.setClient(client)
+	client := newDeviceClient(c.id, c, deviceStore)
+	if client == nil {
+		c.log(LogError, "could not rebuild the device client after logout")
+		return false
 	}
+	c.setClient(client)
+	return true
 }
 
 func requestContactsAsync(connId int) {
@@ -2183,7 +2204,9 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 		// ErrDeviceDeleted). Rebuild it the way Logout() does, or QR/pair login
 		// could not succeed again until the process was restarted.
 		c.setState("logged_out")
-		c.resetDevice()
+		if !c.resetDevice() {
+			c.setState(StateStoreBroken)
+		}
 
 	case *events.ClientOutdated:
 		c.setState("outdated")

@@ -157,8 +157,14 @@ private object WaAccount : Account {
     override val notOnNetworkRes = R.string.not_on_whatsapp
 
     // A WhatsApp contact card carries the bare digits, and those are the id.
-    override fun chatIdForCardId(cardId: String) =
-        if (cardId.isEmpty()) "" else PhoneBook.digitsOf(cardId) + "@s.whatsapp.net"
+    // Checked on the DIGITS, not on cardId: the waid a received card carries is
+    // the sender's to write, so a non-numeric one built "@s.whatsapp.net" — an
+    // invalid JID that is not empty, so the caller's number fallback never ran
+    // and the chat opened on it anyway.
+    override fun chatIdForCardId(cardId: String): String {
+        val digits = PhoneBook.digitsOf(cardId)
+        return if (digits.isEmpty()) "" else digits + "@s.whatsapp.net"
+    }
 }
 
 private object TgAccount : Account {
@@ -243,8 +249,11 @@ private object SgAccount : Account {
         Bridge.runOnUi { onResult(false) }
     }
 
+    // Empty maps to null, which is this callback's "could not read": an empty
+    // map went through as success, so the screen rendered both switches at
+    // their defaults and a toggle then wrote a setting nobody had read back.
     override fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit) {
-        val settings = Signal.privacySettings()
+        val settings = Signal.privacySettings().ifEmpty { null }
         Bridge.runOnUi { onResult(settings) }
     }
     override fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit) =

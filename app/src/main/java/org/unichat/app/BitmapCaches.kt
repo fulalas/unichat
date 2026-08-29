@@ -30,10 +30,18 @@ class PendingViews<T> {
 
     private val map = ConcurrentHashMap<String, CopyOnWriteArrayList<Entry<T>>>()
 
+    // Looped, because computeIfAbsent + add is not atomic against take/abandon
+    // and the two run on different threads (await on the main one, abandon in
+    // the decode pool's finally). Losing that race added the entry to a list no
+    // longer in the map, so the later take() found nothing, the view was never
+    // painted, and the row kept its placeholder until it was rebound.
     fun await(key: String, view: ImageView, payload: T) {
-        val list = map.computeIfAbsent(key) { CopyOnWriteArrayList() }
-        list.removeIf { it.view.get().let { v -> v == null || v === view } }
-        list.add(Entry(WeakReference(view), payload))
+        while (true) {
+            val list = map.computeIfAbsent(key) { CopyOnWriteArrayList() }
+            list.removeIf { it.view.get().let { v -> v == null || v === view } }
+            list.add(Entry(WeakReference(view), payload))
+            if (map[key] === list) return
+        }
     }
 
     fun peek(key: String): List<Entry<T>>? = map[key]

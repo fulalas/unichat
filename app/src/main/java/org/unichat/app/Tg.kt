@@ -1784,8 +1784,15 @@ object Tg {
             // completion event that never came.
             try {
                 val before = Bridge.db.messageCount(chatId)
+                var lastAnchor = -1L
                 while (true) {
                     val fromId = Bridge.db.oldestMessage(chatId)?.id?.toLongOrNull() ?: 0L
+                    // Same guard as syncAllStep and seekMessage: a page that
+                    // does not move the stored oldest id would be re-fetched
+                    // forever, pinning a pager thread on a blocking request per
+                    // round and never releasing exportChatId.
+                    if (fromId == lastAnchor) { complete = false; break }
+                    lastAnchor = fromId
                     val count = fetchHistory(chatId, fromId, 100)
                     if (count < 0) { complete = false; break }
                     if (count == 0) { historyExhausted.add(chatId); break }
@@ -1840,7 +1847,11 @@ object Tg {
 
     fun avatarPath(chatId: String, big: Boolean = false, cachedOnly: Boolean = false): String {
         val key = chatId + if (big) "/big" else ""
-        if (!big) avatarPaths[key]?.let { return it }
+        // Checked, not trusted: TDLib's bookkeeping outlives the file (see
+        // usable), and nothing but a photo change drops this entry — so once
+        // the file was gone the memo handed the dead path back forever, the
+        // decode failed, and that contact's avatar never came back.
+        if (!big) avatarPaths[key]?.let { if (usable(it)) return it else avatarPaths.remove(key) }
         // Nothing memoised and the caller cannot afford to wait. Everything past
         // this point is a blocking TDLib round-trip, and the two cached-only
         // callers are the avatar decode pool and the single notify thread, both

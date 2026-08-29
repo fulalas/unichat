@@ -170,6 +170,11 @@ object Signal : EventListener {
         // the account still has to go.
         linked = false
         runCatching { ops.submit(Runnable {}).get(5, TimeUnit.SECONDS) }
+        // Io.files too: startDownload does not run on [ops], so draining only
+        // that queue still left an attachment fetch calling into signalmeow
+        // while signalLogout closed the store, and writing into signal/media
+        // while the tree below was being removed.
+        drainDownloads(5_000)
         Wmbridge.signalLogout()
         started = false
         selfIdMemo = ""
@@ -412,9 +417,32 @@ object Signal : EventListener {
     }
 
     fun startDownload(msg: MessageRow): Boolean {
-        if (msg.fileId.isEmpty()) return false
-        Io.files.execute { Wmbridge.signalDownloadAttachment(msg.chatId, msg.id, msg.fileId) }
+        if (msg.fileId.isEmpty() || !linked) return false
+        downloads.incrementAndGet()
+        Io.files.execute {
+            try {
+                // Re-checked inside: logout clears the flag and then closes the
+                // store and deletes the tree this writes into, so a task queued
+                // before it must not run afterwards.
+                if (linked) Wmbridge.signalDownloadAttachment(msg.chatId, msg.id, msg.fileId)
+                else Bridge.onFileTransferDone(msg.chatId, msg.id, "", 3)
+            } finally {
+                downloads.decrementAndGet()
+            }
+        }
         return true
+    }
+
+    // Attachment fetches in flight. They run on Io.files rather than [ops], so
+    // logout has to wait for them separately or it closes the Signal store and
+    // removes signal/media out from under one.
+    private val downloads = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private fun drainDownloads(deadlineMs: Long) {
+        val until = System.currentTimeMillis() + deadlineMs
+        while (downloads.get() > 0 && System.currentTimeMillis() < until) {
+            Thread.sleep(50)
+        }
     }
 
     // --- EventListener ---------------------------------------------------

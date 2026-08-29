@@ -53,6 +53,18 @@ class SignalRegisterActivity : BaseActivity() {
         verify.setOnClickListener { submitCode() }
     }
 
+    // Every register* call blocks on the network for seconds (two of them are an
+    // SMS round trip), so backing out mid-flow landed the reply on dead views
+    // and a dead context. The sibling PIN screen guards its callback the same way.
+    private fun gone(): Boolean = isFinishing || isDestroyed
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // A WebView keeps this activity reachable through its own native state
+        // until it is told to let go.
+        captcha.destroy()
+    }
+
     private fun confirmTakeover() {
         number = phone.text.toString().trim()
         if (!number.startsWith("+") || number.length < 8) {
@@ -74,6 +86,7 @@ class SignalRegisterActivity : BaseActivity() {
         findViewById<View>(R.id.sgLinkInstead).visibility = View.GONE
         busy(true, R.string.signal_register_starting)
         Signal.registerStart(number) { err ->
+            if (gone()) return@registerStart
             if (err.isNotEmpty()) return@registerStart fail(err)
             if (Signal.needsCaptcha()) showCaptcha() else requestCode()
         }
@@ -112,6 +125,7 @@ class SignalRegisterActivity : BaseActivity() {
         form.visibility = View.VISIBLE
         busy(true, R.string.signal_captcha_checking)
         Signal.registerSubmitCaptcha(token.removePrefix("signalcaptcha://")) { err ->
+            if (gone()) return@registerSubmitCaptcha
             if (err.isNotEmpty()) fail(err) else requestCode()
         }
     }
@@ -119,6 +133,7 @@ class SignalRegisterActivity : BaseActivity() {
     private fun requestCode() {
         busy(true, R.string.signal_sending_code)
         Signal.registerRequestCode { err ->
+            if (gone()) return@registerRequestCode
             if (err.isNotEmpty()) return@registerRequestCode fail(err)
             busy(false, R.string.signal_code_sent)
             code.visibility = View.VISIBLE
@@ -135,6 +150,7 @@ class SignalRegisterActivity : BaseActivity() {
         }
         busy(true, R.string.signal_registering)
         Signal.registerSubmitCode(number, entered) { err ->
+            if (gone()) return@registerSubmitCode
             if (err.isNotEmpty()) return@registerSubmitCode fail(err)
             Toast.makeText(this, R.string.signal_registered, Toast.LENGTH_LONG).show()
             finish()

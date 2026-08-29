@@ -288,9 +288,24 @@ if [ "$APK_ONLY" != 1 ]; then
     # instead: the fix is -static-libstdc++ in signal-local.patch.
     # Read the real dynamic section, not `strings`: the name of a library the
     # binary merely mentions is not the same as one it will dlopen.
+    # Asserted, not assumed: with ANDROID_NDK_HOME/ROOT unset this path is
+    # "/toolchains/..." and readelf simply does not run — stderr goes to
+    # /dev/null, the pipeline's status comes from sort, BAD is empty, and the
+    # check below passes on exactly the aar it exists to stop.
+    if [ ! -x "$NDK_LLVM/bin/llvm-readelf" ]; then
+        rm -f "$DIR/app/libs/wmbridge-new.aar"
+        echo "llvm-readelf not found at $NDK_LLVM/bin — set ANDROID_NDK_HOME" >&2
+        echo "   refusing to ship an unverified libgojni.so" >&2
+        exit 1
+    fi
     SO_TMP=$(mktemp -d)
     unzip -q -o -j "$DIR/app/libs/wmbridge-new.aar" jni/arm64-v8a/libgojni.so -d "$SO_TMP"
-    BAD=$("$NDK_LLVM/bin/llvm-readelf" -d "$SO_TMP/libgojni.so" 2>/dev/null \
+    if [ ! -f "$SO_TMP/libgojni.so" ]; then
+        rm -rf "$SO_TMP" "$DIR/app/libs/wmbridge-new.aar"
+        echo "gomobile: no jni/arm64-v8a/libgojni.so in the aar" >&2
+        exit 1
+    fi
+    BAD=$("$NDK_LLVM/bin/llvm-readelf" -d "$SO_TMP/libgojni.so" \
         | grep -oE "libc\+\+_shared\.so|libstdc\+\+\.so" | sort -u)
     rm -rf "$SO_TMP"
     if [ -n "$BAD" ]; then

@@ -209,14 +209,19 @@ object Notifications {
     }
 
     // Cancels only the message notifications this object posted (not the
-    // foreground-service or media-playback notifications). Enumerated from the
-    // shade, so notifications a PREVIOUS process posted are cancelled too —
-    // logging out after a process restart used to leave them behind, still
-    // deep-linking into chats whose rows had just been deleted.
-    fun cancelAllMessages(context: Context) {
+    // foreground-service or media-playback notifications), and only for the
+    // chats [owns] names. Enumerated from the shade, so notifications a
+    // PREVIOUS process posted are cancelled too — logging out after a process
+    // restart used to leave them behind, still deep-linking into chats whose
+    // rows had just been deleted. The predicate is what keeps one account's
+    // unlink from clearing another account's alerts.
+    fun cancelMessagesFor(context: Context, owns: (String) -> Boolean) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        for (tag in liveChatNotifications(manager)) manager.cancel(tag, MSG_ID)
-        manager.cancel(SUMMARY_ID)
-        history.clear()
+        for (tag in liveChatNotifications(manager)) {
+            if (!owns(tag)) continue
+            manager.cancel(tag, MSG_ID)
+            history.remove(tag)
+        }
+        syncSummary(context, manager)
     }
 }

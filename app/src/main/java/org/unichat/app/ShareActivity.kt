@@ -79,6 +79,11 @@ class ShareActivity : BaseActivity() {
                 var attempted = 0
                 for ((itemIndex, stream) in streams.withIndex()) {
                     val name = uriDisplayName(stream) ?: "shared"
+                    // Per item, not the intent's type: a multi-item share of
+                    // mixed content carries "*/*", and Bridge dispatches on the
+                    // mime — so every shared photo and video went out as a
+                    // document.
+                    val itemMime = contentResolver.getType(stream) ?: mime
                     val master = copyUriToCache(stream, "share", "0_${itemIndex}_$name")
                     if (master == null) {
                         attempted += chatIds.size
@@ -90,7 +95,7 @@ class ShareActivity : BaseActivity() {
                             ?: return@forEachIndexed
                         staged++
                         val caption = if (itemIndex == 0) text.orEmpty() else ""
-                        Bridge.sendFile(chatId, local.absolutePath, name, mime, caption)
+                        Bridge.sendFile(chatId, local.absolutePath, name, itemMime, caption)
                     }
                     master.delete() // only the per-chat copies are sent
                 }

@@ -6,9 +6,12 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.PlaybackParams
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 
 object AudioPlayer {
+    private val main = Handler(Looper.getMainLooper())
     private var appContext: Context? = null
     private var audioManager: AudioManager? = null
     private var player: MediaPlayer? = null
@@ -128,7 +131,12 @@ object AudioPlayer {
             try { fresh?.release() } catch (e2: Exception) {}
             stopInternal(resetRoute = true)
         } finally {
-            routing = false
+            // Posted, not cleared here: the focus listener is called by the
+            // framework through the main Looper, so the loss this rebuild
+            // caused is delivered AFTER play() returns. Clearing the flag
+            // inline let that loss through and paused the clip the proximity
+            // switch had just moved to the ear — the very thing it guards.
+            main.post { routing = false }
         }
         notifyState()
     }

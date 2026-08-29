@@ -265,31 +265,13 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         onCreate(db)
     }
 
+    /**
+     * Blocks run in ASCENDING version order, and new ones belong at the bottom.
+     * A migration step has to see the schema every earlier step produced, so a
+     * block placed out of order can reference a column or index that has not
+     * been added yet and take onUpgrade down mid-transaction on a real database.
+     */
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion < 25) {
-            db.execSQL(CREATE_LINK_PREVIEWS)
-        }
-        if (oldVersion < 26) {
-            // v25 read only the first 512 KB of a page, so every link that
-            // buries its Open Graph tags past that (YouTube) was recorded as
-            // having no preview. Those verdicts are wrong, not stale.
-            db.execSQL("DELETE FROM link_previews WHERE status=2")
-        }
-        if (oldVersion < 27) {
-            // The whole table is a cache of parsed pages, so a change to the
-            // parser invalidates it: v26 and earlier folded a description's line
-            // breaks into nothing, running its words together.
-            db.execSQL("DELETE FROM link_previews")
-        }
-        if (oldVersion < 28) {
-            // Same reason again: previews stored before this were fetched as an
-            // ordinary client, which several sites answer with a bot check
-            // instead of their metadata (see LinkPreview.USER_AGENT).
-            db.execSQL("DELETE FROM link_previews")
-        }
-        if (oldVersion < 29) {
-            db.execSQL("ALTER TABLE messages ADD COLUMN send_failed INTEGER NOT NULL DEFAULT 0")
-        }
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE messages ADD COLUMN msg_type TEXT NOT NULL DEFAULT ''")
             db.execSQL("ALTER TABLE messages ADD COLUMN file_id TEXT NOT NULL DEFAULT ''")
@@ -351,14 +333,29 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
             db.execSQL("ALTER TABLE messages ADD COLUMN quoted_type TEXT NOT NULL DEFAULT ''")
             db.execSQL(CREATE_ID_INDEX)
         }
+        if (oldVersion < 17) {
+            db.execSQL("ALTER TABLE chats ADD COLUMN react_text TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE chats ADD COLUMN react_time INTEGER NOT NULL DEFAULT 0")
+        }
         if (oldVersion < 18) {
             db.execSQL(CREATE_DELETED_CHATS)
         }
-        if (oldVersion < 24) {
-            // v23 shipped this index on text='' only; replace with the wider
-            // predicate so the file_id backfill sweep is covered too
-            db.execSQL("DROP INDEX IF EXISTS idx_msg_empty_contact")
-            db.execSQL(CREATE_EMPTY_CONTACT_INDEX)
+        if (oldVersion < 19) {
+            db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
+            db.execSQL(CREATE_PLACEHOLDER_INDEX)
+        }
+        if (oldVersion < 20) {
+            // Telegram media could be pointing at the wrong file entirely: a
+            // stale file id was trusted to fetch with, and TDLib reuses those
+            // ids across sessions. Which rows are wrong is not knowable, so
+            // every association is dropped and re-derived from the message.
+            db.execSQL(
+                "UPDATE messages SET file_path='', file_status=0 " +
+                    "WHERE chat_id LIKE 'tg:%' AND file_path!=''"
+            )
+        }
+        if (oldVersion < 21) {
+            db.execSQL("UPDATE messages SET msg_type='sticker' WHERE msg_type='image' AND file_id LIKE 'stk:%'")
         }
         if (oldVersion < 22) {
             db.execSQL("ALTER TABLE messages ADD COLUMN latitude REAL NOT NULL DEFAULT 0")
@@ -371,26 +368,35 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
                     "WHERE msg_type='location' AND instr(file_id, ',')>0"
             )
         }
-        if (oldVersion < 21) {
-            db.execSQL("UPDATE messages SET msg_type='sticker' WHERE msg_type='image' AND file_id LIKE 'stk:%'")
+        if (oldVersion < 24) {
+            // v23 shipped this index on text='' only; replace with the wider
+            // predicate so the file_id backfill sweep is covered too
+            db.execSQL("DROP INDEX IF EXISTS idx_msg_empty_contact")
+            db.execSQL(CREATE_EMPTY_CONTACT_INDEX)
         }
-        if (oldVersion < 20) {
-            // Telegram media could be pointing at the wrong file entirely: a
-            // stale file id was trusted to fetch with, and TDLib reuses those
-            // ids across sessions. Which rows are wrong is not knowable, so
-            // every association is dropped and re-derived from the message.
-            db.execSQL(
-                "UPDATE messages SET file_path='', file_status=0 " +
-                    "WHERE chat_id LIKE 'tg:%' AND file_path!=''"
-            )
+        if (oldVersion < 25) {
+            db.execSQL(CREATE_LINK_PREVIEWS)
         }
-        if (oldVersion < 19) {
-            db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
-            db.execSQL(CREATE_PLACEHOLDER_INDEX)
+        if (oldVersion < 26) {
+            // v25 read only the first 512 KB of a page, so every link that
+            // buries its Open Graph tags past that (YouTube) was recorded as
+            // having no preview. Those verdicts are wrong, not stale.
+            db.execSQL("DELETE FROM link_previews WHERE status=2")
         }
-        if (oldVersion < 17) {
-            db.execSQL("ALTER TABLE chats ADD COLUMN react_text TEXT NOT NULL DEFAULT ''")
-            db.execSQL("ALTER TABLE chats ADD COLUMN react_time INTEGER NOT NULL DEFAULT 0")
+        if (oldVersion < 27) {
+            // The whole table is a cache of parsed pages, so a change to the
+            // parser invalidates it: v26 and earlier folded a description's line
+            // breaks into nothing, running its words together.
+            db.execSQL("DELETE FROM link_previews")
+        }
+        if (oldVersion < 28) {
+            // Same reason again: previews stored before this were fetched as an
+            // ordinary client, which several sites answer with a bot check
+            // instead of their metadata (see LinkPreview.USER_AGENT).
+            db.execSQL("DELETE FROM link_previews")
+        }
+        if (oldVersion < 29) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN send_failed INTEGER NOT NULL DEFAULT 0")
         }
     }
 
@@ -864,8 +870,13 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
             // Must agree with isGroupId(). A Signal group is any sg: id whose
             // remainder is not a 36-char UUID, which is what the length test
             // below expresses.
+            // The lowercase 'pni:' too: REPLACE is case-sensitive, and rows
+            // written before the prefix was corrected use that spelling — left
+            // out, every one of those one-to-one chats came back 40 characters
+            // long and rendered as a group.
             "CASE WHEN c.id LIKE '%@g.us' OR c.id LIKE 'tg:-%' " +
-                "OR (c.id LIKE 'sg:%' AND LENGTH(REPLACE(REPLACE(c.id,'sg:',''),'PNI:','')) <> 36) " +
+                "OR (c.id LIKE 'sg:%' AND LENGTH(" +
+                "REPLACE(REPLACE(REPLACE(c.id,'sg:',''),'PNI:',''),'pni:','')) <> 36) " +
                 "THEN 1 ELSE 0 END AS is_group," +
             "COALESCE(lm.from_me,0) AS last_from_me," +
             "COALESCE(lm.is_read,0) AS last_read," +

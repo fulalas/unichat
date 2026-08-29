@@ -616,6 +616,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 null
             }
             runOnUiThread {
+                // Guarded like every other async callback here: this one commits
+                // a list, restores the layout manager's state and can register a
+                // ViewTreeObserver listener, none of which may run on a screen
+                // the user has already left.
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 if (unreadJump != null && !restoredScroll && pendingJumpId == null) {
                     pendingJumpId = unreadJump
                 }
@@ -1510,6 +1515,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 else -> false
             }
         }
+        // popups take the window focus too (see onWindowFocusChanged)
+        ownDialogs++
+        popup.setOnDismissListener { ownDialogs-- }
         popup.show()
     }
 
@@ -2098,7 +2106,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val items = arrayOf(getString(normalLabel), getString(viewOnceLabel))
         AlertDialog.Builder(this)
             .setItems(items) { _, which -> onPick(which == 1) }
-            .show()
+            .show().tracked()
         return true
     }
 
@@ -2127,7 +2135,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     }
                 }
             }
-            .show()
+            .show().tracked()
     }
 
     private fun onContactPicked(uri: Uri) {
@@ -2401,7 +2409,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun openMediaFile(msg: MessageRow) {
-        val (uri, mime) = providedFile(File(msg.filePath), "*/*")
+        val (uri, mime) = providedFile(File(msg.filePath), "*/*") ?: run {
+            Toast.makeText(this, R.string.no_app_for_file, Toast.LENGTH_SHORT).show()
+            return
+        }
         val intent = Intent(Intent.ACTION_VIEW)
         intent.setDataAndType(uri, mime)
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -2449,7 +2460,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 onChosen()
             }
             .apply { if (cancellable) setNegativeButton(android.R.string.cancel, null) }
-            .show()
+            .show().tracked()
     }
 
     private fun showMessageActions(msg: MessageRow) {
@@ -2543,7 +2554,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     .setItems(lines.toTypedArray()) { _, which ->
                         openReactorChat(reactions[which].first, who[which])
                     }
-                    .show()
+                    .show().tracked()
             }
         }
     }
@@ -2589,6 +2600,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             row.addView(tv)
         }
         dialog.show()
+        dialog.tracked()
     }
 
     private fun startReply(msg: MessageRow) {
@@ -2641,8 +2653,20 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         // some focus-stealing overlays (e.g. a heads-up incoming-call banner)
         // don't trigger onPause; catch those here too so a recording never
-        // keeps running — and never gets discarded — behind the user's back
-        if (!hasFocus) captureRecordingAsPending()
+        // keeps running — and never gets discarded — behind the user's back.
+        // Not for a dialog or popup of this screen's own, which takes the window
+        // focus just the same: long-pressing a message while recording stopped
+        // the mic, which is nobody stealing anything.
+        if (!hasFocus && ownDialogs == 0) captureRecordingAsPending()
+    }
+
+    // How many dialogs/popups this screen has open (see onWindowFocusChanged).
+    private var ownDialogs = 0
+
+    private fun <D : android.app.Dialog> D.tracked(): D {
+        ownDialogs++
+        setOnDismissListener { ownDialogs-- }
+        return this
     }
 
     private fun showKeyboard(target: android.view.View = input) {
@@ -2711,7 +2735,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 downloadWithToast(msg)
                 return
             }
-            val (uri, mime) = providedFile(File(msg.filePath), "*/*")
+            val (uri, mime) = providedFile(File(msg.filePath), "*/*") ?: run {
+                Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
+                return
+            }
             intent.type = mime
             intent.putExtra(Intent.EXTRA_STREAM, uri)
             if (msg.msgType in PICTURE_TYPES && msg.text.isNotEmpty()) {
@@ -2742,7 +2769,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     Toast.makeText(this, R.string.no_chats, Toast.LENGTH_SHORT).show()
                     return@runOnUiThread
                 }
-                showTargetPicker(R.string.forward_to, labels, ids) { onPick(it) }
+                showTargetPicker(R.string.forward_to, labels, ids) { onPick(it) }.tracked()
             }
         }
     }

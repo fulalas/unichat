@@ -309,6 +309,25 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         pullOlder()
     }
 
+    // A named Runnable with a handle, not a lambda: this reposts itself for up
+    // to OLDER_ROUNDS rounds of 30s, so with nothing to remove it in onStop it
+    // kept the activity alive — and kept asking for history, holding the
+    // bridge's single in-flight slot against the chat screen — long after the
+    // viewer was closed.
+    private val olderTimeout = Runnable {
+        if (awaitingOlder) {
+            awaitingOlder = false
+            pullOlder()
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        pager.removeCallbacks(olderTimeout)
+        awaitingOlder = false
+        olderRoundsLeft = 0
+    }
+
     private fun pullOlder() {
         if (awaitingOlder || olderRoundsLeft <= 0) return
         if (Bridge.isHistoryExhausted(chatId)) return
@@ -316,12 +335,8 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         olderRoundsLeft--
         Bridge.requestChatHistory(chatId)
         // a page that answers with nothing at all produces no event to react to
-        pager.postDelayed({
-            if (awaitingOlder) {
-                awaitingOlder = false
-                pullOlder()
-            }
-        }, Bridge.historyTimeoutMs)
+        pager.removeCallbacks(olderTimeout)
+        pager.postDelayed(olderTimeout, Bridge.historyTimeoutMs)
     }
 
     private fun currentPath(): String =
@@ -405,7 +420,10 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
             Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
             return
         }
-        val (uri, mime) = providedFile(file, "image/*")
+        val (uri, mime) = providedFile(file, "image/*") ?: run {
+            Toast.makeText(this, R.string.share_failed, Toast.LENGTH_SHORT).show()
+            return
+        }
         val intent = Intent(Intent.ACTION_SEND)
         intent.type = mime
         intent.putExtra(Intent.EXTRA_STREAM, uri)

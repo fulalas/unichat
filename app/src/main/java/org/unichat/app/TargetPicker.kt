@@ -35,13 +35,15 @@ fun Activity.targetChoices(): Pair<List<String>, List<String>> {
     return labels to ids
 }
 
+/** Answers the dialog it put up, so a caller that has to know while one of its
+ *  own windows holds the focus (see ChatActivity.onWindowFocusChanged) can. */
 fun Activity.showTargetPicker(
     titleRes: Int,
     labels: List<String>,
     ids: List<String>,
     onCancel: () -> Unit = {},
     onPick: (List<String>) -> Unit,
-) {
+): AlertDialog {
     val view = layoutInflater.inflate(R.layout.dialog_target_picker, null)
     val search: EditText = view.findViewById(R.id.pickerSearch)
     val list: ListView = view.findViewById(R.id.pickerList)
@@ -89,4 +91,5 @@ fun Activity.showTargetPicker(
         override fun beforeTextChanged(cs: CharSequence?, start: Int, count: Int, after: Int) {}
         override fun onTextChanged(cs: CharSequence?, start: Int, before: Int, count: Int) {}
     })
+    return dialog
 }

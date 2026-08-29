@@ -10,6 +10,7 @@
     <string name="account_paused">Paused</string>
     <string name="account_active">Active</string>
     <string name="account_remove">Remove account</string>
+    <string name="account_pause">Keep this account connected</string>
     <string name="account_remove_title">Remove %1$s?</string>
     <string name="account_remove_body">This unlinks the account and deletes its chats, messages and downloaded files from this device. It cannot be undone.</string>
     <string name="account_remove_confirm">Remove</string>
@@ -102,6 +103,7 @@
     <string name="state_connected">connected</string>
     <string name="state_disconnected">disconnected</string>
     <string name="state_outdated">This app version is too old for WhatsApp — please update UniChat</string>
+    <string name="state_store_broken">WhatsApp storage could not be reopened — restart UniChat to link again</string>
     <string name="still_sending">Still sending — try again in a moment</string>
     <string name="state_syncing">syncing %1$d%%</string>
     <string name="no_chats">No chats yet.\nMessages will appear here after sync.</string>
@@ -176,7 +178,6 @@
     <string name="message_contact">Message</string>
     <string name="not_on_telegram">Not on Telegram</string>
     <string name="not_on_signal">Not on Signal</string>
-    <string name="chat_open_failed">Could not open the chat</string>
     <string name="poll_label">Poll</string>
     <string name="poll_vote_label">Poll vote</string>
     <string name="event_label">Event</string>

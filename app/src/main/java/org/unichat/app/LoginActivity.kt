@@ -193,6 +193,7 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             // state, so coming back to this tab would otherwise replace the one
             // message that explains why the QR cannot work.
             Bridge.state == "outdated" -> getString(R.string.state_outdated)
+            Bridge.state == "store_broken" -> getString(R.string.state_store_broken)
             else -> getString(R.string.login_waiting)
         }
         // renderStep, not the "ready" path: switching to this tab with Telegram
@@ -396,6 +397,12 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         // comes back to the WhatsApp tab.
         if (state == "outdated") {
             statusText.text = getString(R.string.state_outdated)
+            return
+        }
+        // The device store could not be reopened after the unlink, so the QR
+        // below can never succeed — say so instead of leaving it spinning.
+        if (state == "store_broken") {
+            statusText.text = getString(R.string.state_store_broken)
             return
         }
         // Otherwise only the WhatsApp panel takes its status from the

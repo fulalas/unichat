@@ -16,7 +16,13 @@ if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
     echo "no NDK installed under $SDK/ndk" >&2
     exit 1
 fi
-API=29   # must match minSdk in app/build.gradle
+# Read from app/build.gradle, never written down twice: a native library built
+# against a newer API than minSdk installs fine and then dies at Bridge.init,
+# and this script's caches key on the TDLib commit alone, so a stale copy of the
+# number here would never rebuild anything. build.sh reads it the same way.
+API=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*\([0-9]*\).*/\1/p' \
+    "$DIR/app/build.gradle" | head -1)
+: "${API:?could not read minSdk from app/build.gradle}"
 JOBS=$(nproc)
 ABIS=("${@:-arm64-v8a}")
 [ $# -eq 0 ] && ABIS=(arm64-v8a)
@@ -96,7 +102,13 @@ openssl_target() {
 }
 build_openssl() {
     local abi="$1" prefix="$EXT/openssl-$1"
-    [ -f "$prefix/lib/libcrypto.a" ] && return
+    # Stamped with the version AND the API, not just "is there an archive": the
+    # source tree is version-named and re-downloaded on a bump, but this prefix
+    # is not — so raising OPENSSL_VER found the previous libcrypto.a, returned
+    # here, and TDLib linked the old OpenSSL with the build reporting success.
+    local stamp="$prefix/.build-key" key="$OPENSSL_VER-android$API"
+    [ -f "$prefix/lib/libcrypto.a" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$key" ] && return
+    rm -rf "$prefix"
     # separate assignment: `./Configure "$(openssl_target ...)"` would swallow a
     # non-zero status and configure OpenSSL for an empty target
     local target
@@ -129,6 +141,8 @@ build_openssl() {
         make -s install_dev >/dev/null
     )
     rm -rf "openssl-build-$abi"
+    # Stamp last, so an interrupted build is not marked good
+    echo "$key" > "$stamp"
 }
 
 # Stamped with the TDLib commit, not just touched: this stage GENERATES

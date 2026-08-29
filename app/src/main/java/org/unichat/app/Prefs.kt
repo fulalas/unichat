@@ -68,15 +68,25 @@ object Prefs {
         prefs(ctx).edit().putBoolean(KEY_COMPLETE + chatId, true).apply()
 
     /**
-     * Forgets the claim — for one chat, or (null) for every chat. A deleted or
-     * re-linked account re-syncs from nothing, and a search still promising it
-     * had read everything would be exactly the false comfort this replaced.
+     * Forgets the claim for one chat. A deleted or re-linked account re-syncs
+     * from nothing, and a search still promising it had read everything would
+     * be exactly the false comfort this replaced.
      */
-    fun clearHistoryComplete(ctx: Context, chatId: String?) {
+    fun clearHistoryComplete(ctx: Context, chatId: String) {
+        prefs(ctx).edit().remove(KEY_COMPLETE + chatId).apply()
+    }
+
+    /** The same, for every chat [matches] names. Takes a predicate rather than
+     *  clearing the lot: unlinking one account must not retract the claim for
+     *  the chats of an account that is still linked. */
+    fun clearHistoryCompleteWhere(ctx: Context, matches: (String) -> Boolean) {
         val p = prefs(ctx)
         val e = p.edit()
-        if (chatId != null) e.remove(KEY_COMPLETE + chatId)
-        else p.all.keys.filter { it.startsWith(KEY_COMPLETE) }.forEach { e.remove(it) }
+        for (key in p.all.keys) {
+            if (key.startsWith(KEY_COMPLETE) && matches(key.removePrefix(KEY_COMPLETE))) {
+                e.remove(key)
+            }
+        }
         e.apply()
     }
 

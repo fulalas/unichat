@@ -42,7 +42,10 @@ object Bridge : EventListener {
     @Volatile private var connId: Long = -1
     @Volatile private var appContext: Context? = null
     @Volatile var activeChatId: String = ""
-    lateinit var db: Db
+    // @Volatile like everything else here: it is assigned on the warm-up thread
+    // while Tg and Signal reach it from their own executors, and neither gates
+    // on connId — the volatile that publishes the rest of init's writes.
+    @Volatile lateinit var db: Db
         private set
     @Volatile var state: String = "disconnected"
         private set
@@ -1024,15 +1027,21 @@ object Bridge : EventListener {
         }
     }
 
-    fun sendLocation(chatId: String, latitude: Double, longitude: Double) = executor.execute {
-        if (!proto(chatId).sendLocation(chatId, latitude, longitude)) {
-            Log.w(TAG, "location send failed for chat $chatId")
+    // protoExecutor, not executor: Signal.sendLocation and Signal.sendContact
+    // are the two Signal calls with no ops {} of their own, so they block in
+    // place on the network — on the shared executor that stalled every WhatsApp
+    // and Telegram operation queued behind them (see sgExecutor).
+    fun sendLocation(chatId: String, latitude: Double, longitude: Double) =
+        protoExecutor(chatId).execute {
+            if (!proto(chatId).sendLocation(chatId, latitude, longitude)) {
+                Log.w(TAG, "location send failed for chat $chatId")
+            }
         }
-    }
 
-    fun sendContact(chatId: String, name: String, numbers: List<String>) = executor.execute {
-        if (!proto(chatId).sendContact(chatId, name, numbers)) onSendFailed("contact", chatId)
-    }
+    fun sendContact(chatId: String, name: String, numbers: List<String>) =
+        protoExecutor(chatId).execute {
+            if (!proto(chatId).sendContact(chatId, name, numbers)) onSendFailed("contact", chatId)
+        }
 
     // A dedicated single thread for sending a batch (a multi-select forward, a
     // multi-file attachment): each message (media included — its upload
@@ -1759,36 +1768,52 @@ object Bridge : EventListener {
         // here leaks across a logout/re-login as the previous account's data
         // (a stale "typing…", a previous account's avatar, playback that keeps
         // running on a file whose chat no longer exists).
-        main.post { AudioPlayer.stop() }
+        //
+        // Every id-keyed map is filtered by isWaId rather than cleared. These
+        // are shared by the three protocols, so clearing them outright made
+        // unlinking WhatsApp stop a Telegram voice note, cancel Signal's
+        // notifications, drop both of their presence and typing state, and
+        // strand their in-flight downloads — whose completion callback then
+        // released a claim that was already gone.
+        main.post { if (isWaId(AudioPlayer.currentChatId)) AudioPlayer.stop() }
         selfIdMemo = ""
-        activeChatId = ""
-        autoPlayKey = null
+        if (isWaId(activeChatId)) activeChatId = ""
+        autoPlayKey?.let { if (isWaId(it.substringBeforeLast('/'))) autoPlayKey = null }
+        // WhatsApp-only by construction: Tg keeps its own slots, and these are
+        // written by the Wa transport alone.
         historyInFlight = null
         seek = null
         historyAnchor.clear()
         historyExhausted.clear()
-        // the next account starts with an empty history, so no chat may still
-        // claim its search covered everything
-        appContext?.let { Prefs.clearHistoryComplete(it, null) }
         syncAllChat = null
         syncAllRounds = 0
         pendingMute.clear()
-        downloading.clear()
-        userRequestedDownloads.clear()
-        autoRetriedFailures.clear()
-        online.clear()
-        lastSeen.clear()
-        presenceSubscribed.clear()
-        lastSeenApprox.clear()
-        chatStates.clear()
+        // the next account starts with an empty history, so no WhatsApp chat may
+        // still claim its search covered everything
+        appContext?.let { Prefs.clearHistoryCompleteWhere(it) { id -> isWaId(id) } }
+        downloading.removeAll { isWaId(it.substringBeforeLast('/')) }
+        userRequestedDownloads.removeAll { isWaId(it.substringBeforeLast('/')) }
+        autoRetriedFailures.removeAll { isWaId(it.substringBeforeLast('/')) }
+        online.keys.removeAll { isWaId(it) }
+        lastSeen.keys.removeAll { isWaId(it) }
+        presenceSubscribed.keys.removeAll { isWaId(it) }
+        lastSeenApprox.keys.removeAll { isWaId(it) }
+        chatStates.keys.removeAll { isWaId(it) }
         main.post {
-            chatActors.clear()
-            for ((_, clearer) in stateClearers) main.removeCallbacks(clearer)
-            stateClearers.clear()
+            chatActors.keys.removeAll { isWaId(it) }
+            val gone = stateClearers.keys.filter { isWaId(it.substringBefore(KEY_SEP)) }
+            for (key in gone) stateClearers.remove(key)?.let { main.removeCallbacks(it) }
         }
-        appContext?.let { Notifications.cancelAllMessages(it) }
+        appContext?.let { ctx -> Notifications.cancelMessagesFor(ctx) { id -> isWaId(id) } }
         notifyChatsChanged()
     }
+
+    // WhatsApp is the protocol without a prefix, so its ids can only be named by
+    // excluding every other protocol's — the same rule Db.clearWaData uses. A
+    // new prefix has to be added there AND here, or unlinking WhatsApp throws
+    // away that protocol's live state too.
+    private fun isWaId(id: String): Boolean =
+        id.isNotEmpty() && !Tg.isTgId(id) && !Signal.isSgId(id)
 
     /**
      * A transfer finished, for a protocol whose own callback does not already do

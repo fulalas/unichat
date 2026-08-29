@@ -185,6 +185,17 @@ func SignalInit(dataDir string, listener EventListener) bool {
 		c.log(LogError, "sqlite open error "+err.Error())
 		return false
 	}
+	// Closed on every failing path from here on. The handle only becomes
+	// reachable once sgSelf is published at the end, so a failure in between
+	// leaked the connection (and its file lock) with nothing able to close it —
+	// and Kotlin's init retries on a false return, opening another one.
+	opened := false
+	defer func() {
+		if !opened {
+			_ = db.Close()
+		}
+	}()
+
 	rawDB, err := dbutil.NewWithDB(db, "sqlite3")
 	if err != nil {
 		c.log(LogError, "dbutil error "+err.Error())
@@ -203,6 +214,7 @@ func SignalInit(dataDir string, listener EventListener) bool {
 		c.log(LogError, "get devices error "+err.Error())
 		return false
 	}
+	opened = true
 	if len(devices) > 0 {
 		c.device = devices[0]
 		c.client = signalmeow.NewClient(c.device, c.logger(), c.handleEvent)
