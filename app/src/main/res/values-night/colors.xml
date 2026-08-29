@@ -23,4 +23,5 @@
     <color name="quote_flash_wa">#5C00A884</color>
     <color name="msg_selected_wa">#3300A884</color>
     <color name="online_dot">#25D366</color>
+    <color name="send_failed">#F28B82</color>
 </resources>

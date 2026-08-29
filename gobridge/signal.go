@@ -546,15 +546,17 @@ func SignalSendTextQuoted(chatId, text, styles, quotedId, quotedText, quotedSend
 		}
 	}
 	msg := signalmeow.WrapDataMessage(dm)
-
+	msgID := fmt.Sprintf("%d", timestamp)
+	// Echoed BEFORE the send: the peer can read the message and its receipt can
+	// arrive before a slow send returns, and with no row written yet there was
+	// nothing for the tick to land on. Stored with its markers, or the sender's
+	// own bubble would be the only place the formatting is missing.
+	sgEchoOwn(c, chatId, msgID, sgWithMarkers(text, ranges), "", "", int64(timestamp/1000), quotedId, quotedText)
 	if err := sgSend(c, client, chatId, msg); err != nil {
 		c.log(LogError, "send failed: "+err.Error())
+		c.listener.OnMessageSendFailed(chatId, msgID)
 		return ""
 	}
-	msgID := fmt.Sprintf("%d", timestamp)
-	// Stored with its markers, or the sender's own bubble would be the only
-	// place the formatting is missing.
-	sgEchoOwn(c, chatId, msgID, sgWithMarkers(text, ranges), "", "", int64(timestamp/1000), quotedId, quotedText)
 	return msgID
 }
 
@@ -654,6 +656,10 @@ func (c *sgConn) handleEvent(rawEvt events.SignalEvent) bool {
 		c.handleChatEvent(evt)
 	case *events.ContactList:
 		c.handleContactList(evt)
+	case *events.Receipt:
+		c.handleReceipt(evt)
+	case *events.ReadSelf:
+		c.handleReadSelf(evt)
 	case *events.QueueEmpty:
 		c.listener.OnContactsSynced()
 	case *events.LoggedOut:
@@ -695,6 +701,37 @@ func (c *sgConn) handleContactList(evt *events.ContactList) {
 		// Bare digits: the contacts table stores the number without '+', and the
 		// query that reads it adds one back.
 		c.listener.OnContact(id, name, strings.TrimPrefix(r.E164, "+"), isSelf, false, true)
+	}
+}
+
+// A receipt names the reader and the timestamps read, never the chat, so the id
+// passed on is the reader and the app has to find the row by message id. Signal
+// sends READ only when the reader has read receipts on; DELIVERY says nothing
+// about the tick.
+func (c *sgConn) handleReceipt(evt *events.Receipt) {
+	var report func(chatId string, msgId string)
+	switch evt.Content.GetType() {
+	case signalpb.ReceiptMessage_READ:
+		report = c.listener.OnMessageRead
+	case signalpb.ReceiptMessage_VIEWED:
+		report = c.listener.OnMessagePlayed
+	default:
+		return
+	}
+	reader := SgIDPrefix + evt.Sender.String()
+	for _, ts := range evt.Content.GetTimestamp() {
+		report(reader, fmt.Sprintf("%d", ts))
+	}
+}
+
+// Like a receipt, the read sync names the message's author instead of the chat.
+func (c *sgConn) handleReadSelf(evt *events.ReadSelf) {
+	for _, r := range evt.Messages {
+		aci, err := signalmeow.ParseStringOrBinaryUUID(r.GetSenderAci(), r.GetSenderAciBinary())
+		if err != nil {
+			continue
+		}
+		c.listener.OnChatReadSelf(SgIDPrefix+aci.String(), fmt.Sprintf("%d", r.GetTimestamp()))
 	}
 }
 
@@ -1251,9 +1288,20 @@ func SignalSendAttachment(
 		return ""
 	}
 
+	// Echoed before the upload, the way the WhatsApp path does it: an upload
+	// that fails offline is the common failure, and echoing after it left the
+	// user's photo nowhere at all.
+	timestamp := uint64(time.Now().UnixMilli())
+	msgID := fmt.Sprintf("%d", timestamp)
+	sgEchoOwn(c, chatId, msgID, caption, sgAttachmentKind(mime, voiceNote), "", int64(timestamp/1000), "", "")
+	// The file is already on this device, so hand the local copy straight over
+	// rather than making the bubble fetch back what we just uploaded.
+	c.listener.OnFileDownloaded(chatId, msgID, path, 2)
+
 	body, err := os.ReadFile(path)
 	if err != nil {
 		c.log(LogError, "attachment read failed: "+err.Error())
+		c.listener.OnMessageSendFailed(chatId, msgID)
 		return ""
 	}
 
@@ -1261,6 +1309,7 @@ func SignalSendAttachment(
 	ptr, err := client.UploadAttachment(ctx, body)
 	if err != nil {
 		c.log(LogError, "attachment upload failed: "+err.Error())
+		c.listener.OnMessageSendFailed(chatId, msgID)
 		return ""
 	}
 	ptr.ContentType = proto.String(mime)
@@ -1272,7 +1321,6 @@ func SignalSendAttachment(
 		ptr.Flags = &flags
 	}
 
-	timestamp := uint64(time.Now().UnixMilli())
 	dm := &signalpb.DataMessage{
 		Timestamp:   &timestamp,
 		Attachments: []*signalpb.AttachmentPointer{ptr},
@@ -1280,17 +1328,16 @@ func SignalSendAttachment(
 	if caption != "" {
 		dm.Body = proto.String(caption)
 	}
+	// Second echo, for the download reference the upload just produced: the row
+	// exists since before the upload and the upsert only fills an empty file_id.
+	sgEchoOwn(c, chatId, msgID, caption, sgAttachmentKind(mime, voiceNote), sgFileID(ptr), int64(timestamp/1000), "", "")
 	if err := sgSend(c, client, chatId, &signalpb.Content{
 		Content: &signalpb.Content_DataMessage{DataMessage: dm},
 	}); err != nil {
 		c.log(LogError, "attachment send failed: "+err.Error())
+		c.listener.OnMessageSendFailed(chatId, msgID)
 		return ""
 	}
-	msgID := fmt.Sprintf("%d", timestamp)
-	sgEchoOwn(c, chatId, msgID, caption, sgAttachmentKind(mime, voiceNote), sgFileID(ptr), int64(timestamp/1000), "", "")
-	// The file is already on this device, so hand the local copy straight over
-	// rather than making the bubble fetch back what we just uploaded.
-	c.listener.OnFileDownloaded(chatId, msgID, path, 2)
 	return msgID
 }
 
@@ -1773,16 +1820,17 @@ func SignalSendLocation(chatId string, latitude float64, longitude float64) stri
 	text := fmt.Sprintf("%s%.6f,%.6f", sgMapLinkPrefix, latitude, longitude)
 	timestamp := uint64(time.Now().UnixMilli())
 	dm := &signalpb.DataMessage{Body: proto.String(text), Timestamp: &timestamp}
-	if err := sgSend(c, client, chatId, signalmeow.WrapDataMessage(dm)); err != nil {
-		c.log(LogError, "location send failed: "+err.Error())
-		return ""
-	}
 	msgID := fmt.Sprintf("%d", timestamp)
 	c.listener.OnMessage(
 		chatId, msgID, SignalSelfID(), "", true, int64(timestamp/1000), false,
 		"location", "", latitude, longitude, false, false, "", "", "", "", false,
 	)
 	c.listener.OnChat(chatId, "", 0, false, int64(timestamp/1000))
+	if err := sgSend(c, client, chatId, signalmeow.WrapDataMessage(dm)); err != nil {
+		c.log(LogError, "location send failed: "+err.Error())
+		c.listener.OnMessageSendFailed(chatId, msgID)
+		return ""
+	}
 	return msgID
 }
 
@@ -1819,16 +1867,16 @@ func SignalSendContact(chatId string, name string, numbers string) string {
 			Number: phones,
 		}},
 	}
-	if err := sgSend(c, client, chatId, signalmeow.WrapDataMessage(dm)); err != nil {
-		c.log(LogError, "contact send failed: "+err.Error())
-		return ""
-	}
-
 	msgID := fmt.Sprintf("%d", timestamp)
 	// The app's contact rows carry "name\nnumber…" as their body, which is what
 	// its preview and the Add-contact action read back.
 	body := name + "\n" + strings.ReplaceAll(numbers, ",", "\n")
 	sgEchoOwn(c, chatId, msgID, body, "contact", "", int64(timestamp/1000), "", "")
+	if err := sgSend(c, client, chatId, signalmeow.WrapDataMessage(dm)); err != nil {
+		c.log(LogError, "contact send failed: "+err.Error())
+		c.listener.OnMessageSendFailed(chatId, msgID)
+		return ""
+	}
 	return msgID
 }
 

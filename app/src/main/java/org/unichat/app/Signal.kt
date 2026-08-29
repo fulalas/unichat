@@ -556,9 +556,28 @@ object Signal : EventListener {
 
     override fun onDownloadProgress(chatId: String, msgId: String, pct: Long) =
         Bridge.postDownloadProgress(chatId, msgId, pct.toInt())
-    override fun onMessageRead(chatId: String, msgId: String) {}
-    override fun onMessagePlayed(chatId: String, msgId: String) {}
-    override fun onChatReadSelf(chatId: String) {}
+    // chatId is the reader, not the chat: a Signal receipt names no chat, so in
+    // a group the two differ and the row has to be looked up by message id.
+    override fun onMessageRead(chatId: String, msgId: String) {
+        val target = Bridge.db.messageChat(msgId, PREFIX, fromMe = true) ?: return
+        Bridge.onMessageRead(target, msgId)
+    }
+
+    override fun onMessagePlayed(chatId: String, msgId: String) {
+        val target = Bridge.db.messageChat(msgId, PREFIX, fromMe = true) ?: return
+        Bridge.onMessagePlayed(target, msgId)
+    }
+
+    override fun onMessageSendFailed(chatId: String, msgId: String) =
+        Bridge.onMessageSendFailed(chatId, msgId)
+
+    // chatId is the message's author, which is the chat only in a 1:1. Falling
+    // back to it when the row is missing cleared the unread of the author's own
+    // 1:1 whenever the read was for a group message this device never stored.
+    override fun onChatReadSelf(chatId: String, msgId: String) {
+        val target = Bridge.db.messageChat(msgId, PREFIX, fromMe = false) ?: return
+        Bridge.onChatReadSelf(target, msgId)
+    }
     override fun onMute(chatId: String, muted: Boolean) {}
     override fun onPresence(userId: String, isOnline: Boolean, lastSeen: Long) {}
     override fun onSyncProgress(progress: Long) {}

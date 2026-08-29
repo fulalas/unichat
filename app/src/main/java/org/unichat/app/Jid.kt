@@ -60,6 +60,21 @@ class Mention(val label: String, val id: String)
 class MentionHit(val start: Int, val end: Int, val id: String)
 
 /**
+ * The mentions of a message that already went on the wire. Its body carries the
+ * bare ids, not the "@Name" the composer typed, so resending it has to read them
+ * back out — without this a retried mention reached the group as plain text and
+ * never notified the person. [known] decides which id form the digits stand for:
+ * a group mention is a @lid, a one-to-one one is a phone jid, and the digits
+ * alone cannot tell them apart.
+ */
+fun storedMentions(text: String, known: (String) -> Boolean): List<Mention> =
+    MENTION.findAll(text).map { m ->
+        val digits = m.groupValues[1]
+        val lid = "$digits@lid"
+        Mention("@$digits", if (known(lid)) lid else "$digits@s.whatsapp.net")
+    }.distinctBy { it.id }.toList()
+
+/**
  * Where the mentions are in a composed message. The composer writes the
  * member's name, not their id, so a draft that outlived the screen still
  * resolves — longest name first, on word boundaries ("mail@Bob" is an address

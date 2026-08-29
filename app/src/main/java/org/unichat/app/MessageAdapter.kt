@@ -40,6 +40,7 @@ class MessageAdapter(
     private val onMessageActions: (MessageRow) -> Unit,
     private val onReactionsClick: (MessageRow) -> Unit,
     private val onQuoteClick: (MessageRow) -> Unit,
+    private val onRetrySend: (MessageRow) -> Unit = {},
     private val onNeedLinkPreview: (String) -> Unit = {},
     private val onLinkPreviewClick: (String) -> Unit = {},
     private val onSelectionChanged: () -> Unit = {},
@@ -470,6 +471,7 @@ class MessageAdapter(
         val routeByType = View.OnClickListener {
             if (tapWhileSelecting()) return@OnClickListener
             val m = holder.current ?: return@OnClickListener
+            if (m.sendFailed) return@OnClickListener onRetrySend(m)
             when (m.msgType) {
                 "document" -> onDocumentClick(m)
                 "video" -> onVideoOpen(m)
@@ -488,10 +490,14 @@ class MessageAdapter(
         holder.itemView.setOnLongClickListener(longPress)
         holder.bubble.setOnClickListener(routeByType)
         holder.contactMessageBtn.setOnClickListener {
-            if (!tapWhileSelecting()) holder.current?.let(onContactMessage)
+            if (tapWhileSelecting()) return@setOnClickListener
+            val m = holder.current ?: return@setOnClickListener
+            if (m.sendFailed) onRetrySend(m) else onContactMessage(m)
         }
         holder.contactAddBtn.setOnClickListener {
-            if (!tapWhileSelecting()) holder.current?.let(onContactClick)
+            if (tapWhileSelecting()) return@setOnClickListener
+            val m = holder.current ?: return@setOnClickListener
+            if (m.sendFailed) onRetrySend(m) else onContactClick(m)
         }
         holder.contactMessageBtn.setOnLongClickListener(longPress)
         holder.contactAddBtn.setOnLongClickListener(longPress)
@@ -523,6 +529,7 @@ class MessageAdapter(
         holder.image.setOnClickListener {
             if (tapWhileSelecting()) return@setOnClickListener
             val m = holder.current ?: return@setOnClickListener
+            if (m.sendFailed) return@setOnClickListener onRetrySend(m)
             // a path whose file is gone opens an empty viewer: fetch instead
             if (m.filePath.isNotEmpty() && File(m.filePath).exists()) {
                 onImageClick(m)
@@ -562,12 +569,14 @@ class MessageAdapter(
         }
         holder.videoButton.setOnClickListener {
             if (tapWhileSelecting()) return@setOnClickListener
-            holder.current?.let(onDocumentClick)
+            val m = holder.current ?: return@setOnClickListener
+            if (m.sendFailed) onRetrySend(m) else onDocumentClick(m)
         }
         holder.videoButton.setOnLongClickListener(longPress)
         holder.videoRow.setOnClickListener {
             if (tapWhileSelecting()) return@setOnClickListener
-            holder.current?.let(onVideoOpen)
+            val m = holder.current ?: return@setOnClickListener
+            if (m.sendFailed) onRetrySend(m) else onVideoOpen(m)
         }
         holder.videoRow.setOnLongClickListener(longPress)
         // on the frame, not the icon: the icon is hidden while the spinner runs,
@@ -575,6 +584,7 @@ class MessageAdapter(
         holder.audioButtonFrame.setOnClickListener {
             if (tapWhileSelecting()) return@setOnClickListener
             val m = holder.current ?: return@setOnClickListener
+            if (m.sendFailed) return@setOnClickListener onRetrySend(m)
             // the stored path can be stale (a swept Telegram staging copy);
             // re-download instead of "playing" a file that is no longer there
             if (m.filePath.isNotEmpty() && java.io.File(m.filePath).exists()) {
@@ -789,7 +799,10 @@ class MessageAdapter(
         holder.imageTime.visibility = if (overlayTime) View.VISIBLE else View.GONE
         val timeView = if (overlayTime) holder.imageTime else holder.time
         timeView.text = if (msg.fromMe) {
-            Ticks.timeWithTick(ctx, timeStr, msg.isRead, timeView.textSize, tickFirst = false)
+            Ticks.timeWithTick(
+                ctx, timeStr, msg.isRead, timeView.textSize, tickFirst = false,
+                failed = msg.sendFailed,
+            )
         } else {
             timeStr
         }

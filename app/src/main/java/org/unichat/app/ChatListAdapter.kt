@@ -90,6 +90,7 @@ class ChatListAdapter(
             Ticks.timeWithTick(
                 context, time, chat.lastRead, holder.timestamp.textSize,
                 tickFirst = true, readTint = context.protocolAccent(chat.id),
+                failed = chat.lastFailed,
             )
         } else {
             time

@@ -342,6 +342,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             onMessageActions = { msg -> showMessageActions(msg) },
             onReactionsClick = { msg -> showReactionList(msg) },
             onQuoteClick = { msg -> onQuoteTapped(msg) },
+            onRetrySend = { msg -> retrySend(msg) },
             onNeedLinkPreview = { url -> requestLinkPreview(url) },
             onLinkPreviewClick = { url -> openLink(url) },
             onSelectionChanged = { onSelectionChanged() },
@@ -591,13 +592,33 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         return text.substring(0, end)
     }
 
+    private fun retrySend(msg: MessageRow) = io.execute {
+        if (Bridge.retrySend(msg)) return@execute
+        runOnUiThread {
+            Toast.makeText(this, R.string.resend_not_possible, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun reload(markRead: Boolean = false) {
         windowMode = false
         io.execute {
             val messages = Bridge.db.messages(chatId, loadLimit)
             val names = contactNames()
             val quoteNames = quoteNamesFor(messages, names)
+            // Read BEFORE the markChatRead below, which is what clears it. The
+            // last few rows are skipped: they are on screen already, and asking
+            // to centre the newest message only fights the bottom of the list.
+            val unreadJump = if (markRead) {
+                Bridge.db.firstUnread(chatId)?.id?.takeIf { id ->
+                    messages.indexOfFirst { it.id == id } !in messages.size - 3 until messages.size
+                }
+            } else {
+                null
+            }
             runOnUiThread {
+                if (unreadJump != null && !restoredScroll && pendingJumpId == null) {
+                    pendingJumpId = unreadJump
+                }
                 pendingVideoOpen?.let { id ->
                     val m = messages.find { it.id == id }
                     if (m != null && m.filePath.isNotEmpty()) {

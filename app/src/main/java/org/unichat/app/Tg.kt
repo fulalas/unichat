@@ -418,8 +418,9 @@ object Tg {
             }
             "updateMessageSendFailed" -> {
                 val msg = obj.getJSONObject("message")
-                Bridge.db.deleteMessage(idFor(msg.getLong("chat_id")), obj.getLong("old_message_id").toString())
-                Bridge.notifyChat(idFor(msg.getLong("chat_id")))
+                Bridge.onMessageSendFailed(
+                    idFor(msg.getLong("chat_id")), obj.getLong("old_message_id").toString()
+                )
                 Bridge.toastUi(R.string.send_failed)
             }
             "updateDeleteMessages" -> {

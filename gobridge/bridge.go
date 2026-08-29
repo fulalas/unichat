@@ -52,7 +52,8 @@ type EventListener interface {
 	OnDownloadProgress(chatId string, msgId string, pct int)
 	OnMessageRead(chatId string, msgId string)
 	OnMessagePlayed(chatId string, msgId string)
-	OnChatReadSelf(chatId string)
+	OnChatReadSelf(chatId string, msgId string)
+	OnMessageSendFailed(chatId string, msgId string)
 	OnMute(chatId string, muted bool)
 	OnChatState(chatId string, userId string, state string)
 	OnPresence(userId string, isOnline bool, lastSeen int64)
@@ -703,7 +704,7 @@ func sendWithEcho(c *conn, chatJid types.JID, message *waE2E.Message, what strin
 		whatsmeow.SendRequestExtra{ID: msgID})
 	if err != nil {
 		c.log(LogWarning, fmt.Sprintf("%s error %v", what, err))
-		revokeEcho(c, chatJid, msgID)
+		failEcho(c, chatJid, msgID)
 		return ""
 	}
 	echoSentMessage(c, chatJid, resp, message)
@@ -962,8 +963,10 @@ func echoLocalMedia(c *conn, chatJid types.JID, msgID string, text string, msgTy
 	}
 }
 
-func revokeEcho(c *conn, chatJid types.JID, msgID string) {
-	c.listener.OnMessageDeleted(getChatId(c.getClient(), &chatJid, nil), msgID)
+// The echo is kept and flagged rather than deleted: a send that failed used to
+// take its bubble away with it, so the message the user wrote was simply gone.
+func failEcho(c *conn, chatJid types.JID, msgID string) {
+	c.listener.OnMessageSendFailed(getChatId(c.getClient(), &chatJid, nil), msgID)
 }
 
 func buildQuoteContext(quotedId string, quotedText string, quotedSender string) *waE2E.ContextInfo {
@@ -993,7 +996,7 @@ func sendMedia(c *conn, chatId string, filePath string, echoText string, msgType
 	uploaded, err := uploadFile(c, client, msgID, filePath, mediaType)
 	if err != nil {
 		c.log(LogWarning, fmt.Sprintf("upload error %v", err))
-		revokeEcho(c, chatJid, msgID)
+		failEcho(c, chatJid, msgID)
 		return ""
 	}
 	message, ext := build(uploaded)
@@ -1001,7 +1004,7 @@ func sendMedia(c *conn, chatId string, filePath string, echoText string, msgType
 		whatsmeow.SendRequestExtra{ID: msgID})
 	if err != nil {
 		c.log(LogWarning, fmt.Sprintf("send %s error %v", msgType, err))
-		revokeEcho(c, chatJid, msgID)
+		failEcho(c, chatJid, msgID)
 		return ""
 	}
 	echoSentMessage(c, chatJid, resp, message)
@@ -2292,7 +2295,7 @@ func handleReceipt(c *conn, receipt *events.Receipt) {
 	chatId := getChatId(c.getClient(), &receipt.Chat, &receipt.Sender)
 	switch receipt.Type {
 	case events.ReceiptTypeReadSelf:
-		c.listener.OnChatReadSelf(chatId)
+		c.listener.OnChatReadSelf(chatId, "")
 	case events.ReceiptTypeRead:
 		for _, msgId := range receipt.MessageIDs {
 			c.listener.OnMessageRead(chatId, msgId)

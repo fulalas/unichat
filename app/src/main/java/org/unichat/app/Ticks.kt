@@ -9,16 +9,27 @@ import androidx.core.content.ContextCompat
 
 object Ticks {
 
+    private const val SENT = 0L
+    private const val READ = 1L
+    private const val FAILED = 2L
+
     private val cache = HashMap<Long, Drawable>()
 
-    private fun tick(context: Context, read: Boolean, h: Int, readTint: Int?): Drawable? {
-        val tint = if (read) readTint ?: context.themeColor(R.attr.chatAccent)
-        else context.getColor(R.color.text_secondary)
-        // pack tint (32b) | h (15b) | read (1b) into a Long with no overlap
-        val key = ((tint.toLong() and 0xFFFFFFFFL) shl 16) or
-            ((h.toLong() and 0x7FFF) shl 1) or (if (read) 1L else 0L)
+    private fun tick(context: Context, state: Long, h: Int, readTint: Int?): Drawable? {
+        val tint = when (state) {
+            FAILED -> context.getColor(R.color.send_failed)
+            READ -> readTint ?: context.themeColor(R.attr.chatAccent)
+            else -> context.getColor(R.color.text_secondary)
+        }
+        // pack tint (32b) | h (15b) | state (2b) into a Long with no overlap
+        val key = ((tint.toLong() and 0xFFFFFFFFL) shl 17) or
+            ((h.toLong() and 0x7FFF) shl 2) or state
         cache[key]?.let { return it }
-        val res = if (read) R.drawable.ic_check_double else R.drawable.ic_check_single
+        val res = when (state) {
+            FAILED -> R.drawable.ic_send_failed
+            READ -> R.drawable.ic_check_double
+            else -> R.drawable.ic_check_single
+        }
         val d = ContextCompat.getDrawable(context, res)?.mutate() ?: return null
         d.setTint(tint)
         val w = (h * d.intrinsicWidth.toFloat() / d.intrinsicHeight).toInt().coerceAtLeast(1)
@@ -34,9 +45,15 @@ object Ticks {
         textSizePx: Float,
         tickFirst: Boolean,
         readTint: Int? = null,
+        failed: Boolean = false,
     ): CharSequence {
         val h = (textSizePx * 0.9f).toInt().coerceAtLeast(1)
-        val d = tick(context, read, h, readTint) ?: return time
+        val state = when {
+            failed -> FAILED
+            read -> READ
+            else -> SENT
+        }
+        val d = tick(context, state, h, readTint) ?: return time
 
         val sb = SpannableStringBuilder()
         if (tickFirst) {

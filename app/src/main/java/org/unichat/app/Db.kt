@@ -14,6 +14,7 @@ data class ChatRow(
     val isGroup: Boolean,
     val lastFromMe: Boolean = false,
     val lastRead: Boolean = false,
+    val lastFailed: Boolean = false,
     val muted: Boolean = false,
     val transientState: String = "",
     val online: Boolean = false,
@@ -38,6 +39,7 @@ data class MessageRow(
     val senderName: String = "",
     val played: Boolean = false,
     val forwarded: Boolean = false,
+    val sendFailed: Boolean = false,
     val reactions: String = "", // comma-separated emojis, one per reacting user
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
@@ -118,7 +120,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
 
     private val ctx: Context = context.applicationContext
 
@@ -152,7 +154,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         private const val CREATE_TIME_INDEX =
             "CREATE INDEX IF NOT EXISTS idx_msg_time ON messages(chat_id, time_sent)"
 
-        // chatOfMessage looks a message up by id, which the (chat_id, id) primary key
+        // messageChat looks a message up by id, which the (chat_id, id) primary key
         // cannot serve — it full-scanned the largest table, on the media
         // download path (every download whose first setFileState matched 0 rows).
         // The two repair sweeps (unplayed voice notes, "[Type]" placeholders) run
@@ -230,6 +232,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
                 "quoted_type TEXT NOT NULL DEFAULT ''," +
                 "sender_name TEXT NOT NULL DEFAULT ''," +
                 "played INTEGER NOT NULL DEFAULT 0," +
+                "send_failed INTEGER NOT NULL DEFAULT 0," +
                 "forwarded INTEGER NOT NULL DEFAULT 0," +
                 "latitude REAL NOT NULL DEFAULT 0, longitude REAL NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(chat_id, id))"
@@ -283,6 +286,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
             // ordinary client, which several sites answer with a bot check
             // instead of their metadata (see LinkPreview.USER_AGENT).
             db.execSQL("DELETE FROM link_previews")
+        }
+        if (oldVersion < 29) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN send_failed INTEGER NOT NULL DEFAULT 0")
         }
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE messages ADD COLUMN msg_type TEXT NOT NULL DEFAULT ''")
@@ -654,7 +660,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
 
     fun setPlayed(chatId: String, msgId: String) {
         writableDatabase.execSQL(
-            "UPDATE messages SET played=1 WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+            "UPDATE messages SET played=1, send_failed=0 WHERE chat_id=? AND id=?",
+            arrayOf(chatId, msgId)
         )
     }
 
@@ -756,9 +763,24 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         )
     }
 
+    // Telegram ids repeat across chats, so a lookup by id alone can never answer
+    // with one. Signal's are send timestamps: without prefix and fromMe, a
+    // receipt for a message we sent can land on an incoming one that happens to
+    // share the millisecond.
+    fun messageChat(msgId: String, prefix: String = "", fromMe: Boolean? = null): String? = queryFirst(
+        "SELECT chat_id FROM messages WHERE id=? AND chat_id NOT LIKE 'tg:%' AND chat_id LIKE ?" +
+            (fromMe?.let { " AND from_me=${if (it) 1 else 0}" } ?: "") + " LIMIT 1",
+        arrayOf(msgId, "$prefix%")
+    ) { it.getString(0) }
+
+    // send_failed is cleared here: a transport error is not proof the message
+    // never left (an ack that times out still delivers), and a receipt from the
+    // other side settles it. Left set, the message they had already read kept
+    // the red marker for good, and tapping it sent them a second copy.
     fun markMessageRead(chatId: String, msgId: String) {
         writableDatabase.execSQL(
-            "UPDATE messages SET is_read=1 WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+            "UPDATE messages SET is_read=1, send_failed=0 WHERE chat_id=? AND id=?",
+            arrayOf(chatId, msgId)
         )
     }
 
@@ -768,6 +790,21 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
             arrayOf(chatId)
         )
     }
+
+    // A read sync from another device names how far THAT device had read. Marking
+    // the whole chat instead swallowed everything that arrived here in between.
+    fun markChatReadUpTo(chatId: String, msgId: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET is_read=1 WHERE chat_id=? AND from_me=0 AND is_read=0 " +
+                "AND time_sent<=(SELECT time_sent FROM messages WHERE chat_id=? AND id=?)",
+            arrayOf(chatId, chatId, msgId)
+        )
+    }
+
+    fun hasOwnMessageSince(chatId: String, since: Long, exceptId: String): Boolean = queryFirst(
+        "SELECT 1 FROM messages WHERE chat_id=? AND from_me=1 AND time_sent>=? AND id!=? LIMIT 1",
+        arrayOf(chatId, since.toString(), exceptId)
+    ) { true } ?: false
 
     private fun oneMessage(chatId: String, where: String, order: String): MessageRow? = queryFirst(
         "SELECT id, sender_id, text, from_me, time_sent, is_read FROM messages " +
@@ -796,6 +833,15 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
     fun latestUnread(chatId: String): MessageRow? =
         oneMessage(chatId, "from_me=0 AND is_read=0", "time_sent DESC")
 
+    fun firstUnread(chatId: String): MessageRow? =
+        oneMessage(chatId, "from_me=0 AND is_read=0 AND time_sent>0", "time_sent ASC, rowid ASC")
+
+    fun setSendFailed(chatId: String, msgId: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET send_failed=1 WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+        )
+    }
+
     fun chats(): List<ChatRow> = namePreviewMentions(queryList(
         // The newest message is resolved ONCE, by rowid, and joined — four
         // separate correlated subqueries used to re-find the same row for its
@@ -823,6 +869,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
                 "THEN 1 ELSE 0 END AS is_group," +
             "COALESCE(lm.from_me,0) AS last_from_me," +
             "COALESCE(lm.is_read,0) AS last_read," +
+            "COALESCE(lm.send_failed,0) AS last_failed," +
             "c.muted " +
             "FROM chats c LEFT JOIN contacts ct ON ct.id=c.id " +
             "LEFT JOIN messages lm ON lm.rowid=(" +
@@ -844,7 +891,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
             lastTime = it.getLong(5), unread = it.getInt(6), isGroup = it.getInt(7) != 0,
             lastFromMe = it.getInt(8) != 0 && it.getString(4).isNullOrEmpty(),
             lastRead = it.getInt(9) != 0,
-            muted = it.getInt(10) != 0
+            lastFailed = it.getInt(10) != 0,
+            muted = it.getInt(11) != 0
         )
     })
 
@@ -863,7 +911,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
     private fun messageColumns(src: String) =
         "SELECT id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, " +
             "file_status, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
-            "latitude, longitude," +
+            "latitude, longitude, send_failed," +
             "(SELECT GROUP_CONCAT(emoji) FROM reactions r " +
             "WHERE r.chat_id=$src.chat_id AND r.msg_id=$src.id) AS reactions "
 
@@ -878,7 +926,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
         senderName = it.getString(13), played = it.getInt(14) != 0,
         forwarded = it.getInt(15) != 0, quotedType = it.getString(16),
         latitude = it.getDouble(17), longitude = it.getDouble(18),
-        reactions = it.getString(19) ?: ""
+        sendFailed = it.getInt(19) != 0,
+        reactions = it.getString(20) ?: ""
     )
 
     fun messagesByIds(chatId: String, ids: Collection<String>): List<MessageRow> {
@@ -1003,11 +1052,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 28) {
      * message of every Telegram chat shares the same id), so 'tg:' chats are
      * excluded rather than matched arbitrarily by LIMIT 1.
      */
-    fun chatOfMessage(msgId: String): String? = queryFirst(
-        "SELECT chat_id FROM messages WHERE id=? AND chat_id NOT LIKE 'tg:%' LIMIT 1",
-        arrayOf(msgId)
-    ) { it.getString(0) }
-
     fun hasMessage(chatId: String, msgId: String): Boolean = queryFirst(
         "SELECT 1 FROM messages WHERE chat_id=? AND id=? LIMIT 1", arrayOf(chatId, msgId)
     ) { true } ?: false

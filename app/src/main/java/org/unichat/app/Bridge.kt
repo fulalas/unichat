@@ -837,10 +837,13 @@ object Bridge : EventListener {
         kind: String, chatId: String, filePath: String, send: (Protocol) -> Boolean,
     ) {
         val p = proto(chatId)
-        if (!send(p)) onSendFailed(kind, chatId)
+        val ok = send(p)
+        if (!ok) onSendFailed(kind, chatId)
         // Only ever inside cacheDir — forwards re-send straight from the
-        // permanent media dir, which must survive.
-        if (p.consumesStagingInput && isStagingPath(filePath)) java.io.File(filePath).delete()
+        // permanent media dir, which must survive. Kept when the send failed:
+        // the row now stays on screen as retryable, and deleting the file under
+        // it left a bubble that could never be sent again.
+        if (ok && p.consumesStagingInput && isStagingPath(filePath)) java.io.File(filePath).delete()
     }
 
     fun sendAudio(
@@ -919,6 +922,59 @@ object Bridge : EventListener {
 
     // A failed media send is otherwise invisible outside logcat (the share
     // flow has already finished by the time the upload runs); surface it.
+    /**
+     * Sends a message whose send failed again, as a new message: a protocol keys
+     * a message by the timestamp it stamps on it, so a retry can never reuse the
+     * old row. Answers false for what the row cannot rebuild — media whose local
+     * file is gone, or a contact card with no number left in its body.
+     */
+    fun retrySend(msg: MessageRow): Boolean {
+        val card = msg.text.lines().filter { it.isNotBlank() }
+        if (msg.msgType in NEEDS_LOCAL_FILE && !fileOnDisk(msg)) return false
+        // Filtered, not raw: a body of blank lines passed a raw size check and
+        // then threw on first() inside the executor, killing the process.
+        if (msg.msgType == "contact" && card.size < 2) return false
+        // Two taps land on the same adapter row before it is refreshed, and the
+        // second cannot see the first: without this the peer got it twice.
+        if (!retrying.add(msg.chatId + KEY_SEP + msg.id)) return true
+        batchExecutor.execute {
+            try {
+                // A second tap reaches here while the first one's refresh is
+                // still in flight; the row being gone is what says it is done.
+                if (!db.hasMessage(msg.chatId, msg.id)) return@execute
+                val since = System.currentTimeMillis() / 1000
+                val ok = if (msg.msgType == "contact") {
+                    proto(msg.chatId).sendContact(msg.chatId, card.first(), card.drop(1))
+                } else {
+                    // The same dispatch a forward uses, so a retried sticker,
+                    // voice note or document keeps its type, duration and name.
+                    val quoted = msg.quotedId.takeIf { it.isNotEmpty() }
+                        ?.let { db.messagesByIds(msg.chatId, listOf(it)).firstOrNull() }
+                    val mentions = storedMentions(msg.text) { db.contactName(it) != null }
+                    forwardOneBlocking(msg.chatId, msg, quoted, mentions)
+                }
+                // The old row goes only once something has replaced it. Deleted
+                // up front, a retry that failed before its transport wrote an
+                // echo (an offline upload, an unlinked account) took the user's
+                // message with it and left nothing but a toast.
+                if (ok || db.hasOwnMessageSince(msg.chatId, since, msg.id)) {
+                    db.deleteMessage(msg.chatId, msg.id)
+                }
+                if (ok && proto(msg.chatId).consumesStagingInput && isStagingPath(msg.filePath)) {
+                    java.io.File(msg.filePath).delete()
+                }
+                notifyChat(msg.chatId)
+            } finally {
+                retrying.remove(msg.chatId + KEY_SEP + msg.id)
+            }
+        }
+        return true
+    }
+
+    private val retrying = ConcurrentHashMap.newKeySet<String>()
+
+    private val NEEDS_LOCAL_FILE = setOf("image", "video", "audio", "document", "sticker")
+
     private fun onSendFailed(kind: String, chatId: String) {
         Log.w(TAG, "$kind send failed for chat $chatId")
         toastUi(R.string.send_failed)
@@ -937,7 +993,8 @@ object Bridge : EventListener {
     // document the user had sent permanently unforwardable, unshareable and
     // unsaveable.
     fun isSendInFlight(msg: MessageRow): Boolean =
-        msg.fromMe && proto(msg.chatId).consumesStagingInput && isStagingPath(msg.filePath)
+        msg.fromMe && !msg.sendFailed &&
+            proto(msg.chatId).consumesStagingInput && isStagingPath(msg.filePath)
 
     fun fileOnDisk(msg: MessageRow): Boolean =
         msg.filePath.isNotEmpty() && java.io.File(msg.filePath).exists()
@@ -991,30 +1048,34 @@ object Bridge : EventListener {
     ) = batchExecutor.execute {
         var sent = false
         for (target in targetChatIds) {
-            for (m in messages) if (forwardOneBlocking(target, m)) sent = true
+            for (m in messages) if (forwardOneBlocking(target, m, null)) sent = true
         }
         main.post { onDone(sent) }
     }
 
-    private fun forwardOneBlocking(target: String, m: MessageRow): Boolean {
+    // Mentions are only ever passed by a retry: a forward carries the source
+    // group's ids, which mean nothing (or someone else) in the target chat.
+    private fun forwardOneBlocking(
+        target: String, m: MessageRow, quoted: MessageRow?, mentions: List<Mention> = emptyList(),
+    ): Boolean {
         // cross-protocol forwards work because every send re-uploads the local
         // file, so a Telegram target takes the same paths a WhatsApp one does.
         // The mapping used to be spelled out once per protocol.
         val p = proto(target)
         val ok = when (m.msgType) {
-            "image", "sticker" -> p.sendImage(target, m.filePath, m.text, null, false)
-            "video" -> p.sendVideo(target, m.filePath, m.text, null, false)
+            "image", "sticker" -> p.sendImage(target, m.filePath, m.text, quoted, false)
+            "video" -> p.sendVideo(target, m.filePath, m.text, quoted, false)
             "audio" ->
                 p.sendAudio(
-                    target, m.filePath, TimeFormat.parseSeconds(m.text), null, ByteArray(0), false
+                    target, m.filePath, TimeFormat.parseSeconds(m.text), quoted, ByteArray(0), false
                 )
             // the stored text IS the document's file name; its MIME type is
             // recovered from the extension rather than sent empty (which the
             // bridge downgrades to application/octet-stream, leaving the
             // recipient a generic unopenable attachment)
-            "document" -> p.sendDocument(target, m.filePath, m.text, mimeOfPath(m.filePath), null)
+            "document" -> p.sendDocument(target, m.filePath, m.text, mimeOfPath(m.filePath), quoted)
             "location" -> p.sendLocation(target, m.latitude, m.longitude)
-            else -> p.sendText(target, m.text, null, emptyList())
+            else -> p.sendText(target, m.text, quoted, mentions)
         }
         if (!ok) onSendFailed(m.msgType.ifEmpty { "text" }, target)
         return ok
@@ -2063,7 +2124,7 @@ object Bridge : EventListener {
             // by message id before concluding the file is orphaned: deleting it
             // here threw away perfectly good media and left the migrated row
             // stuck at file_status=1 (a permanent spinner nothing retries).
-            db.chatOfMessage(msgId)?.let { moved ->
+            db.messageChat(msgId)?.let { moved ->
                 target = moved
                 updated = db.setFileState(moved, msgId, filePath, status.toInt())
             }
@@ -2107,10 +2168,20 @@ object Bridge : EventListener {
         notifyChatRow(chatId, msgId)
     }
 
-    override fun onChatReadSelf(chatId: String) {
+    override fun onMessageSendFailed(chatId: String, msgId: String) {
         if (wiping) return
-        db.markChatRead(chatId)
-        appContext?.let { ctx -> notifyExecutor.execute { Notifications.cancel(ctx, chatId) } }
+        db.setSendFailed(chatId, msgId)
+        notifyChatRow(chatId, msgId)
+    }
+
+    override fun onChatReadSelf(chatId: String, msgId: String) {
+        if (wiping) return
+        // WhatsApp reports the chat only; Signal names the message read, and
+        // anything newer that landed here since must stay unread.
+        if (msgId.isEmpty()) db.markChatRead(chatId) else db.markChatReadUpTo(chatId, msgId)
+        if (db.latestUnread(chatId) == null) {
+            appContext?.let { ctx -> notifyExecutor.execute { Notifications.cancel(ctx, chatId) } }
+        }
         notifyChat(chatId)
     }
 
