@@ -113,7 +113,9 @@ class ShareActivity : BaseActivity() {
                         if (!isFinishing) {
                             Toast.makeText(
                                 this,
-                                getString(R.string.share_partial, staged, attempted),
+                                resources.getQuantityString(
+                                    R.plurals.share_partial, attempted, staged, attempted,
+                                ),
                                 Toast.LENGTH_LONG
                             ).show()
                         }

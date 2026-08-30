@@ -28,7 +28,10 @@ class PrivacyActivity : BaseActivity() {
         applyProtocolTheme(proto)
         setContentView(R.layout.activity_privacy)
         supportActionBar?.apply {
-            title = getString(R.string.privacy) + " — " + account.label(this@PrivacyActivity)
+            title = getString(
+                R.string.title_with_account,
+                getString(R.string.privacy), account.label(this@PrivacyActivity),
+            )
             setDisplayHomeAsUpEnabled(true)
         }
         if (!Bridge.init(this)) { finish(); return }

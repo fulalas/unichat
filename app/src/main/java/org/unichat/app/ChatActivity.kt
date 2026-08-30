@@ -1550,8 +1550,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         updateSubtitle()
         val text = when {
             !success -> getString(R.string.export_failed)
-            complete -> getString(R.string.export_done, messages)
-            else -> getString(R.string.export_partial, messages)
+            complete -> resources.getQuantityString(R.plurals.export_done, messages, messages)
+            else -> resources.getQuantityString(R.plurals.export_partial, messages, messages)
         }
         Toast.makeText(this, text, Toast.LENGTH_LONG).show()
     }
@@ -1576,7 +1576,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val transient =
             exportCount >= 0 || syncPct >= 0 || seeking || state == "typing" || state == "recording"
         val subtitle = when {
-            exportCount >= 0 -> getString(R.string.export_progress, exportCount)
+            exportCount >= 0 ->
+                resources.getQuantityString(R.plurals.export_progress, exportCount, exportCount)
             syncPct >= 0 -> getString(R.string.state_syncing, syncPct)
             seeking -> getString(R.string.syncing_message)
             state == "typing" -> activityLine(getString(R.string.typing))
@@ -1863,7 +1864,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     // a partial staging failure was invisible: the user saw
                     // nothing and never learned some files were left behind
                     sent < sendable.size -> Toast.makeText(
-                        this, getString(R.string.attach_partial, sent, sendable.size),
+                        this,
+                        resources.getQuantityString(
+                            R.plurals.attach_partial, sendable.size, sent, sendable.size,
+                        ),
                         Toast.LENGTH_LONG
                     ).show()
                 }

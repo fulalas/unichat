@@ -56,8 +56,14 @@ android {
         applicationId "org.unichat.app"
         minSdk 29
         targetSdk 35
-        versionCode 227
-        versionName "0.48.14"
+        versionCode 228
+        versionName "0.49.0"
+        // Without this, appcompat/material drag in ~70 locales UniChat has no
+        // strings for, so an unlisted system language showed translated stock
+        // dialog buttons next to an untranslated app.
+        resourceConfigurations += [
+            'en', 'pt-rBR', 'es', 'ru', 'de', 'it', 'fr', 'uk', 'tr', 'pl', 'nl', 'zh-rCN',
+        ]
         ndk {
             // arm64 only: the three-ABI APK carried ~50 MB of native libraries no
             // real device could ever load. Must stay in step with build.sh's

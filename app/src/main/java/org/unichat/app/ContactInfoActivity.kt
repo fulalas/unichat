@@ -64,7 +64,8 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
 
     private fun showMembers(members: List<Bridge.Member>) {
         val header = findViewById<TextView>(R.id.membersHeader)
-        header.text = getString(R.string.members_count, members.size)
+        header.text =
+            resources.getQuantityString(R.plurals.members_count, members.size, members.size)
         header.visibility = View.VISIBLE
         val list = findViewById<android.view.ViewGroup>(R.id.membersList)
         list.removeAllViews()

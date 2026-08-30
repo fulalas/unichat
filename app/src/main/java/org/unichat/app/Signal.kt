@@ -187,7 +187,9 @@ object Signal : EventListener {
             "manifest_locked" -> ctx.getString(R.string.signal_err_manifest_locked)
             "store_failed" -> ctx.getString(R.string.signal_err_store_failed)
             "no_backup" -> ctx.getString(R.string.signal_err_no_backup)
-            "wrong_pin" -> ctx.getString(R.string.signal_err_wrong_pin, arg)
+            "wrong_pin" -> arg.toIntOrNull()?.let {
+                ctx.resources.getQuantityString(R.plurals.signal_err_wrong_pin, it, it)
+            } ?: ctx.getString(R.string.signal_err_wrong_pin_unknown)
             "upstream" -> arg
             else -> code
         }

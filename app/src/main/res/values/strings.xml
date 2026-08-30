@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">UniChat</string>
-    <string name="whatsapp">WhatsApp</string>
-    <string name="telegram">Telegram</string>
-    <string name="signal">Signal</string>
+    <string name="app_name" translatable="false">UniChat</string>
+    <string name="whatsapp" translatable="false">WhatsApp</string>
+    <string name="telegram" translatable="false">Telegram</string>
+    <string name="signal" translatable="false">Signal</string>
     <string name="manage_accounts">Manage accounts</string>
     <string name="account_not_linked">Not linked</string>
     <string name="account_link">Link</string>
@@ -61,10 +61,11 @@
     <string name="signal_err_manifest_locked">The key came back but the contact list could not be opened.</string>
     <string name="signal_err_store_failed">Could not save the recovered key.</string>
     <string name="signal_err_no_backup">This account has no PIN backup.</string>
-    <string name="signal_err_wrong_pin">Wrong PIN. %1$s tries left.</string>
+    <string name="signal_err_wrong_pin_unknown">Wrong PIN.</string>
     <string name="privacy_sg_discoverable">Find me by my number</string>
     <string name="choose_account">Which account?</string>
     <string name="export_file_name">%1$s chat - %2$s.txt</string>
+    <string name="export_edited">&lt;edited&gt;</string>
     <string name="avatar_desc">Profile picture</string>
     <string name="record_voice">Record voice message</string>
     <string name="cancel_recording">Cancel recording</string>
@@ -84,7 +85,7 @@
     <string name="tg_err_code_invalid">Wrong code.</string>
     <string name="tg_err_code_expired">That code expired. Ask for a new one.</string>
     <string name="tg_err_password_invalid">Wrong password.</string>
-    <string name="tg_err_flood">Too many tries. Wait %1$s seconds.</string>
+    <string name="tg_err_flood_unknown">Too many tries. Try again later.</string>
     <string name="open_chats">Open chats</string>
     <string name="link_other_hint">%1$s linked! You can link %2$s too, or open your chats.</string>
     <string name="login_title">Link with WhatsApp</string>
@@ -113,7 +114,7 @@
     <string name="search_messages">Search messages</string>
     <string name="search_previous_match">Previous match</string>
     <string name="search_next_match">Next match</string>
-    <string name="no_results">0/0</string>
+    <string name="no_results" translatable="false">0/0</string>
     <string name="searching">Searching…</string>
     <string name="checking_number">Checking the number…</string>
     <string name="number_check_failed">Could not check the number</string>
@@ -144,7 +145,6 @@
     <string name="pause">Pause</string>
     <string name="next">Next</string>
     <string name="copy">Copy</string>
-    <string name="members_count">%1$d members</string>
     <string name="reactions">Reactions</string>
     <string name="reactions_unavailable">Cannot see who reacted here</string>
     <string name="unknown_sender">Unknown</string>
@@ -165,6 +165,7 @@
     <string name="you">You</string>
     <string name="you_proto">You (%1$s)</string>
     <string name="edited">Edited</string>
+    <string name="edited_time">%1$s %2$s</string>
     <string name="reply">Reply</string>
     <string name="edit">Edit</string>
     <string name="delete">Delete</string>
@@ -188,10 +189,11 @@
     <string name="call_label">Call</string>
     <string name="sticker_with_emoji">%1$s (sticker)</string>
     <string name="download">Download</string>
-    <string name="unread_overflow">99+</string>
+    <string name="unread_overflow" translatable="false">99+</string>
     <string name="go_to_message">Go to message</string>
     <string name="forwarded">↪ Forwarded</string>
     <string name="download_failed">Download failed</string>
+    <string name="downloading_pct">Downloading… %1$d%%</string>
     <string name="image_show_failed">Could not display this picture</string>
     <string name="react">React</string>
     <string name="reacted_to">%1$s reacted %2$s to \"%3$s\"</string>
@@ -239,6 +241,7 @@
     <string name="share_sending">Sending…</string>
     <string name="chat_menu">Chat menu</string>
     <string name="profile">Profile</string>
+    <string name="title_with_account">%1$s — %2$s</string>
     <string name="profile_name">Name</string>
     <string name="profile_about">About</string>
     <string name="profile_phone">Phone</string>
@@ -266,15 +269,10 @@
     <string name="sync_all">Sync all messages</string>
     <string name="history_busy">Another sync or export is still running</string>
     <string name="export_chat">Export chat</string>
-    <string name="export_progress">Exporting… %1$d messages fetched</string>
-    <string name="export_done">Chat exported (%1$d messages)</string>
-    <string name="export_partial">Couldn\'t fetch older history — exported %1$d messages</string>
     <string name="export_failed">Export failed</string>
     <string name="sync_done">Chat fully synced</string>
     <string name="sync_failed">Sync failed — check your connection</string>
     <string name="share_failed">Could not read the shared file</string>
-    <string name="share_partial">Sending to %1$d of %2$d chats — the rest couldn\'t be prepared</string>
-    <string name="attach_partial">Sending %1$d of %2$d files — the rest couldn\'t be read</string>
     <string name="send_failed">Send failed</string>
     <string name="resend_not_possible">This message can\'t be sent again</string>
     <string name="service_notification">Connected</string>
@@ -285,4 +283,37 @@
     <string name="yesterday_lc">yesterday</string>
     <string name="today_lc">today</string>
     <string name="day_at_time">%1$s at %2$s</string>
+
+    <plurals name="members_count">
+        <item quantity="one">%1$d member</item>
+        <item quantity="other">%1$d members</item>
+    </plurals>
+    <plurals name="export_progress">
+        <item quantity="one">Exporting… %1$d message fetched</item>
+        <item quantity="other">Exporting… %1$d messages fetched</item>
+    </plurals>
+    <plurals name="export_done">
+        <item quantity="one">Chat exported (%1$d message)</item>
+        <item quantity="other">Chat exported (%1$d messages)</item>
+    </plurals>
+    <plurals name="export_partial">
+        <item quantity="one">Couldn\'t fetch older history — exported %1$d message</item>
+        <item quantity="other">Couldn\'t fetch older history — exported %1$d messages</item>
+    </plurals>
+    <plurals name="share_partial">
+        <item quantity="one">Sending to %1$d of %2$d chat — the rest couldn\'t be prepared</item>
+        <item quantity="other">Sending to %1$d of %2$d chats — the rest couldn\'t be prepared</item>
+    </plurals>
+    <plurals name="attach_partial">
+        <item quantity="one">Sending %1$d of %2$d file — the rest couldn\'t be read</item>
+        <item quantity="other">Sending %1$d of %2$d files — the rest couldn\'t be read</item>
+    </plurals>
+    <plurals name="signal_err_wrong_pin">
+        <item quantity="one">Wrong PIN. %1$d try left.</item>
+        <item quantity="other">Wrong PIN. %1$d tries left.</item>
+    </plurals>
+    <plurals name="tg_err_flood">
+        <item quantity="one">Too many tries. Wait %1$d second.</item>
+        <item quantity="other">Too many tries. Wait %1$d seconds.</item>
+    </plurals>
 </resources>

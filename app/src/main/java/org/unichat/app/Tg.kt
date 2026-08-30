@@ -296,7 +296,9 @@ object Tg {
         message.startsWith("PASSWORD_HASH_INVALID") -> ctx.getString(R.string.tg_err_password_invalid)
         // FLOOD_WAIT_<seconds>: the wait is the only part worth reading.
         message.startsWith("FLOOD_WAIT_") ->
-            ctx.getString(R.string.tg_err_flood, message.removePrefix("FLOOD_WAIT_"))
+            message.removePrefix("FLOOD_WAIT_").toIntOrNull()?.let {
+                ctx.resources.getQuantityString(R.plurals.tg_err_flood, it, it)
+            } ?: ctx.getString(R.string.tg_err_flood_unknown)
         else -> ctx.getString(R.string.tg_auth_failed_detail, message)
     }
 

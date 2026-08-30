@@ -23,6 +23,7 @@
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.UniChat"
         android:allowBackup="false"
+        android:localeConfig="@xml/locales_config"
         android:supportsRtl="true">
 
 <!-- Rotation must never reset anything (an in-progress voice recording, a

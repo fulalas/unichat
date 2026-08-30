@@ -678,7 +678,8 @@ class MessageAdapter(
         msg.filePath.isNotEmpty() -> ""
         isDownloading(msg) -> {
             val pct = downloadPct[msg.id]
-            " — " + ctx.getString(R.string.downloading) + if (pct == null) "" else " $pct%"
+            " — " + if (pct == null) ctx.getString(R.string.downloading)
+            else ctx.getString(R.string.downloading_pct, pct)
         }
         msg.fileStatus == 3 -> " — " + ctx.getString(R.string.download_failed)
         else -> ""
@@ -780,8 +781,9 @@ class MessageAdapter(
             holder.dateHeader.visibility = View.GONE
         }
 
-        val editedPrefix = if (msg.edited) ctx.getString(R.string.edited) + " " else ""
-        val timeStr = editedPrefix + TimeFormat.clock(msg.timeSent)
+        val clock = TimeFormat.clock(msg.timeSent)
+        val timeStr = if (msg.edited)
+            ctx.getString(R.string.edited_time, ctx.getString(R.string.edited), clock) else clock
         val sticker = msg.msgType == "sticker"
         val overlayTime = msg.msgType == "image" && msg.text.isEmpty()
         val bareSticker = sticker && msg.text.isEmpty() &&

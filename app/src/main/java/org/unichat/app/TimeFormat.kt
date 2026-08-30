@@ -22,7 +22,14 @@ object TimeFormat {
     private var zoneId: String = TimeZone.getDefault().id
     private var timeFmt = SimpleDateFormat("h:mm a", locale)
     private var dayFmt = SimpleDateFormat("EEE", locale)
-    private var dateFmt = SimpleDateFormat("dd/MM/yyyy", locale)
+    private var dateFmt = localised("ddMMyyyy", locale)
+
+    // Field order is per-language (dd/MM/yyyy here, MM/dd/yyyy in en-US, yyyy.MM.dd
+    // in zh), so the skeleton has to be resolved against the locale instead of
+    // hardcoding one pattern.
+    private fun localised(skeleton: String, loc: Locale) = SimpleDateFormat(
+        android.text.format.DateFormat.getBestDateTimePattern(loc, skeleton), loc
+    )
 
     fun refreshClockFormat(context: Context) {
         val h24 = android.text.format.DateFormat.is24HourFormat(context)
@@ -34,9 +41,9 @@ object TimeFormat {
             locale = loc
             zoneId = zone
             dayFmt = SimpleDateFormat("EEE", loc)
-            dateFmt = SimpleDateFormat("dd/MM/yyyy", loc)
-            sepFmt = SimpleDateFormat("MMMM d", loc)
-            sepYearFmt = SimpleDateFormat("MMMM d, yyyy", loc)
+            dateFmt = localised("ddMMyyyy", loc)
+            sepFmt = localised("MMMMd", loc)
+            sepYearFmt = localised("MMMMdyyyy", loc)
             calA = Calendar.getInstance()
             calB = Calendar.getInstance()
         }
@@ -96,8 +103,8 @@ object TimeFormat {
         return context.getString(R.string.day_at_time, day, time)
     }
 
-    private var sepFmt = SimpleDateFormat("MMMM d", locale)
-    private var sepYearFmt = SimpleDateFormat("MMMM d, yyyy", locale)
+    private var sepFmt = localised("MMMMd", locale)
+    private var sepYearFmt = localised("MMMMdyyyy", locale)
 
     fun dateSeparator(context: Context, epochSeconds: Long): String {
         if (epochSeconds <= 0) return ""
