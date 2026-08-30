@@ -277,6 +277,9 @@
     <string name="yesterday_lc">вчера</string>
     <string name="today_lc">сегодня</string>
     <string name="day_at_time">%1$s в %2$s</string>
+    <string name="channel_messages">Сообщения</string>
+    <string name="channel_connection">Соединение</string>
+    <string name="channel_voice_playback">Воспроизведение голоса</string>
 
     <plurals name="members_count">
         <item quantity="one">%1$d участник</item>

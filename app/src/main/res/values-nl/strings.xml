@@ -277,6 +277,9 @@
     <string name="yesterday_lc">gisteren</string>
     <string name="today_lc">vandaag</string>
     <string name="day_at_time">%1$s om %2$s</string>
+    <string name="channel_messages">Berichten</string>
+    <string name="channel_connection">Verbinding</string>
+    <string name="channel_voice_playback">Spraakweergave</string>
 
     <plurals name="members_count">
         <item quantity="one">%1$d lid</item>

@@ -277,10 +277,13 @@
     <string name="yesterday_lc">wczoraj</string>
     <string name="today_lc">dzisiaj</string>
     <string name="day_at_time">%1$s o %2$s</string>
+    <string name="channel_messages">Wiadomości</string>
+    <string name="channel_connection">Połączenie</string>
+    <string name="channel_voice_playback">Odtwarzanie głosu</string>
 
     <plurals name="members_count">
         <item quantity="one">%1$d członek</item>
-        <item quantity="few">%1$d członków</item>
+        <item quantity="few">%1$d członkowie</item>
         <item quantity="many">%1$d członków</item>
         <item quantity="other">%1$d członka</item>
     </plurals>

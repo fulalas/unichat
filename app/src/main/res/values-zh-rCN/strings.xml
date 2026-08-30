@@ -277,6 +277,9 @@
     <string name="yesterday_lc">昨天</string>
     <string name="today_lc">今天</string>
     <string name="day_at_time">%1$s %2$s</string>
+    <string name="channel_messages">消息</string>
+    <string name="channel_connection">连接</string>
+    <string name="channel_voice_playback">语音播放</string>
 
     <plurals name="members_count">
         <item quantity="other">%1$d 名成员</item>

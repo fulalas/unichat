@@ -20,7 +20,7 @@ object TimeFormat {
     private var use24h: Boolean? = null
     private var locale: Locale = Locale.getDefault()
     private var zoneId: String = TimeZone.getDefault().id
-    private var timeFmt = SimpleDateFormat("h:mm a", locale)
+    private var timeFmt = localised("hm", locale)
     private var dayFmt = SimpleDateFormat("EEE", locale)
     private var dateFmt = localised("ddMMyyyy", locale)
 
@@ -47,7 +47,10 @@ object TimeFormat {
             calA = Calendar.getInstance()
             calB = Calendar.getInstance()
         }
-        timeFmt = SimpleDateFormat(if (h24) "HH:mm" else "h:mm a", loc)
+        // The day period sits before the clock in some languages (zh renders
+        // 上午9:30, not 9:30 上午), so the 12h form has to come from the locale
+        // too, not from a fixed "h:mm a".
+        timeFmt = localised(if (h24) "Hm" else "hm", loc)
     }
 
     private var calA = Calendar.getInstance()

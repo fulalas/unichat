@@ -26,9 +26,21 @@ object Notifications {
 
     fun ensureChannel(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        if (manager.getNotificationChannel(CHANNEL_MESSAGES) != null) return
+        val name = context.getString(R.string.channel_messages)
+        // Android stores the channel name at creation, so it stayed in whatever
+        // language the app first ran in after a per-app language change; only
+        // the name is re-set, since re-creating would not restore importance or
+        // vibration the user had changed anyway.
+        val existing = manager.getNotificationChannel(CHANNEL_MESSAGES)
+        if (existing != null) {
+            if (existing.name != name) {
+                existing.name = name
+                manager.createNotificationChannel(existing)
+            }
+            return
+        }
         val channel = NotificationChannel(
-            CHANNEL_MESSAGES, "Messages", NotificationManager.IMPORTANCE_HIGH
+            CHANNEL_MESSAGES, name, NotificationManager.IMPORTANCE_HIGH
         )
         channel.enableVibration(true)
         manager.createNotificationChannel(channel)

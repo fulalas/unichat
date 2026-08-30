@@ -49,10 +49,16 @@ class WmService : Service() {
         super.onCreate()
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_CONN, "Connection", NotificationManager.IMPORTANCE_MIN)
+            NotificationChannel(
+                CHANNEL_CONN, getString(R.string.channel_connection),
+                NotificationManager.IMPORTANCE_MIN,
+            )
         )
         manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_MEDIA, "Voice playback", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(
+                CHANNEL_MEDIA, getString(R.string.channel_voice_playback),
+                NotificationManager.IMPORTANCE_LOW,
+            )
         )
 
         sensorManager = getSystemService(SensorManager::class.java)

@@ -277,6 +277,9 @@
     <string name="yesterday_lc">ontem</string>
     <string name="today_lc">hoje</string>
     <string name="day_at_time">%1$s às %2$s</string>
+    <string name="channel_messages">Mensagens</string>
+    <string name="channel_connection">Conexão</string>
+    <string name="channel_voice_playback">Reprodução de voz</string>
 
     <plurals name="members_count">
         <item quantity="one">%1$d membro</item>
