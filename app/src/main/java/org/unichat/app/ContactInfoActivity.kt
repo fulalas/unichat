@@ -52,7 +52,7 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
         if (!isGroup) return
         // Io.lookup, not the shared worker: both protocols ask their server for
         // the member list, and on Telegram every unnamed member costs another
-        // round trip — none of which may sit in front of a screen's DB reads.
+        // round trip, none of which may sit in front of a screen's DB reads.
         Io.lookup.execute {
             val members = Bridge.groupMembers(chatId)
             runOnUiThread {
@@ -81,9 +81,9 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
     }
 
     /**
-     * Opens a chat with a member. CLEAR_TOP drops this screen and hands the new
-     * chat to the singleTop ChatActivity already in the task, so Back leaves for
-     * the chat list instead of walking back through the group's profile.
+     * CLEAR_TOP drops this screen and hands the new chat to the singleTop
+     * ChatActivity already in the task, so Back leaves for the chat list instead
+     * of walking back through the group's profile.
      */
     private fun openMemberChat(member: Bridge.Member) {
         startActivity(
@@ -124,14 +124,14 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /** Pixel size of the 160dp header — the most this avatar is ever drawn at,
-     *  so a server-sized photo is never decoded whole just to draw it small. */
+    /** The 160dp header is the most this avatar is ever drawn at, so a
+     *  server-sized photo is never decoded whole just to draw it small. */
     private val avatarPx by lazy { (160 * resources.displayMetrics.density).toInt() }
 
     private fun loadAvatar() {
         // Off the shared serial worker: the full-size fetch blocks on the
         // network (a 20s TDLib download, a timeout-less WhatsApp request) and
-        // would hold up every other screen's DB reads behind it.
+        // held up every other screen's DB reads behind it.
         Io.lookup.execute {
             var path = Bridge.getAvatarFullPath(chatId)
             if (path.isEmpty()) path = Bridge.getAvatarPath(chatId)

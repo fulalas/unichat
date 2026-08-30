@@ -4,14 +4,11 @@ import android.content.Context
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 
-/** Asks which account an action belongs to. What a protocol *is* lives in
- *  [Accounts]; this is only the choosing. */
 object ProtoPicker {
     const val WA = "wa"
     const val TG = "tg"
     const val SG = "sg"
 
-    /** Linked and switched on, as protocol keys. */
     fun active(): List<String> = Accounts.active().map { it.proto }
 
     fun pick(ctx: Context, onPick: (String) -> Unit) = pickFrom(ctx, active(), onPick)

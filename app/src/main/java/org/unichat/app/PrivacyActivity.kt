@@ -24,8 +24,7 @@ class PrivacyActivity : BaseActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         proto = intent.getStringExtra("proto") ?: ProtoPicker.WA
-        // this screen belongs to one account, so it wears that
-        // protocol's accent; must precede any view inflation
+        // must precede any view inflation
         applyProtocolTheme(proto)
         setContentView(R.layout.activity_privacy)
         supportActionBar?.apply {
@@ -39,8 +38,6 @@ class PrivacyActivity : BaseActivity() {
         valueAbout = findViewById(R.id.valueAbout)
         switchReadReceipts = findViewById(R.id.switchReadReceipts)
 
-        // Each account says which rows it has; the rest are hidden rather than
-        // shown as options that cannot be applied.
         val rowLastSeen = findViewById<View>(R.id.rowLastSeen)
         val rowProfile = findViewById<View>(R.id.rowProfile)
         val rowAbout = findViewById<View>(R.id.rowAbout)

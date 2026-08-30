@@ -1,9 +1,6 @@
 package org.unichat.app
 
-/**
- * Raw binding to TDLib's JSON interface (libtdjson.so via the libtdjni.so
- * shim). Byte arrays on both directions — see tdjson/jni/tdjni.c.
- */
+// Byte arrays both directions, never jstring — see tdjson/jni/tdjni.c.
 object TdJson {
     init {
         System.loadLibrary("tdjson")
@@ -16,6 +13,6 @@ object TdJson {
 
     fun send(clientId: Int, request: String) = send(clientId, request.toByteArray())
 
-    /** Blocks up to [timeout] seconds; one dedicated thread only (see shim). */
+    // one dedicated thread only (see the shim)
     fun receiveString(timeout: Double): String? = receive(timeout)?.let { String(it) }
 }

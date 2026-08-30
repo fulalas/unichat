@@ -6,6 +6,10 @@
     <color name="bubble_in">#F5F6F6</color>
     <color name="bubble_out">#D2E7FA</color>
     <color name="accent">#2481CC</color>
+    <!-- Launcher icon only: no values-night copy — launchers cache icon
+         bitmaps, so a night variant leaves stale/mixed icons after a theme
+         switch. -->
+    <color name="ic_launcher_background">#2481CC</color>
     <color name="text_primary">#111B21</color>
     <color name="text_secondary">#667781</color>
     <color name="divider">#E0E0E0</color>

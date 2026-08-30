@@ -3,20 +3,17 @@ package org.unichat.app
 import java.text.Normalizer
 
 /**
- * Case- and accent-insensitive matching, shared by every search in the app so
- * "sao" finds "São" wherever it is typed.
- *
- * Folding is strictly one character in, one character out, so an offset into
- * folded text still points at the same character of the raw text — the message
- * highlighter sets its spans on the raw string. A character whose lower-case or
- * decomposed form is longer than itself (Turkish 'İ' U+0130, the 'ﬁ' ligature)
- * keeps only its first character instead of shifting every later offset, which
- * is what used to push setSpan past the end of the Spannable.
+ * Folding must stay strictly one character in, one character out, so an offset
+ * into folded text still points at the same character of the raw text — the
+ * message highlighter sets its spans on the raw string. A character whose
+ * lower-case or decomposed form is longer than itself (Turkish 'İ' U+0130, the
+ * 'ﬁ' ligature) keeps only its first character; shifting later offsets used to
+ * push setSpan past the end of the Spannable.
  */
 object Search {
 
-    // Everything below U+2000 — Latin (including Extended Additional, i.e.
-    // Vietnamese), Greek, Cyrillic. Nothing above it carries marks this strips.
+    // Nothing above U+2000 carries marks this strips; below it are Latin
+    // (including Extended Additional, i.e. Vietnamese), Greek and Cyrillic.
     private const val TABLE_SIZE = 0x2000
 
     private val table: CharArray by lazy {
@@ -50,10 +47,10 @@ object Search {
     }
 
     /**
-     * Position of [foldedNeedle] — already through [fold] — in the RAW
-     * [haystack], folding it a character at a time. The haystack is deliberately
-     * not folded up front: the chat scan runs this over thousands of messages
-     * per keystroke, and almost every one of them fails on the first character.
+     * [foldedNeedle] must already be through [fold]; [haystack] is raw and is
+     * deliberately not folded up front, because the chat scan runs this over
+     * thousands of messages per keystroke and almost every one fails on the
+     * first character.
      */
     fun indexOf(haystack: String, foldedNeedle: String, from: Int = 0): Int {
         if (foldedNeedle.isEmpty()) return -1
@@ -74,7 +71,6 @@ object Search {
     fun contains(haystack: String, foldedNeedle: String): Boolean =
         indexOf(haystack, foldedNeedle) >= 0
 
-    /** For one-off comparisons; fold the query yourself when it is reused. */
     fun containsRaw(haystack: String, query: String): Boolean =
         contains(haystack, fold(query))
 }

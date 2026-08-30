@@ -55,6 +55,6 @@
         style="?android:attr/borderlessButtonStyle"
         android:layout_width="48dp"
         android:layout_height="48dp"
-        android:src="@android:drawable/ic_menu_delete"
+        android:src="@drawable/ic_delete"
         android:contentDescription="@string/account_remove" />
 </LinearLayout>

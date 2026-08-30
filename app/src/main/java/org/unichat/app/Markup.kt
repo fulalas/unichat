@@ -22,7 +22,6 @@ object Markup {
     private const val BOLD = '*'
     private const val ITALIC = '_'
 
-    /** The text without its markers, plus the ranges they covered. */
     fun parse(text: String): Pair<String, List<Mark>> {
         if (!text.contains(BOLD) && !text.contains(ITALIC)) return text to emptyList()
         val out = StringBuilder()
@@ -47,9 +46,15 @@ object Markup {
         return sp
     }
 
-    /** The inverse of [parse], for text that arrived with its styling apart. */
     fun withMarkers(plain: String, marks: List<Mark>): String {
-        val usable = marks.filter { readableBack(plain, it) }
+        // Telegram allows runs that cross (bold [0,5) with italic [3,8)); their
+        // markers fail closeOf's mirror rule and arrived as literal symbols
+        val usable = ArrayList<Mark>()
+        for (m in marks) {
+            if (!readableBack(plain, m)) continue
+            if (usable.any { crosses(it, m) }) continue
+            usable.add(m)
+        }
         if (usable.isEmpty()) return plain
         val at = Array(plain.length + 1) { StringBuilder() }
         for (m in usable) {
@@ -76,6 +81,10 @@ object Markup {
         if (m.start > 0 && plain[m.start - 1].isLetterOrDigit()) return false
         return m.end == plain.length || !plain[m.end].isLetterOrDigit()
     }
+
+    private fun crosses(a: Mark, b: Mark): Boolean =
+        (a.start < b.start && b.start < a.end && a.end < b.end) ||
+            (b.start < a.start && a.start < b.end && b.end < a.end)
 
     private fun scan(
         src: String, from: Int, to: Int, out: StringBuilder, marks: MutableList<Mark>,

@@ -12,15 +12,11 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 
-/**
- * Links this app to the Signal account already on this phone, as a second
- * device — the same thing Signal Desktop does.
- *
- * This is the only setup that shows the account's own contact list: the main
- * device hands over the account key, which is what that list is encrypted with.
- * Registering a number instead makes this app the main device with a fresh key,
- * and then only people who can be found by phone number ever appear.
- */
+// Linking as a second device is the only setup that shows the account's own
+// contact list: the main device hands over the account key, which is what that
+// list is encrypted with. Registering a number instead makes this app the main
+// device with a fresh key, and then only people who can be found by phone
+// number ever appear.
 class SignalLinkActivity : BaseActivity(), Bridge.UiListener {
 
     private lateinit var qr: ImageView

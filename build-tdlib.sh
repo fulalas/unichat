@@ -55,24 +55,40 @@ if [ -z "$TD_WANT" ]; then
     # is already checked out rather than refusing to build at all.
     [ -f "$TD_SRC/CMakeLists.txt" ] || { echo "TDLib: upstream unreachable and nothing fetched yet" >&2; exit 1; }
     echo "== TDLib: upstream unreachable; using the existing checkout =="
-    TD_WANT=$(cat "$TD_STAMP" 2>/dev/null)
+    TD_WANT=$(cat "$TD_STAMP" 2>/dev/null) || true
 elif [ "$(cat "$TD_STAMP" 2>/dev/null)" != "$TD_WANT" ] || [ ! -f "$TD_SRC/CMakeLists.txt" ]; then
     echo "== Fetching TDLib @ ${TD_WANT:0:12} (upstream $TD_BRANCH) =="
-    rm -rf "$TD_SRC"
-    mkdir -p "$TD_SRC"
-    git -C "$TD_SRC" init -q
-    git -C "$TD_SRC" remote add origin "$TD_URL"
+    # Fetch into a staging dir and swap on success, like build.sh's ensure_*
+    # helpers: deleting the existing tree FIRST meant a dropped connection
+    # mid-fetch left no source at all, and the offline fallback above then had
+    # nothing to fall back on.
+    TD_NEW="$TD_SRC.new"
+    rm -rf "$TD_NEW"
+    mkdir -p "$TD_NEW"
+    git -C "$TD_NEW" init -q
+    git -C "$TD_NEW" remote add origin "$TD_URL"
+    TD_OK=1
     # by SHA and shallow, so this costs one commit rather than TDLib's history;
     # a server that refuses a SHA fetch falls back to a full clone
-    if git -C "$TD_SRC" fetch -q --depth 1 origin "$TD_WANT" 2>/dev/null; then
-        git -C "$TD_SRC" checkout -q FETCH_HEAD
+    if git -C "$TD_NEW" fetch -q --depth 1 origin "$TD_WANT" 2>/dev/null; then
+        git -C "$TD_NEW" checkout -q FETCH_HEAD
     else
-        rm -rf "$TD_SRC"
-        git clone -q "$TD_URL" "$TD_SRC" || { echo "TDLib: clone failed" >&2; exit 1; }
-        git -C "$TD_SRC" checkout -q "$TD_WANT" || { echo "TDLib: checkout failed" >&2; exit 1; }
+        rm -rf "$TD_NEW"
+        if ! git clone -q "$TD_URL" "$TD_NEW" || ! git -C "$TD_NEW" checkout -q "$TD_WANT"; then
+            TD_OK=0
+        fi
     fi
-    [ -f "$TD_SRC/CMakeLists.txt" ] || { echo "TDLib: fetch failed" >&2; exit 1; }
-    echo "$TD_WANT" > "$TD_STAMP"
+    [ -f "$TD_NEW/CMakeLists.txt" ] || TD_OK=0
+    if [ "$TD_OK" = 1 ]; then
+        rm -rf "$TD_SRC"
+        mv "$TD_NEW" "$TD_SRC"
+        echo "$TD_WANT" > "$TD_STAMP"
+    else
+        rm -rf "$TD_NEW"
+        [ -f "$TD_SRC/CMakeLists.txt" ] || { echo "TDLib: fetch failed" >&2; exit 1; }
+        echo "== TDLib: fetch of ${TD_WANT:0:12} failed; using the existing checkout ==" >&2
+        TD_WANT=$(cat "$TD_STAMP" 2>/dev/null) || true
+    fi
 fi
 
 mkdir -p "$EXT"

@@ -21,8 +21,6 @@ object ChatExporter {
         // ownership leaked the provider's fd if the writer chain's construction
         // threw (e.g. OOM on the buffer)
         (context.contentResolver.openOutputStream(uri) ?: throw IOException("no stream")).use { out ->
-            // stream line by line instead of building one giant string: a full
-            // history can be tens of thousands of messages
             BufferedWriter(OutputStreamWriter(out)).use { w ->
                 for (m in messages) {
                     w.write(line(context, m, time, you, chatName, isGroup, names))

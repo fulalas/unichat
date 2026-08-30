@@ -40,7 +40,7 @@ data class MessageRow(
     val played: Boolean = false,
     val forwarded: Boolean = false,
     val sendFailed: Boolean = false,
-    val reactions: String = "", // comma-separated emojis, one per reacting user
+    val reactions: String = "",
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
 )
@@ -55,7 +55,6 @@ const val MAP_LINK_PREFIX = "https://maps.google.com/?q="
 
 data class SenderInfo(val senderId: String, val fromMe: Boolean, val senderName: String)
 
-/** What a reply shows of the message it answers, read from our own copy of it. */
 data class QuotedInfo(
     val sender: SenderInfo, val text: String, val msgType: String,
 )
@@ -82,7 +81,7 @@ fun previewLabel(
             if (detail.isEmpty()) base else "$base ($detail)"
         }
         "document" -> labeled("📎", R.string.document_label)
-        // a contact card's body is "name\nphone..."; previews show just the name
+        // a contact card's body is "name\nphone..."
         "contact" -> labeled("👤", R.string.contact_label,
             text.lineSequence().firstOrNull().orEmpty())
         in LABEL_ONLY_TYPES -> {
@@ -129,9 +128,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
     }
 
     companion object {
-        // Chats the user deleted locally. Without this the next mirror pass put
-        // them straight back: both protocols re-announce their whole chat list
-        // on connect, so a deleted chat returned on every app start.
+        // Without these tombstones the next mirror pass put a locally deleted
+        // chat straight back: both protocols re-announce their whole chat list
+        // on connect, so it returned on every app start.
         private const val CREATE_DELETED_CHATS =
             "CREATE TABLE IF NOT EXISTS deleted_chats(" +
                 "id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)"
@@ -179,13 +178,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         private const val CREATE_ID_INDEX =
             "CREATE INDEX IF NOT EXISTS idx_msg_id ON messages(id)"
 
-        // One row per link, not per message: the same URL shared in ten chats is
-        // fetched once. `status` also records a link that has no preview at all
-        // (0 unknown, 1 has one, 2 none), so a page that answers with nothing is
-        // not re-fetched on every single bind of that bubble.
-        // How long "this link has no preview" is trusted before the page is
-        // asked again. Positive answers never expire — a page's own metadata is
-        // what it is — but a negative one can be our fault.
+        // `status` records a link that has no preview at all (0 unknown, 1 has
+        // one, 2 none), so a page that answers with nothing is not re-fetched on
+        // every single bind of that bubble. Only that negative verdict expires —
+        // a page's own metadata is what it is, but a "none" can be our fault.
         private const val NEGATIVE_TTL_SECONDS = 7L * 24 * 60 * 60
 
         private const val CREATE_LINK_PREVIEWS =
@@ -423,8 +419,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         )
     }
 
-    // chatId -> when it was deleted. Cached because upsertMessage consults it on
-    // every stored message, on the protocol threads.
+    // Cached because upsertMessage consults it on every stored message, on the
+    // protocol threads.
     private val deletedChats: MutableMap<String, Long> by lazy {
         val m = java.util.concurrent.ConcurrentHashMap<String, Long>()
         queryList("SELECT id, deleted_at FROM deleted_chats", null) {
@@ -433,12 +429,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         m
     }
 
-    /**
-     * Whether a chat the user deleted must stay deleted for an event stamped
-     * [atTime]. Anything the deletion already covered is dropped; something
-     * genuinely newer brings the chat back (and retires the tombstone), which is
-     * the behaviour a local delete has always had for new incoming messages.
-     */
     private fun suppressed(chatId: String, atTime: Long): Boolean {
         val deletedAt = deletedChats[chatId] ?: return false
         if (atTime > deletedAt) {
@@ -460,12 +450,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         )
     }
 
-    /**
-     * Fold a duplicate chat [fromId] into [toId], moving its messages and
-     * reactions. Heals a 1:1 chat that was keyed by a contact's LID before the
-     * LID→phone mapping was known (see Bridge.reconcileLidChats). Idempotent: a no-op
-     * when [fromId] has no local chat. Returns true if anything was merged.
-     */
+    // Heals a 1:1 chat that was keyed by a contact's LID before the LID→phone
+    // mapping was known (see Bridge.reconcileLidChats).
     fun mergeChat(fromId: String, toId: String): Boolean {
         if (fromId == toId) return false
         val db = writableDatabase
@@ -473,18 +459,19 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         db.beginTransaction()
         try {
             db.execSQL("INSERT OR IGNORE INTO chats(id) VALUES(?)", arrayOf(toId))
-            // move messages/reactions; OR IGNORE skips any row that already
-            // exists under the target's key, then the leftovers are dropped
+            // OR IGNORE skips any row that already exists under the target's
+            // key, then the leftovers are dropped
             db.execSQL("UPDATE OR IGNORE messages SET chat_id=? WHERE chat_id=?", arrayOf(toId, fromId))
             db.execSQL("DELETE FROM messages WHERE chat_id=?", arrayOf(fromId))
             db.execSQL("UPDATE OR IGNORE reactions SET chat_id=? WHERE chat_id=?", arrayOf(toId, fromId))
             db.execSQL("DELETE FROM reactions WHERE chat_id=?", arrayOf(fromId))
             db.execSQL(
                 "UPDATE chats SET " +
+                    "name=CASE WHEN name='' THEN (SELECT name FROM chats WHERE id=?) ELSE name END," +
                     "last_time=max(last_time,(SELECT last_time FROM chats WHERE id=?))," +
                     "muted=max(muted,(SELECT muted FROM chats WHERE id=?))," +
                     "archived=max(archived,(SELECT archived FROM chats WHERE id=?)) WHERE id=?",
-                arrayOf(fromId, fromId, fromId, toId)
+                arrayOf(fromId, fromId, fromId, fromId, toId)
             )
             db.execSQL("DELETE FROM chats WHERE id=?", arrayOf(fromId))
             db.setTransactionSuccessful()
@@ -576,23 +563,31 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
 
     fun deleteChat(chatId: String) {
         val now = System.currentTimeMillis() / 1000
-        writableDatabase.transact {
-            execSQL("DELETE FROM messages WHERE chat_id=?", arrayOf(chatId))
-            execSQL("DELETE FROM reactions WHERE chat_id=?", arrayOf(chatId))
-            execSQL("DELETE FROM chats WHERE id=?", arrayOf(chatId))
-            execSQL(
-                "INSERT INTO deleted_chats(id, deleted_at) VALUES(?,?) " +
-                    "ON CONFLICT(id) DO UPDATE SET deleted_at=excluded.deleted_at",
-                arrayOf(chatId, now)
-            )
+        // Cache entry first: suppressed() reads it on the protocol threads, and
+        // a mirror pass landing between the commit and the cache write used to
+        // re-insert the rows just deleted, resurrecting the chat.
+        val previous = deletedChats.put(chatId, now)
+        try {
+            writableDatabase.transact {
+                execSQL("DELETE FROM messages WHERE chat_id=?", arrayOf(chatId))
+                execSQL("DELETE FROM reactions WHERE chat_id=?", arrayOf(chatId))
+                execSQL("DELETE FROM chats WHERE id=?", arrayOf(chatId))
+                execSQL(
+                    "INSERT INTO deleted_chats(id, deleted_at) VALUES(?,?) " +
+                        "ON CONFLICT(id) DO UPDATE SET deleted_at=excluded.deleted_at",
+                    arrayOf(chatId, now)
+                )
+            }
+        } catch (e: Exception) {
+            if (previous == null) deletedChats.remove(chatId)
+            else deletedChats[chatId] = previous
+            throw e
         }
-        deletedChats[chatId] = now
     }
 
-    // Sets a chat's local mute flag (suppresses its notifications). Update-only:
-    // a mute event for a chat we have no row for is ignored rather than
-    // materialising a blank phantom chat; the flag is picked up by reconcile
-    // once the chat exists.
+    // Update-only: a mute event for a chat we have no row for is ignored rather
+    // than materialising a blank phantom chat; the flag is picked up by
+    // reconcile once the chat exists.
     // Returns whether a chat row actually took the flag, so a caller that also
     // pushes the change to the server can tell that nothing was stored locally
     // (and must not then record the chat as having an unconfirmed local mute).
@@ -602,6 +597,15 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
             stmt.bindString(2, chatId)
             return stmt.executeUpdateDelete() > 0
         }
+    }
+
+    // Update-only, like setMuted: no phantom chat for an archive event
+    // arriving before the chat row exists.
+    fun setArchived(chatId: String, archived: Boolean) {
+        writableDatabase.execSQL(
+            "UPDATE chats SET archived=? WHERE id=?",
+            arrayOf(if (archived) 1 else 0, chatId)
+        )
     }
 
     fun isSelfContact(id: String): Boolean = queryFirst(
@@ -653,10 +657,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         arrayOf(chatId, limit.toString())
     ) { it.getString(0) }
 
-    // Contact cards from before the body was kept, so the repair can refill
-    // them. Deliberately text='' only: file_id (the messageable id) stays
-    // empty forever for cards that legitimately have none — a wider predicate
-    // would re-ask the phone for those on every run without end.
+    // Deliberately text='' only: file_id (the messageable id) stays empty
+    // forever for cards that legitimately have none — a wider predicate would
+    // re-ask the phone for those on every run without end.
     fun emptyContactSenders(chatId: String, limit: Int): List<Pair<String, String>> = queryList(
         "SELECT id, sender_id FROM messages " +
             "WHERE chat_id=? AND msg_type='contact' AND text='' " +
@@ -671,9 +674,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         )
     }
 
-    // One message's playback-relevant fields. Keyed by id, not by file path:
-    // Telegram serves a single file for every copy of the same voice note, so a
-    // path can belong to several rows.
+    // Keyed by id, not by file path: Telegram serves a single file for every
+    // copy of the same voice note, so a path can belong to several rows.
     fun audioMessage(chatId: String, msgId: String): MessageRow? = queryFirst(
         "SELECT id, sender_id, from_me, msg_type, played FROM messages " +
             "WHERE chat_id=? AND id=?",
@@ -686,8 +688,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         )
     }
 
-    // Returns the number of rows updated (0 when the message no longer exists,
-    // e.g. its chat was deleted while a download was still in flight).
+    // 0 rows means the message no longer exists — its chat can be deleted while
+    // a download is still in flight.
     fun setFileState(chatId: String, msgId: String, filePath: String, status: Int): Int {
         writableDatabase.compileStatement(
             "UPDATE messages SET file_path=?, file_status=? WHERE chat_id=? AND id=?"
@@ -714,11 +716,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         )
     }
 
-    /**
-     * Clears "downloading" flags left by a previous run. No transfer survives a
-     * process death, so a stored status of 1 is always stale — and it made the
-     * bubble skip its own retry, leaving that media blank for good.
-     */
+    // No transfer survives a process death, so a stored status of 1 is always
+    // stale — and it made the bubble skip its own retry, leaving that media
+    // blank for good.
     fun clearStaleDownloads() {
         writableDatabase.execSQL("UPDATE messages SET file_status=0 WHERE file_status=1")
     }
@@ -744,8 +744,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
     // or unlinking WhatsApp silently wipes that protocol's chats too.
     fun clearWaData() = clearProtocolData { "$it NOT LIKE 'tg:%' AND $it NOT LIKE 'sg:%'" }
 
-    /** Renames a chat without touching its other columns. upsertChat writes
-     *  `archived` too, so using it for a rename un-archived the chat. */
+    // Not upsertChat: it writes `archived` too, so using it for a rename
+    // un-archived the chat.
     fun renameChat(id: String, name: String) {
         if (name.isEmpty()) return
         writableDatabase.execSQL(
@@ -757,11 +757,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
 
     fun clearTgData() = clearProtocolData { "$it LIKE 'tg:%'" }
 
-    /**
-     * Replaces a message's media reference. Telegram file ids are only valid
-     * inside the TDLib session that issued them, so a stored one goes stale
-     * across restarts and has to be re-resolved and written back.
-     */
+    // Telegram file ids are only valid inside the TDLib session that issued
+    // them, so a stored one goes stale across restarts and has to be re-resolved
+    // and written back.
     fun setFileId(chatId: String, msgId: String, fileId: String) {
         writableDatabase.execSQL(
             "UPDATE messages SET file_id=? WHERE chat_id=? AND id=?",
@@ -807,11 +805,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         )
     }
 
-    fun hasOwnMessageSince(chatId: String, since: Long, exceptId: String): Boolean = queryFirst(
-        "SELECT 1 FROM messages WHERE chat_id=? AND from_me=1 AND time_sent>=? AND id!=? LIMIT 1",
-        arrayOf(chatId, since.toString(), exceptId)
-    ) { true } ?: false
-
     private fun oneMessage(chatId: String, where: String, order: String): MessageRow? = queryFirst(
         "SELECT id, sender_id, text, from_me, time_sent, is_read FROM messages " +
             "WHERE chat_id=? AND $where ORDER BY $order LIMIT 1",
@@ -824,12 +817,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         )
     }
 
-    /**
-     * An existing chat with the person holding [phone] on one protocol, matched
-     * on the stored bare-digit number. Contact discovery answers with whichever
-     * identifier the server felt like giving, so the id it returns need not be
-     * the one an existing chat is keyed by.
-     */
+    // Matched on the stored bare-digit number: contact discovery answers with
+    // whichever identifier the server felt like giving, so the id it returns
+    // need not be the one an existing chat is keyed by.
     fun chatIdByPhone(phone: String, prefix: String): String? = queryFirst(
         "SELECT c.id FROM contacts c JOIN chats ch ON ch.id=c.id " +
             "WHERE c.phone=? AND c.id LIKE ? LIMIT 1",
@@ -837,7 +827,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
     ) { it.getString(0) }
 
     fun latestUnread(chatId: String): MessageRow? =
-        oneMessage(chatId, "from_me=0 AND is_read=0", "time_sent DESC")
+        oneMessage(chatId, "from_me=0 AND is_read=0", "time_sent DESC, rowid DESC")
 
     fun firstUnread(chatId: String): MessageRow? =
         oneMessage(chatId, "from_me=0 AND is_read=0 AND time_sent>0", "time_sent ASC, rowid ASC")
@@ -865,11 +855,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
             "WHERE r.chat_id=c.id AND r.msg_id=lm.id) AS last_reactions," +
             "c.last_time," +
             "(SELECT COUNT(*) FROM messages WHERE chat_id=c.id AND from_me=0 AND is_read=0) AS unread," +
-            // Telegram groups/channels have negative raw ids; private chats are
-            // positive. (Must match isGroupId in Jid.kt.)
-            // Must agree with isGroupId(). A Signal group is any sg: id whose
-            // remainder is not a 36-char UUID, which is what the length test
-            // below expresses.
+            // Telegram groups/channels have negative raw ids, private chats
+            // positive; a Signal group is any sg: id whose remainder is not a
+            // 36-char UUID. Must agree with isGroupId() in Jid.kt.
             // The lowercase 'pni:' too: REPLACE is case-sensitive, and rows
             // written before the prefix was corrected use that spelling — left
             // out, every one of those one-to-one chats came back 40 characters
@@ -1038,11 +1026,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         }
     }
 
-    // Oldest locally known message of a chat, used as the anchor for on-demand history
-    // requests. Skips messages with no real timestamp (time_sent=0 — e.g. an edit whose
-    // original was never stored): such a row sorts as "oldest" but can't anchor a request
-    // for anything older (the phone would be asked for messages before epoch 0 and answer
-    // with nothing), silently stalling pagination.
+    // Skips messages with no real timestamp (time_sent=0 — e.g. an edit whose
+    // original was never stored): such a row sorts as "oldest" but can't anchor a
+    // history request for anything older (the phone would be asked for messages
+    // before epoch 0 and answer with nothing), silently stalling pagination.
     fun oldestMessage(chatId: String): MessageRow? =
         oneMessage(chatId, "time_sent>0", "time_sent ASC")
 
@@ -1053,16 +1040,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         "SELECT COUNT(*) FROM messages WHERE chat_id=?", arrayOf(chatId)
     ) { it.getInt(0) } ?: 0
 
-    /**
-     * Which WhatsApp chat a message id now lives under, or null if it isn't
-     * stored — it finds a row whose chat was re-keyed by [mergeChat] while
-     * something was still holding the old id.
-     *
-     * WhatsApp only: its message ids are globally unique, so an id alone
-     * identifies a row. TDLib ids are unique only within a chat (the first
-     * message of every Telegram chat shares the same id), so 'tg:' chats are
-     * excluded rather than matched arbitrarily by LIMIT 1.
-     */
     fun hasMessage(chatId: String, msgId: String): Boolean = queryFirst(
         "SELECT 1 FROM messages WHERE chat_id=? AND id=? LIMIT 1", arrayOf(chatId, msgId)
     ) { true } ?: false
@@ -1099,9 +1076,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         "SELECT name FROM contacts WHERE id=?", arrayOf(id)
     ) { if (it.isNull(0)) null else it.getString(0) }
 
-    /** Null both for a link never looked up and for one whose "has no preview"
-     *  verdict has expired: a site can gain preview tags, and a parser of ours
-     *  that reads a page wrongly today must not silence that link forever. */
+    // An expired "has no preview" verdict answers null, like a link never looked
+    // up: a site can gain preview tags, and a parser of ours that reads a page
+    // wrongly today must not silence that link forever.
     fun linkPreview(url: String): LinkPreview.Row? = queryFirst(
         "SELECT site, title, description, image_path, status, fetched_at " +
             "FROM link_previews WHERE url=?",
@@ -1130,8 +1107,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         )
     }
 
-    /** Previews whose cached image the cache sweep has since reclaimed, so the
-     *  next bind fetches them again instead of rendering a card with a hole. */
+    // For previews whose cached image the sweep has reclaimed: the next bind
+    // fetches them again instead of rendering a card with a hole.
     fun forgetLinkPreviewImages(paths: Collection<String>) {
         if (paths.isEmpty()) return
         writableDatabase.transact {

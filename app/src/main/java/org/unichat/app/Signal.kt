@@ -7,19 +7,11 @@ import java.util.concurrent.TimeUnit
 import org.unichat.wmbridge.EventListener
 import org.unichat.wmbridge.Wmbridge
 
-/**
- * Signal, as a third protocol beside WhatsApp and Telegram.
- *
- * The Go half lives in the same aar as whatsmeow (see gobridge/signal.go), so
- * this talks to Wmbridge like Bridge does, but keeps its own EventListener and
- * writes into the shared Db under an "sg:" prefix — the same shape Tg uses.
- */
 object Signal : EventListener {
     private const val TAG = "UniChatSg"
     const val PREFIX = "sg:"
 
-    /** Marks a chat addressed by PNI because discovery returned no ACI.
-     *  Uppercase, matching how signalmeow spells incoming service ids. */
+    /** Uppercase, matching how signalmeow spells incoming service ids. */
     const val PNI_PREFIX = "PNI:"
 
     // Two threads, not one: connect() blocks for up to 30 s waiting for the
@@ -31,7 +23,7 @@ object Signal : EventListener {
     private val control = Executors.newSingleThreadExecutor()
     private val ops = Executors.newSingleThreadExecutor()
 
-    /** Message traffic. Skipped once the account is gone: logout waits for what
+    /** Skipped once the account is gone: logout waits for what
      *  is already running, but a task queued behind it would otherwise reach a
      *  closed store, or a tree that is no longer there. */
     private fun ops(work: () -> Unit) = ops.execute { if (linked) work() }
@@ -57,10 +49,6 @@ object Signal : EventListener {
         return selfIdMemo
     }
 
-    /**
-     * Opens the Signal store. Cheap when the device was never linked, so it can
-     * run on every start; connecting is separate.
-     */
     fun init(context: Context) {
         if (started) return
         started = true
@@ -86,10 +74,6 @@ object Signal : EventListener {
             // who do not publish their number, and it is what the official app
             // shows. Then the address book, for anyone it does not cover.
             //
-            // Whether it reads is also what the UI goes by, rather than
-            // remembering that a PIN restore once succeeded: a key that opens
-            // the list is the same thing as the list being available, and it
-            // stays right if the account is registered again.
             // Only ever promoted here: a transient storage-service failure
             // would otherwise put the row back to offering a restore that has
             // already happened. Registering again clears it instead.
@@ -101,8 +85,6 @@ object Signal : EventListener {
     }
 
     /**
-     * Links this app to the Signal account on this phone, as a second device.
-     *
      * A linked device is handed the account's own key, so it can read the
      * contact list Signal keeps for the account. Registering instead makes this
      * app the account's main device with a fresh key, which leaves that list
@@ -110,14 +92,13 @@ object Signal : EventListener {
      */
     fun startLink() = control.execute { Wmbridge.signalLinkStart("UniChat") }
 
-    /** Abandons a link in progress, for a screen the user left. */
     fun stopLink() = control.execute { Wmbridge.signalLinkStop() }
 
     /**
-     * Re-checks the address book when the user comes back to the app. Discovery
-     * used to run only on connect, so anyone saved to the phone after that was
-     * invisible until the app was restarted. Throttled: it is a round trip over
-     * the socket and the address book rarely changes twice in a minute.
+     * Discovery used to run only on connect, so anyone saved to the phone after
+     * that was invisible until the app was restarted. Throttled: it is a round
+     * trip over the socket and the address book rarely changes twice in a
+     * minute.
      */
     fun refreshContacts() {
         val ctx = appContext ?: return
@@ -134,10 +115,10 @@ object Signal : EventListener {
     private const val DISCOVERY_GAP_MS = 60_000L
 
     /**
-     * Asks Signal which address-book numbers have accounts. A registered
-     * primary starts with no contact list at all — the storage-service manifest
-     * is encrypted with the previous master key, which registering replaced —
-     * so this is the only way the account learns who is on Signal.
+     * A registered primary starts with no contact list at all — the
+     * storage-service manifest is encrypted with the previous master key, which
+     * registering replaced — so discovery is the only way the account learns
+     * who is on Signal.
      */
     fun discoverContacts() {
         val ctx = appContext ?: return
@@ -157,7 +138,6 @@ object Signal : EventListener {
 
     @Volatile private var namesByNumber: Map<String, String> = emptyMap()
 
-    /** Drops the socket but keeps the link, for the Manage accounts pause. */
     fun disconnect() = control.execute { Wmbridge.signalDisconnect() }
 
 
@@ -174,13 +154,11 @@ object Signal : EventListener {
         // that queue still left an attachment fetch calling into signalmeow
         // while signalLogout closed the store, and writing into signal/media
         // while the tree below was being removed.
-        drainDownloads(5_000)
+        runCatching { Io.files.submit(Runnable {}).get(5, TimeUnit.SECONDS) }
         Wmbridge.signalLogout()
         started = false
         selfIdMemo = ""
-        // On [control], after the Go side has closed the store: the media
-        // and session tree is ours to remove and nothing else is holding it.
-        // Then reopen, so registering again without restarting the app has a
+        // Reopened, so registering again without restarting the app has a
         // store to write into rather than reporting "signal not initialised".
         appContext?.let { ctx ->
             runCatching { java.io.File(ctx.filesDir, "signal").deleteRecursively() }
@@ -194,10 +172,8 @@ object Signal : EventListener {
     }
 
     /**
-     * Turns a bridge error code into text for the user. The Go side returns
-     * codes rather than sentences so they can be translated here; an
-     * "upstream:" payload is a server or signalmeow message with no code of its
-     * own and is shown as it came.
+     * An "upstream:" payload is a server or signalmeow message with no code of
+     * its own and is shown as it came.
      */
     fun errorText(ctx: Context, code: String): String {
         val arg = code.substringAfter(':', "")
@@ -216,11 +192,6 @@ object Signal : EventListener {
             else -> code
         }
     }
-
-    // --- Registration (primary device) ----------------------------------
-    // Each call blocks on the network, so they all run on [control] and report
-    // back on the main thread. An empty string means success; anything else is
-    // an error code for errorText().
 
     fun registerStart(number: String, onDone: (String) -> Unit) = control.execute {
         val err = Wmbridge.signalRegisterStart(number)
@@ -256,11 +227,9 @@ object Signal : EventListener {
         Bridge.runOnUi { onDone(err) }
         // connect(), not the raw bridge call: it is what honours the pause
         // setting and kicks off contact discovery, which a fresh registration
-        // needs more than anything — there is no contact list to sync.
+        // has no contact list to sync without.
         if (err.isEmpty()) connect()
     }
-
-    // --- Profile and privacy ---------------------------------------------
 
     // Served from the contact row publishSelfContact() already wrote, so the
     // profile screen does not make an HTTPS profile fetch from onCreate.
@@ -294,11 +263,9 @@ object Signal : EventListener {
     }
 
     /**
-     * The two privacy settings Signal has, in the same shape the other
-     * protocols answer in. Read receipts and typing indicators are honoured
-     * locally rather than published: they live in the storage-service account
-     * record, which this account cannot write yet. Discoverability is the one
-     * the server does hold.
+     * Read receipts and typing indicators are honoured locally rather than
+     * published: they live in the storage-service account record, which this
+     * account cannot write yet. Discoverability is the one the server holds.
      */
     fun privacySettings(): Map<String, String> {
         val ctx = appContext ?: return emptyMap()
@@ -351,10 +318,10 @@ object Signal : EventListener {
     }
 
     /**
-     * Splits the stored `*bold*` / `_italic_` text into what Signal sends: a
-     * plain body plus the ranges it styles, offsets in UTF-16 units — which is
-     * what a Kotlin string index already is. Sent with the markers still in, the
-     * other side showed them as literal asterisks and underscores.
+     * Signal takes a plain body plus style ranges, offsets in UTF-16 units —
+     * which is what a Kotlin string index already is. Sent with the `*bold*` /
+     * `_italic_` markers still in, the other side showed them as literal
+     * asterisks and underscores.
      */
     private fun styled(text: String): Pair<String, String> {
         val (plain, marks) = Markup.parse(text)
@@ -375,10 +342,6 @@ object Signal : EventListener {
         return Wmbridge.signalEdit(chatId, msgId, body, styles)
     }
 
-    /**
-     * Marks the chat read locally and acks the newest unread message, matching
-     * what the WhatsApp path does. Nothing happens when there is nothing new.
-     */
     fun markChatRead(chatId: String) = ops {
         val latest = Bridge.db.latestUnread(chatId) ?: return@ops
         Bridge.db.markChatRead(chatId)
@@ -399,8 +362,7 @@ object Signal : EventListener {
         Wmbridge.signalSendContact(chatId, name, numbers.joinToString(",")).isNotEmpty()
 
     /**
-     * Resolves a phone number to a Signal chat id. Blocking; worker threads
-     * only. "" when the number is not on Signal.
+     * Blocking; worker threads only.
      *
      * An existing chat wins over whatever discovery answers: the server may
      * return a PNI for someone whose chat is keyed by the ACI learned when they
@@ -417,42 +379,28 @@ object Signal : EventListener {
     }
 
     fun startDownload(msg: MessageRow): Boolean {
-        if (msg.fileId.isEmpty() || !linked) return false
-        downloads.incrementAndGet()
-        Io.files.execute {
-            try {
-                // Re-checked inside: logout clears the flag and then closes the
-                // store and deletes the tree this writes into, so a task queued
-                // before it must not run afterwards.
-                if (linked) Wmbridge.signalDownloadAttachment(msg.chatId, msg.id, msg.fileId)
-                else Bridge.onFileTransferDone(msg.chatId, msg.id, "", 3)
-            } finally {
-                downloads.decrementAndGet()
-            }
-        }
+        if (msg.fileId.isEmpty()) return false
+        // Never refused for a store that has simply not opened yet: [linked] is
+        // published at the end of init's task, and a cold start from a Signal
+        // notification binds its bubbles first, so answering false there dropped
+        // the request with no transfer, no status and no toast — the attachment
+        // stayed undownloaded until tapped again. Queued behind init on the very
+        // thread that sets the flag instead; an account that really is gone then
+        // reports the failure from inside the task.
+        if (!linked) control.execute { queueDownload(msg) } else queueDownload(msg)
         return true
     }
 
-    // Attachment fetches in flight. They run on Io.files rather than [ops], so
-    // logout has to wait for them separately or it closes the Signal store and
-    // removes signal/media out from under one.
-    private val downloads = java.util.concurrent.atomic.AtomicInteger(0)
-
-    private fun drainDownloads(deadlineMs: Long) {
-        val until = System.currentTimeMillis() + deadlineMs
-        while (downloads.get() > 0 && System.currentTimeMillis() < until) {
-            Thread.sleep(50)
-        }
+    private fun queueDownload(msg: MessageRow) = Io.files.execute {
+        // Re-checked inside: logout clears the flag and then closes the store
+        // and deletes the tree this writes into, so a task queued before it must
+        // not run afterwards.
+        if (linked) Wmbridge.signalDownloadAttachment(msg.chatId, msg.id, msg.fileId)
+        else Bridge.onFileTransferDone(msg.chatId, msg.id, "", 3)
     }
-
-    // --- EventListener ---------------------------------------------------
-    // Only the callbacks Signal actually raises are implemented; the rest are
-    // part of the shared WhatsApp-shaped interface and stay no-ops.
 
     override fun onStateChanged(state: String) {
         this.state = state
-        // A link just completed: the device row exists now, so this account is
-        // live and can connect.
         if (state == "linked") {
             linked = Wmbridge.signalHasSession()
             selfIdMemo = ""
@@ -513,7 +461,8 @@ object Signal : EventListener {
             MessageRow(
                 msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId,
                 edited = isEdited, quotedId = quotedId, quotedText = quotedText,
-                quotedType = quotedType, senderName = senderName, forwarded = isForwarded
+                quotedType = quotedType, senderName = senderName,
+                forwarded = isForwarded, latitude = latitude, longitude = longitude
             ),
             notify = !isHistory,
             // Never for our own send: the file is already on this device and the
@@ -535,9 +484,8 @@ object Signal : EventListener {
         }
     }
 
-    // Raised while linking to the Signal app as a second device: the QR to
-    // scan, or why the attempt failed. Without the error forwarded, a link that
-    // timed out left the screen on a dead code with nothing said.
+    // Without the error forwarded, a link that timed out left the screen on a
+    // dead code with nothing said.
     override fun onQrCode(code: String) = Bridge.notifyQrCode(ProtoPicker.SG, code)
     override fun onPairError(code: String) = Bridge.notifyPairError(ProtoPicker.SG, code)
 
@@ -563,10 +511,10 @@ object Signal : EventListener {
         Bridge.notifyChatsChanged()
     }
     /**
-     * Writes the local path onto the message row. Left as a no-op stub this
-     * whole time, which is why a Signal voice note appeared in the chat but
-     * could not be played, and why received media never rendered: the row's
-     * file_path stayed empty no matter how the transfer went.
+     * Left as a no-op stub for a long time, which is why a Signal voice note
+     * appeared in the chat but could not be played and received media never
+     * rendered: the row's file_path stayed empty no matter how the transfer
+     * went.
      */
     override fun onFileDownloaded(chatId: String, msgId: String, filePath: String, status: Long) {
         if (Bridge.db.setFileState(chatId, msgId, filePath, status.toInt()) == 0 &&
@@ -576,8 +524,7 @@ object Signal : EventListener {
             runCatching { java.io.File(filePath).delete() }
         }
         // Releases the in-flight claim Bridge.downloadFile took; without it a
-        // failed download stayed unretryable for the rest of the run. Also what
-        // reports the failure and resumes playback the user asked for.
+        // failed download stayed unretryable for the rest of the run.
         Bridge.onFileTransferDone(chatId, msgId, filePath, status.toInt())
         Bridge.notifyChat(chatId)
     }
@@ -606,6 +553,8 @@ object Signal : EventListener {
         val target = Bridge.db.messageChat(msgId, PREFIX, fromMe = false) ?: return
         Bridge.onChatReadSelf(target, msgId)
     }
+    // No-ops: part of the shared WhatsApp-shaped interface, never raised by
+    // Signal.
     override fun onMute(chatId: String, muted: Boolean) {}
     override fun onPresence(userId: String, isOnline: Boolean, lastSeen: Long) {}
     override fun onSyncProgress(progress: Long) {}

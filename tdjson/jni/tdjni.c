@@ -1,4 +1,3 @@
-// Minimal JNI shim over TDLib's JSON interface (libtdjson.so).
 // Byte arrays instead of jstring on both directions: JNI's GetStringUTFChars
 // is modified UTF-8 (CESU-8 for emoji), which TDLib rejects as invalid UTF-8.
 #include <jni.h>

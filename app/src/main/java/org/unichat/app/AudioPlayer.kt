@@ -6,12 +6,9 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.PlaybackParams
-import android.os.Handler
-import android.os.Looper
 import android.os.PowerManager
 
 object AudioPlayer {
-    private val main = Handler(Looper.getMainLooper())
     private var appContext: Context? = null
     private var audioManager: AudioManager? = null
     private var player: MediaPlayer? = null
@@ -38,8 +35,8 @@ object AudioPlayer {
     @Volatile var proximitySessionEnded: Boolean = false
         private set
 
-    var onStateChanged: (() -> Unit)? = null        // chat screen UI
-    var onServiceStateChanged: (() -> Unit)? = null  // service (notification + proximity)
+    var onStateChanged: (() -> Unit)? = null
+    var onServiceStateChanged: (() -> Unit)? = null
     var onCompleted: ((String, String, String) -> Unit)? = null
     var onPlayStarted: ((String, String, String) -> Unit)? = null
 
@@ -79,7 +76,6 @@ object AudioPlayer {
         startMs: Int = 0,
         useEarpiece: Boolean = proximityNear,
     ) {
-        routing = true
         stopInternal(resetRoute = false)
         val commMode = useEarpiece
         // Held outside the try so a failure part-way through setup still
@@ -112,7 +108,11 @@ object AudioPlayer {
                 val finishedMsg = currentMsgId
                 stopInternal(resetRoute = false)
                 notifyState()
-                if (finishedPath != null) onCompleted?.invoke(finishedPath, finishedChat, finishedMsg)
+                if (finishedPath != null) {
+                    try { onCompleted?.invoke(finishedPath, finishedChat, finishedMsg) } catch (e: Exception) {
+                        android.util.Log.e("AudioPlayer", "onCompleted listener threw", e)
+                    }
+                }
             }
             if (startMs > 0) p.seekTo(startMs)
             requestFocus(commMode)
@@ -130,13 +130,6 @@ object AudioPlayer {
             android.util.Log.w("AudioPlayer", "play failed for $path", e)
             try { fresh?.release() } catch (e2: Exception) {}
             stopInternal(resetRoute = true)
-        } finally {
-            // Posted, not cleared here: the focus listener is called by the
-            // framework through the main Looper, so the loss this rebuild
-            // caused is delivered AFTER play() returns. Clearing the flag
-            // inline let that loss through and paused the clip the proximity
-            // switch had just moved to the ear — the very thing it guards.
-            main.post { routing = false }
         }
         notifyState()
     }
@@ -156,12 +149,10 @@ object AudioPlayer {
     }
 
     private fun applySpeed(p: MediaPlayer) {
-        // Build a fresh PlaybackParams with only the speed field set (pitch
-        // stays 1.0 so voices don't turn chipmunky). Reading p.playbackParams
-        // first — as the getter — throws on a freshly start()ed player on many
-        // devices; the exception was swallowed, silently dropping the speed and
-        // resetting playback to 1x whenever a clip was recreated (e.g. the
-        // proximity switch to earpiece).
+        // Reading p.playbackParams first — as the getter — throws on a freshly
+        // start()ed player on many devices; the exception was swallowed,
+        // silently dropping the speed and resetting playback to 1x whenever a
+        // clip was recreated (e.g. the proximity switch to earpiece).
         try { p.playbackParams = PlaybackParams().setSpeed(speed) } catch (e: Exception) {}
     }
 
@@ -234,11 +225,6 @@ object AudioPlayer {
         abandonFocus()
     }
 
-    /**
-     * The stream the hardware volume keys must control while this player owns
-     * the audio: the media stream normally, the call stream on the earpiece
-     * fallback (which plays through the telephony path).
-     */
     val volumeStream: Int
         get() = if (ownsAudioMode) AudioManager.STREAM_VOICE_CALL else AudioManager.STREAM_MUSIC
 
@@ -251,15 +237,25 @@ object AudioPlayer {
     // again on its own would be a surprise.
     private var resumeOnFocusGain = false
 
-    // Set while play() tears the player down and rebuilds it on another output
-    // (the proximity switch to the earpiece does exactly this). The rebuild
-    // abandons and re-takes focus, and any loss reported across that window is
-    // our own doing — acting on it would pause the clip the user just put to
-    // their ear.
-    @Volatile private var routing = false
+    // A listener of its own per focus request, and only the current generation
+    // acts. play() rebuilding the player on another output (the proximity switch
+    // to the earpiece) abandons the focus request and takes a new one, and the
+    // loss the framework then reports lands on the abandoned request's listener,
+    // after play() has already returned — acting on it paused the clip the user
+    // had just put to their ear. Suppressing it by a flag cleared on the next
+    // main-loop turn instead swallowed genuine losses delivered in that turn,
+    // leaving the clip playing over whatever had taken the audio.
+    private var focusGen = 0
 
-    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        if (routing) return@OnAudioFocusChangeListener
+    private fun newFocusListener(): AudioManager.OnAudioFocusChangeListener {
+        val gen = ++focusGen
+        return AudioManager.OnAudioFocusChangeListener { change ->
+            if (gen != focusGen) return@OnAudioFocusChangeListener
+            onFocusChange(change)
+        }
+    }
+
+    private fun onFocusChange(change: Int) {
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
                 resumeOnFocusGain = false
@@ -293,7 +289,7 @@ object AudioPlayer {
                 // ducked speech is speech the user has to replay, so ask to be
                 // paused instead of turned down
                 .setWillPauseWhenDucked(true)
-                .setOnAudioFocusChangeListener(focusListener)
+                .setOnAudioFocusChangeListener(newFocusListener())
                 .build()
                 .also { focusRequest = it; focusComm = commMode }
         }
@@ -308,6 +304,7 @@ object AudioPlayer {
     private fun abandonFocus() {
         val req = focusRequest ?: return
         focusRequest = null
+        focusGen++
         resumeOnFocusGain = false
         audioManager?.abandonAudioFocusRequest(req)
     }
@@ -332,12 +329,9 @@ object AudioPlayer {
 
     private fun applyRoute(commMode: Boolean) {
         val am = audioManager ?: return
-        // The default (media) route selects the earpiece per-player via
-        // setPreferredDevice, staying on the media pipeline that honors playback
-        // speed. Communication mode is only the fallback for devices that won't
-        // route media to the earpiece — and it is the only case that touches the
-        // global audio mode, so the media route just releases a mode we own
-        // rather than forcing MODE_NORMAL on whatever owns it now.
+        // Ear playback always takes this path (see play): only the media
+        // pipeline honors playback speed, so speaker playback must not use it,
+        // and it is the only case that touches the global audio mode.
         if (commMode) {
             am.mode = AudioManager.MODE_IN_COMMUNICATION
             ownsAudioMode = true
@@ -348,8 +342,7 @@ object AudioPlayer {
     }
 
     private fun buildAttributes(commMode: Boolean): AudioAttributes {
-        // Communication mode uses the voice-call usage (voice volume stream);
-        // the media route uses USAGE_MEDIA so tempo changes take effect.
+        // The media route needs USAGE_MEDIA for tempo changes to take effect.
         val b = AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
         b.setUsage(if (commMode) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA)
         return b.build()

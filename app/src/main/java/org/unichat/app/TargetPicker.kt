@@ -13,10 +13,8 @@ fun Activity.targetChoices(): Pair<List<String>, List<String>> {
     val labels = ArrayList<String>()
     val chats = Bridge.visibleChats()
     // Every notes-to-self stays pinned above the chats rather than ordered by
-    // recency: Telegram's is where files are sent, and ordering these the way
-    // everything below is ordered pushed it under the others on any day it went
-    // unused. The order is Accounts.ALL's, so it matches every other place a
-    // protocol is offered.
+    // recency: Telegram's is where files are sent, and ordering these by recency
+    // pushed it under the others on any day it went unused.
     // selfIdBlocking, not selfId: both callers are on a worker thread, and a
     // share that started this process gets here before TDLib knows who we are.
     val selves = Accounts.active()
@@ -27,16 +25,17 @@ fun Activity.targetChoices(): Pair<List<String>, List<String>> {
         ids.add(self)
         labels.add(selfPickerLabel(this, self))
     }
+    val selfIds = selves.toHashSet()
     for (chat in chats) {
-        if (chat.id in ids) continue
+        if (chat.id in selfIds) continue
         ids.add(chat.id)
         labels.add(chat.displayLabelWithProto(this))
     }
     return labels to ids
 }
 
-/** Answers the dialog it put up, so a caller that has to know while one of its
- *  own windows holds the focus (see ChatActivity.onWindowFocusChanged) can. */
+// Returns the dialog so a caller can tell it is still up while one of its own
+// windows holds the focus (see ChatActivity.onWindowFocusChanged).
 fun Activity.showTargetPicker(
     titleRes: Int,
     labels: List<String>,
@@ -49,8 +48,7 @@ fun Activity.showTargetPicker(
     val list: ListView = view.findViewById(R.id.pickerList)
     list.layoutParams.height = resources.displayMetrics.heightPixels / 2
 
-    // ticked chats as indexes into `labels`/`ids`, in tick order — what onPick
-    // reports; survives every re-filter
+    // indexes into `labels`/`ids`, not list positions, so ticks survive a re-filter
     val chosen = LinkedHashSet<Int>()
     val visible = labels.indices.toMutableList()
     val adapter = ArrayAdapter(

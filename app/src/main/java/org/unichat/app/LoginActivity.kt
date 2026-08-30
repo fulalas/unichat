@@ -20,8 +20,6 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 
 /**
- * Links accounts: one tab per protocol that still needs one.
- *
  * The caller says which protocol it wants (see [intent]); without that, "Link"
  * on the Telegram row used to land on the WhatsApp QR. Signal has no panel here
  * because registering as a primary device needs its own screen — its tab opens
@@ -36,8 +34,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             Intent(ctx, LoginActivity::class.java).putExtra(EXTRA_PROTO, proto)
     }
 
-    // The protocols this screen links itself, resolved once. Anything else is
-    // sent to its own setup activity when its tab is tapped.
     private val panels = LinkedHashMap<String, View>()
     private val tabs = LinkedHashMap<String, Button>()
 
@@ -60,13 +56,11 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
 
     private var showing = ProtoPicker.WA
 
-    /** Protocols still unlinked. A link is only an event for one of these, so
-     *  the repeated "connected" a live account keeps sending cannot re-trigger
-     *  the just-linked flow while the user is mid-way through another form. */
+    /** A link is only an event for a protocol still in here, so the repeated
+     *  "connected" a live account keeps sending cannot re-trigger the
+     *  just-linked flow while the user is mid-way through another form. */
     private val pending = LinkedHashSet<String>()
 
-    /** The protocol whose own setup screen this screen sent the user to. Only
-     *  that one can come back linked with no event to notice it by. */
     private var awaitingSetup: String? = null
 
     private var qrStarted = false
@@ -109,8 +103,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         wireTelegram()
 
         Bridge.addListener(this)
-        // Anything already linked is one this screen has nothing left to do
-        // for, so there are chats to open.
         continueButton.visibility =
             if (pending.size < Accounts.ALL.size) View.VISIBLE else View.GONE
         select(requestedProto())
@@ -129,14 +121,10 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         if (Accounts.of(proto).isLinked()) claimLinked(proto)
     }
 
-    /** The one place [pending] shrinks: each protocol reports a link its own
-     *  way, and every one of them lands here. */
     private fun claimLinked(proto: String) {
         if (pending.remove(proto)) onLinked(proto)
     }
 
-    /** The protocol the caller asked for, or the first one still needing a
-     *  link. Only ever one this screen has a panel for. */
     private fun requestedProto(): String {
         val asked = intent.getStringExtra(EXTRA_PROTO)
         if (asked != null && asked in panels && asked in pending) return asked
@@ -246,10 +234,9 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
     }
 
     /**
-     * One protocol just linked. Leaving right away made it impossible to link a
-     * second account in the same sitting, so while this screen still has a
-     * protocol to offer (and is the first-run screen, not the "Link account"
-     * one), stay, switch to it and offer "Open chats".
+     * Leaving right away made it impossible to link a second account in the
+     * same sitting, so this screen stays while it still has a protocol to offer
+     * (and is the first-run screen, not the "Link account" one).
      */
     private fun onLinked(proto: String) {
         WmService.start(this)
@@ -330,7 +317,7 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
                 getString(R.string.pair_failed, code.removePrefix("other:"))
             else -> getString(R.string.pair_failed, code)
         }
-        statusText.text = message
+        if (showing == ProtoPicker.WA) statusText.text = message
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
@@ -343,7 +330,7 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             tgVerifyButton.isEnabled = true
             tgPasswordButton.isEnabled = true
             val text = Tg.authErrorText(this, message)
-            statusText.text = text
+            if (showing == ProtoPicker.TG) statusText.text = text
             Toast.makeText(this, text, Toast.LENGTH_LONG).show()
             return
         }

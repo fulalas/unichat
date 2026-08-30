@@ -17,14 +17,11 @@ object Bridge : EventListener {
         fun onContactsChanged() {}
         fun onMessagesChanged(chatId: String, rowIds: Set<String>? = null) {}
         fun onChatMerged(fromId: String, toId: String) {}
-        /** One account's connection changed. [proto] says which; there used to
-         *  be a separate callback per protocol, so a screen listening to all of
-         *  them said the same thing three times. */
+        /** There used to be a separate callback per protocol, so a screen
+         *  listening to all of them said the same thing three times. */
         fun onAccountState(proto: String, state: String) {}
-        /** [proto] says which account the code links. */
         fun onQrCode(proto: String, code: String) {}
         fun onPairCode(code: String) {}
-        /** [proto] says which account failed to link. */
         fun onPairError(proto: String, code: String) {}
         fun onSyncProgress(progress: Int) {}
         fun onDownloadProgress(chatId: String, msgId: String, pct: Int) {}
@@ -100,13 +97,9 @@ object Bridge : EventListener {
     private var contactsChanged = false
     private var notifyPending = false
 
-    /**
-     * Kicks off [init] on a background thread from Application.onCreate so its
-     * disk work (opening the Go sqlstore, running its migrations, a device-store
-     * query) overlaps process startup instead of running strictly before the
-     * first frame. init() is @Synchronized, so the first Activity that calls it
-     * simply blocks on the same monitor until this finishes.
-     */
+    // Overlaps init's disk work (Go sqlstore open, migrations, a device-store
+    // query) with process startup. init() is @Synchronized, so the first
+    // Activity that calls it just blocks until this finishes.
     fun warmUp(context: Context) {
         if (connId >= 0 || warmingUp) return
         warmingUp = true
@@ -142,8 +135,8 @@ object Bridge : EventListener {
         if (chatId.isEmpty()) { main.post { AudioPlayer.resetRoute() }; return }
         if (connId < 0) return
         executor.execute {
-            // query the next voice message directly (not limited to the last 500
-            // loaded rows), and use the DB as the source of truth for its file
+            // the DB, not the loaded rows: the next voice message can lie
+            // outside the last 500 the chat has loaded
             val next = db.nextAudioMessage(chatId, finishedMsgId)
             if (next == null) {
                 main.post { AudioPlayer.resetRoute() }
@@ -238,21 +231,18 @@ object Bridge : EventListener {
 
         val consumesStagingInput: Boolean
 
-        // Searching a chat's whole history needs a server that can read it.
         // WhatsApp is end-to-end encrypted and Signal has no such query, so
-        // those chats are searched locally, over what has been synced — these
-        // default to "nothing here" rather than being asked per call site.
+        // those chats are searched locally, over what has been synced.
         fun searchServer(chatId: String, query: String, fromMessageId: Long): Tg.SearchPage? = null
         fun searchContext(chatId: String, msgId: String): List<MessageRow> = emptyList()
         fun searchSlice(chatId: String, msgId: String, newer: Boolean): List<MessageRow> = emptyList()
         fun chatPhotos(chatId: String, msgId: String, newer: Boolean?): List<MessageRow> = emptyList()
         fun searchMedia(chatId: String, msgId: String): String = ""
 
-        /** Who reacted, when the server keeps that list. Null means "no server
-         *  list": the stored reactions are all there is. */
+        /** Null means the server keeps no such list: the stored reactions are
+         *  all there is. */
         fun reactionSenders(msg: MessageRow): List<Pair<String, String>>? = null
 
-        /** Which media kinds can be sent view-once in this chat. */
         fun viewOnceKinds(chatId: String): Set<String>
     }
 
@@ -264,18 +254,14 @@ object Bridge : EventListener {
     private val WA_VIEW_ONCE = setOf("image", "video", "audio")
     private val TG_VIEW_ONCE = setOf("image", "video")
 
-    private fun proto(chatId: String): Protocol = when {
-        isTg(chatId) -> TgTransport
-        Signal.isSgId(chatId) -> SgTransport
+    private fun proto(chatId: String): Protocol = when (Accounts.ofChat(chatId).proto) {
+        ProtoPicker.TG -> TgTransport
+        ProtoPicker.SG -> SgTransport
         else -> WaTransport
     }
 
-    /**
-     * Signal. Text, attachments, reactions, edits, deletes, quotes, receipts,
-     * typing, contact cards and location are wired; avatars and history are
-     * not, and those members are deliberate no-ops rather than crashes so a
-     * chat degrades instead of failing.
-     */
+    // Avatars and history are not wired for Signal: those members are
+    // deliberate no-ops, so a chat degrades instead of failing.
     private object SgTransport : Protocol {
         override fun sendText(
             chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
@@ -326,8 +312,6 @@ object Bridge : EventListener {
         override fun setMuted(chatId: String, muted: Boolean) {
             db.setMuted(chatId, muted)
         }
-        // Off the main thread: this is called from ChatActivity on every
-        // messages-changed burst, and the lookup is an ORDER BY over the chat.
         // Clearing is_read locally is what stops this repeating: ChatActivity
         // calls it on every messages-changed burst, so without it the unread
         // badge never cleared and the same receipt went out again each time.
@@ -347,8 +331,8 @@ object Bridge : EventListener {
         // as a live export sitting at zero messages, so every Signal chat opened
         // with "Exporting… 0 messages fetched" under its title.
         override fun syncAllProgress(chatId: String) = -1
-        // Straight from the local store, unlike the other two: Signal keeps no
-        // server-side history to walk, so what has been received is all of it.
+        // Signal keeps no server-side history to walk, so the local store is
+        // all of it.
         override fun exportChat(chatId: String, uri: android.net.Uri): Boolean {
             val ctx = appContext ?: return false
             // One at a time per chat, like the other two: a second run wrote the
@@ -531,7 +515,6 @@ object Bridge : EventListener {
                 var dispatched = false
                 try {
                     val (path, status) = db.fileState(msg.chatId, msg.id)
-                    // a downloaded row whose file vanished from disk re-downloads
                     if (status >= 2 && path.isNotEmpty() && java.io.File(path).exists()) return@execute
                     db.setFileState(msg.chatId, msg.id, "", 1)
                     Wmbridge.downloadFile(connId, msg.chatId, msg.id, msg.fileId, msg.fromMe, msg.senderId)
@@ -716,10 +699,9 @@ object Bridge : EventListener {
         }
     }
 
-    // Hops to the main thread and fans an event out to every UI listener.
     // With no listener attached (app backgrounded, service still connected)
     // there is nothing to deliver to, and posting anyway allocated a closure
-    // plus a Message for every event the two protocols keep producing.
+    // plus a Message for every event the protocols keep producing.
     private fun notifyUi(block: (UiListener) -> Unit) {
         if (listeners.isEmpty()) return
         main.post { for (l in listeners) block(l) }
@@ -795,7 +777,6 @@ object Bridge : EventListener {
             main.postDelayed({ pendingMute.remove(chatId) }, PENDING_MUTE_TTL_MS)
             notifyChatsChanged()
         }
-        // the bridge now reports whether the app-state write actually went out;
         // an offline toggle used to fail with nothing but a log line
         if (!Wmbridge.setMute(connId, chatId, muted)) {
             Log.w(TAG, "mute change not synced for $chatId (offline?)")
@@ -810,10 +791,11 @@ object Bridge : EventListener {
 
     private fun reconcileMutes() = executor.execute {
         val flags = db.mutedFlags()
-        // Telegram chats share this table but their mute lives on Telegram's
-        // servers; asking the Go bridge about a "tg:" id always answers "not
-        // muted", which silently un-muted every Telegram chat on each connect.
-        val ids = flags.keys.filter { it !in pendingMute && !isTg(it) }
+        // Telegram and Signal chats share this table but their mute lives on
+        // their own side; asking the Go bridge about a "tg:" or "sg:" id always
+        // answers "not muted", which silently un-muted every such chat on each
+        // connect.
+        val ids = flags.keys.filter { it !in pendingMute && isWaId(it) }
         if (ids.isEmpty()) return@execute
         val mutedNow = Wmbridge.mutedChats(connId, ids.joinToString("\n"))
             .split("\n").filterTo(HashSet()) { it.isNotEmpty() }
@@ -866,12 +848,9 @@ object Bridge : EventListener {
         sendFileBlocking(chatId, filePath, fileName, mimeType, caption, quoted, viewOnce)
     }
 
-    /**
-     * One file of a batch picked together, sent to completion before the next
-     * one starts. On [batchExecutor], not mediaExecutor's two workers, where a
-     * small file overtook the larger one picked before it and the attachments
-     * arrived shuffled.
-     */
+    // On [batchExecutor], not mediaExecutor's two workers, where a small file
+    // overtook the larger one picked before it and the attachments arrived
+    // shuffled.
     fun sendFileInOrder(
         chatId: String, filePath: String, fileName: String, mimeType: String,
         quoted: MessageRow? = null, viewOnce: Boolean = false,
@@ -899,38 +878,28 @@ object Bridge : EventListener {
         }
     }
 
-    /**
-     * Whether this chat can carry a view-once send of that kind. WhatsApp takes
-     * photo, video and voice anywhere. Telegram self-destructs photo and video
-     * in one-to-one chats only, and rejects the flag outright on anything else
-     * ("Can't enable self-destruction for media"), so the option is not offered.
-     */
+    // WhatsApp takes photo, video and voice anywhere. Telegram self-destructs
+    // photo and video in one-to-one chats only, and rejects the flag outright
+    // on anything else ("Can't enable self-destruction for media").
     fun viewOnceSupported(chatId: String, kind: String): Boolean =
         kind in proto(chatId).viewOnceKinds(chatId)
 
-    /**
-     * Telegram's own chat, by id when TDLib has published it and by the contact
-     * row's flag until then — a first run reaches this from a long-press before
-     * my_id lands, and an unrecognised self chat is offered a view-once send the
-     * server then refuses. Queried only in that window, never once the id is in.
-     */
+    // TDLib publishes my_id late: a first run reaches this from a long-press
+    // before it lands, and an unrecognised self chat was offered a view-once
+    // send the server then refuses — hence the contact-row fallback.
     private fun isTgSelfChat(chatId: String): Boolean {
         Tg.selfId().let { if (it.isNotEmpty()) return chatId == it }
         return db.isSelfContact(chatId)
     }
 
-    /** Who reacted to a message, and with what. Blocking; worker threads only. */
+    /** Blocking; worker threads only. */
     fun reactionsOf(msg: MessageRow): List<Pair<String, String>> =
         proto(msg.chatId).reactionSenders(msg) ?: db.reactionsOf(msg.chatId, msg.id)
 
-    // A failed media send is otherwise invisible outside logcat (the share
-    // flow has already finished by the time the upload runs); surface it.
-    /**
-     * Sends a message whose send failed again, as a new message: a protocol keys
-     * a message by the timestamp it stamps on it, so a retry can never reuse the
-     * old row. Answers false for what the row cannot rebuild — media whose local
-     * file is gone, or a contact card with no number left in its body.
-     */
+    // Retries as a NEW message: a protocol keys a message by the timestamp it
+    // stamps on it, so a retry can never reuse the old row. False for what the
+    // row cannot rebuild — media whose local file is gone, or a contact card
+    // with no number left in its body.
     fun retrySend(msg: MessageRow): Boolean {
         val card = msg.text.lines().filter { it.isNotBlank() }
         if (msg.msgType in NEEDS_LOCAL_FILE && !fileOnDisk(msg)) return false
@@ -945,7 +914,9 @@ object Bridge : EventListener {
                 // A second tap reaches here while the first one's refresh is
                 // still in flight; the row being gone is what says it is done.
                 if (!db.hasMessage(msg.chatId, msg.id)) return@execute
-                val since = System.currentTimeMillis() / 1000
+                retryEchoed = false
+                retryRowId = msg.id
+                retryChat = msg.chatId
                 val ok = if (msg.msgType == "contact") {
                     proto(msg.chatId).sendContact(msg.chatId, card.first(), card.drop(1))
                 } else {
@@ -956,18 +927,21 @@ object Bridge : EventListener {
                     val mentions = storedMentions(msg.text) { db.contactName(it) != null }
                     forwardOneBlocking(msg.chatId, msg, quoted, mentions)
                 }
-                // The old row goes only once something has replaced it. Deleted
-                // up front, a retry that failed before its transport wrote an
-                // echo (an offline upload, an unlinked account) took the user's
-                // message with it and left nothing but a toast.
-                if (ok || db.hasOwnMessageSince(msg.chatId, since, msg.id)) {
-                    db.deleteMessage(msg.chatId, msg.id)
-                }
+                // The old row goes only once THIS retry's echo has replaced it.
+                // Deleted up front, a retry that failed before its transport
+                // wrote an echo (an offline upload, an unlinked account) took
+                // the user's message with it and left nothing but a toast; and
+                // asking the store for any own message since a second-resolution
+                // timestamp instead matched a message the user had just sent by
+                // hand, so a retry tapped in that same second deleted the unsent
+                // one with nothing to replace it.
+                if (ok || retryEchoed) db.deleteMessage(msg.chatId, msg.id)
                 if (ok && proto(msg.chatId).consumesStagingInput && isStagingPath(msg.filePath)) {
                     java.io.File(msg.filePath).delete()
                 }
                 notifyChat(msg.chatId)
             } finally {
+                retryChat = ""
                 retrying.remove(msg.chatId + KEY_SEP + msg.id)
             }
         }
@@ -976,8 +950,15 @@ object Bridge : EventListener {
 
     private val retrying = ConcurrentHashMap.newKeySet<String>()
 
-    private val NEEDS_LOCAL_FILE = setOf("image", "video", "audio", "document", "sticker")
+    // [batchExecutor] is single-threaded, so at most one retry watches at a time.
+    @Volatile private var retryChat = ""
+    @Volatile private var retryRowId = ""
+    @Volatile private var retryEchoed = false
 
+    private val NEEDS_LOCAL_FILE = PICTURE_TYPES + setOf("video", "audio", "document")
+
+    // A failed media send is otherwise invisible outside logcat: the share flow
+    // has already finished by the time the upload runs.
     private fun onSendFailed(kind: String, chatId: String) {
         Log.w(TAG, "$kind send failed for chat $chatId")
         toastUi(R.string.send_failed)
@@ -1043,13 +1024,10 @@ object Bridge : EventListener {
             if (!proto(chatId).sendContact(chatId, name, numbers)) onSendFailed("contact", chatId)
         }
 
-    // A dedicated single thread for sending a batch (a multi-select forward, a
-    // multi-file attachment): each message (media included — its upload
-    // finishes) is sent to completion before the next starts, so the batch
-    // arrives in the same order it was sent. Off the shared
+    // Each message (its upload included) is sent to completion before the next
+    // starts, so a batch arrives in the order it was sent. Off the shared
     // executor/mediaExecutor so a slow upload never stalls live sending or
-    // receiving — nor the media downloads and avatar fetches that share
-    // mediaExecutor's two workers.
+    // receiving, nor the downloads and avatar fetches sharing mediaExecutor.
     private val batchExecutor = Executors.newSingleThreadExecutor()
 
     fun forwardMessages(
@@ -1068,8 +1046,7 @@ object Bridge : EventListener {
         target: String, m: MessageRow, quoted: MessageRow?, mentions: List<Mention> = emptyList(),
     ): Boolean {
         // cross-protocol forwards work because every send re-uploads the local
-        // file, so a Telegram target takes the same paths a WhatsApp one does.
-        // The mapping used to be spelled out once per protocol.
+        // file, so a Telegram target takes the same paths a WhatsApp one does
         val p = proto(target)
         val ok = when (m.msgType) {
             "image", "sticker" -> p.sendImage(target, m.filePath, m.text, quoted, false)
@@ -1090,8 +1067,8 @@ object Bridge : EventListener {
         return ok
     }
 
-    // when each contact was last subscribed: the chat list asks per visible row,
-    // so without this a scroll re-sends a subscription per rebind. Deliberately
+    // The chat list asks per visible row, so without this memo a scroll
+    // re-sends a subscription per rebind. Deliberately
     // NOT permanent — a WhatsApp presence subscription is short-lived on the
     // server and dropped on reconnect, which is why the open chat re-arms its
     // own every 30s; a for-the-run memo swallowed that refresh and froze the
@@ -1102,13 +1079,10 @@ object Bridge : EventListener {
     // while a scroll's worth of rebinds still collapses into one subscription
     private const val PRESENCE_MEMO_MS = 25_000L
 
-    /**
-     * Called per visible chat-list row. The memo is checked on the CALLING
-     * thread: doing it inside the task meant every rebind still allocated and
-     * queued a Runnable that almost always did nothing — onto the same serial
-     * executor that carries sends, mark-read and history requests, so a fling
-     * pushed a burst of no-ops ahead of real work.
-     */
+    // The memo is checked on the CALLING thread: doing it inside the task meant
+    // every rebind still allocated and queued a Runnable that almost always did
+    // nothing — onto the same serial executor that carries sends, mark-read and
+    // history requests, so a fling pushed a burst of no-ops ahead of real work.
     fun subscribePresence(userId: String) {
         val now = android.os.SystemClock.elapsedRealtime()
         val last = presenceSubscribed[userId]
@@ -1181,13 +1155,8 @@ object Bridge : EventListener {
         return started
     }
 
-    /**
-     * Searches a chat's whole history on the server. Telegram only: WhatsApp is
-     * end-to-end encrypted, so its servers hold nothing readable to search and
-     * no companion-device query exists — those chats are searched locally, over
-     * what has been synced. Null means "no server search here" or a failed call.
-     * Blocking; worker threads only.
-     */
+    /** Null means no server search here, or a failed call. Blocking; worker
+     *  threads only. */
     fun searchServer(chatId: String, query: String, fromMessageId: Long): Tg.SearchPage? =
         proto(chatId).searchServer(chatId, query, fromMessageId)
 
@@ -1225,21 +1194,14 @@ object Bridge : EventListener {
     fun searchSlice(chatId: String, msgId: String, newer: Boolean): List<MessageRow> =
         proto(chatId).searchSlice(chatId, msgId, newer)
 
-    /**
-     * The chat's pictures around a message, for the viewer opened from a search
-     * result — whose rows are not stored, so the stored album is no help.
-     * [newer] null centres on the anchor. Blocking; worker threads only.
-     * Empty for WhatsApp, whose server holds nothing searchable.
-     */
+    /** [newer] null centres on the anchor. Blocking; worker threads only.
+     *  Empty for WhatsApp, whose server holds nothing searchable. */
     fun chatPhotos(chatId: String, msgId: String, newer: Boolean?): List<MessageRow> =
         proto(chatId).chatPhotos(chatId, msgId, newer)
 
-    /**
-     * Fetches the file of a message shown in a search window. Those rows are not
-     * stored, so the usual download path — which records its progress on the
-     * row — has nothing to write to; this hands the path straight back instead.
-     * Blocking.
-     */
+    /** Search-window rows are not stored, so the usual download path — which
+     *  records its progress on the row — has nothing to write to; this hands
+     *  the path straight back instead. Blocking. */
     fun searchMedia(chatId: String, msgId: String): String =
         proto(chatId).searchMedia(chatId, msgId)
 
@@ -1289,13 +1251,11 @@ object Bridge : EventListener {
 
     fun requestInitialHistory(chatId: String) = proto(chatId).requestInitialHistory(chatId)
 
-    // --- history request: single in-flight slot ------------------------------
-    // At most ONE on-demand request is outstanding at a time. The phone's
-    // end-of-history response names no chat, so a single in-flight request
-    // keeps attribution unambiguous and lets a stale timeout or a superseded /
-    // duplicate delivery be recognised (by generation / mismatch) and ignored.
-    // All slot state is confined to the executor thread.
-
+    // At most ONE on-demand history request is outstanding at a time: the
+    // phone's end-of-history response names no chat, so a single in-flight
+    // request is what keeps attribution unambiguous and lets a stale timeout or
+    // a superseded/duplicate delivery be recognised and ignored. All slot state
+    // is confined to the executor thread.
     private class HistoryReq(
         val chatId: String, val anchorId: String, val forExport: Boolean, val gen: Long,
         val forSeek: Boolean = false,
@@ -1304,9 +1264,8 @@ object Bridge : EventListener {
 
     @Volatile private var historyInFlight: HistoryReq? = null
     private var historyGen = 0L
-    // next-request anchor per chat (non-export), advanced by each delivered
-    // page's reported oldest so a page of only non-displayable entries still
-    // makes progress; seeded from the local oldest message
+    // advanced by each delivered page's reported oldest, so a page of only
+    // non-displayable entries still makes progress
     private val historyAnchor = ConcurrentHashMap<String, Anchor>()
 
     private fun sendHistoryPage(
@@ -1350,7 +1309,7 @@ object Bridge : EventListener {
         if (chatId in historyExhausted) { endSyncAll(chatId, complete = true); return }
         val anchor = historyAnchor[chatId]
             ?: db.oldestMessage(chatId)?.let { Anchor(it.id, it.timeSent, it.fromMe) }
-        if (anchor == null) { endSyncAll(chatId, complete = false); return } // no local anchor
+        if (anchor == null) { endSyncAll(chatId, complete = false); return }
         historyAnchor[chatId] = anchor
         if (sendHistoryPage(chatId, anchor, forExport = false) == null &&
             retryIfBusy && syncAllChat == chatId
@@ -1372,6 +1331,10 @@ object Bridge : EventListener {
         if (req.forSeek) {
             val s = seek
             if (s == null || s.chatId != chatId) return@execute
+            // A page of a superseded seek in the SAME chat must not advance the
+            // new seek's anchor: it made the walk skip the stretch between the
+            // two starting points and report the target as missing.
+            if (req.anchorId != s.anchor.id) return@execute
             when {
                 db.hasMessage(chatId, s.targetId) -> { seek = null; notifySeek(chatId, s.targetId, true) }
                 exhausted -> { seek = null; notifySeek(chatId, s.targetId, false) }
@@ -1393,7 +1356,7 @@ object Bridge : EventListener {
             endSyncAll(chatId, complete = true)
         } else {
             historyAnchor[chatId] = Anchor(oldestId, oldestTime, oldestFromMe)
-            continueSyncAll(chatId) // no-op unless a sync-all runs on this chat
+            continueSyncAll(chatId)
         }
     }
 
@@ -1410,7 +1373,7 @@ object Bridge : EventListener {
         if (chatExport != null) return false
         val cur = syncAllChat
         if (cur != null && cur != chatId) return false
-        if (cur == chatId) return true // already running
+        if (cur == chatId) return true
         executor.execute {
             if (chatExport != null || (syncAllChat != null && syncAllChat != chatId)) return@execute
             // Restart the walk at the NEWEST message instead of resuming from
@@ -1519,9 +1482,6 @@ object Bridge : EventListener {
         executor.execute { writeExport(ex, complete) }
     }
 
-    // Merges the fetched history with the local store (local rows win — they
-    // carry richer state) and writes the file; the UI learns the outcome via
-    // the listener, so a recreated activity still gets the completion.
     internal fun releaseExportUri(uri: android.net.Uri) {
         val ctx = appContext ?: return
         try {
@@ -1585,9 +1545,9 @@ object Bridge : EventListener {
 
     fun selfIdOf(chatId: String): String = Accounts.ofChat(chatId).selfId()
 
-    /** A contact's @lid alias mapped back to their phone JID. Blocking; worker
-     *  threads only. Opening a chat under the alias would fork a second thread
-     *  for someone already there under their number (see reconcileLidChats). */
+    /** Blocking; worker threads only. Opening a chat under a contact's @lid
+     *  alias would fork a second thread for someone already there under their
+     *  phone JID (see reconcileLidChats). */
     fun resolveChatId(chatId: String): String {
         if (connId < 0 || isTg(chatId) || !chatId.endsWith("@lid")) return chatId
         return Wmbridge.resolveChatId(connId, chatId).ifEmpty { chatId }
@@ -1636,11 +1596,8 @@ object Bridge : EventListener {
      *  them — the same person, under two ids, on WhatsApp. */
     class Member(val chatId: String, val mentionId: String, val name: String)
 
-    /**
-     * Who is in a group, for the profile screen and the @ picker. Blocking
-     * (both protocols ask their server); worker threads only. Empty for a
-     * group whose member list this account is not allowed to read.
-     */
+    /** Blocking (both protocols ask their server); worker threads only. Empty
+     *  for a group whose member list this account may not read. */
     fun groupMembers(chatId: String): List<Member> {
         if (!isGroupId(chatId)) return emptyList()
         val names = db.contactNames()
@@ -1678,12 +1635,9 @@ object Bridge : EventListener {
 
     class PeerInfo(val phone: String, val nickname: String, val about: String)
 
-    /**
-     * What the contact-info screen shows about the person on the other side.
-     * Blocking (both protocols ask their server); worker threads only. Every
-     * field is optional — an empty About is indistinguishable from one the
-     * contact's privacy settings hide, so the row is simply left out.
-     */
+    /** Blocking (both protocols ask their server); worker threads only. Every
+     *  field is optional — an empty About is indistinguishable from one the
+     *  contact's privacy settings hide, so the row is simply left out. */
     fun peerInfo(chatId: String): PeerInfo {
         if (isTg(chatId)) {
             val info = Tg.peerInfo(chatId) ?: return PeerInfo("", "", "")
@@ -1705,27 +1659,23 @@ object Bridge : EventListener {
     fun getAvatarPath(chatId: String): String =
         proto(chatId).avatarPath(chatId, big = false, cachedOnly = false)
 
-    /**
-     * On-disk avatar path only — never a network fetch. Used on the notification
-     * path, which is a single serialized thread: a stale-cache fetch there is a
-     * blocking, timeout-less HTTP request that delays the alert and every task
-     * queued behind it (including the cancel that fires when the user opens the
-     * chat). A missing/stale picture is worth less than a prompt notification.
-     */
+    /** Never a network fetch: this runs on the notification path, a single
+     *  serialized thread, where a stale-cache fetch is a blocking, timeout-less
+     *  HTTP request that delays the alert and every task queued behind it
+     *  (including the cancel fired when the user opens the chat). */
     fun getCachedAvatarPath(chatId: String): String =
         proto(chatId).avatarPath(chatId, big = false, cachedOnly = true)
 
     fun getAvatarFullPath(chatId: String): String =
         proto(chatId).avatarPath(chatId, big = true, cachedOnly = false)
 
-    // Fetches the full-resolution avatar off-thread and opens it fullscreen.
     // The fetch can block on the network for a long time, so the activity may
     // well be gone by the time it returns — launching a viewer from a destroyed
     // activity would pop it over whatever screen the user moved on to.
     fun openAvatar(activity: android.app.Activity, chatId: String) {
         mediaExecutor.execute {
             var path = getAvatarFullPath(chatId)
-            if (path.isEmpty()) path = getAvatarPath(chatId) // fall back to thumbnail
+            if (path.isEmpty()) path = getAvatarPath(chatId)
             activity.runOnUiThread {
                 if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
                 if (path.isEmpty()) {
@@ -1789,8 +1739,9 @@ object Bridge : EventListener {
         syncAllRounds = 0
         pendingMute.clear()
         // the next account starts with an empty history, so no WhatsApp chat may
-        // still claim its search covered everything
-        appContext?.let { Prefs.clearHistoryCompleteWhere(it) { id -> isWaId(id) } }
+        // still claim its search covered everything, keep the old account's
+        // drafts, or anchor scrolling on ids from the old sync
+        appContext?.let { Prefs.clearChatPrefsWhere(it) { id -> isWaId(id) } }
         downloading.removeAll { isWaId(it.substringBeforeLast('/')) }
         userRequestedDownloads.removeAll { isWaId(it.substringBeforeLast('/')) }
         autoRetriedFailures.removeAll { isWaId(it.substringBeforeLast('/')) }
@@ -1808,19 +1759,17 @@ object Bridge : EventListener {
         notifyChatsChanged()
     }
 
-    // WhatsApp is the protocol without a prefix, so its ids can only be named by
-    // excluding every other protocol's — the same rule Db.clearWaData uses. A
-    // new prefix has to be added there AND here, or unlinking WhatsApp throws
-    // away that protocol's live state too.
+    // WhatsApp is the protocol without a prefix, so an id is its only by not
+    // being anyone else's. [Accounts.ofChat] is where that rule lives: spelled
+    // out again here, a new protocol's prefix had to be remembered in two
+    // places, and forgetting one made unlinking WhatsApp throw away that
+    // protocol's live state too.
     private fun isWaId(id: String): Boolean =
-        id.isNotEmpty() && !Tg.isTgId(id) && !Signal.isSgId(id)
+        id.isNotEmpty() && Accounts.ofChat(id).proto == ProtoPicker.WA
 
-    /**
-     * A transfer finished, for a protocol whose own callback does not already do
-     * this bookkeeping. Releasing the claim downloadFile took is the part that
-     * matters: without it a failed download can never be retried, because every
-     * later attempt sees the slot still held and dispatches nothing.
-     */
+    // Releasing the claim downloadFile took is the part that matters: without
+    // it a failed download can never be retried, because every later attempt
+    // sees the slot still held and dispatches nothing.
     internal fun onFileTransferDone(chatId: String, msgId: String, filePath: String, status: Int) {
         val key = "$chatId/$msgId"
         downloading.remove(key)
@@ -1931,10 +1880,8 @@ object Bridge : EventListener {
 
     override fun onContactsSynced() = executor.execute { reconcileLidChats() }
 
-    // Heal chats mistakenly keyed by a contact's LID (a live message that landed
-    // before the LID→phone mapping was known). Driven off the app's own @lid chats
-    // — bounded (usually none) and independent of whether the contact has a name —
-    // resolving each via the bridge and folding it into its phone-JID chat.
+    // Heals chats mistakenly keyed by a contact's LID: a live message can land
+    // before the LID→phone mapping is known.
     private fun reconcileLidChats() {
         if (connId < 0) return
         var merged = false
@@ -1951,13 +1898,10 @@ object Bridge : EventListener {
         if (merged) notifyChatsChanged()
     }
 
-    /**
-     * Moves every piece of process-local per-chat state from a merged-away id to
-     * its replacement. mergeChat only re-keys DB rows; anything keyed by the old
-     * id here kept pointing at a chat that no longer exists (an orphan
-     * notification whose tap opened a blank screen, a phantom "typing…", a
-     * pagination anchor for nothing).
-     */
+    // mergeChat only re-keys DB rows; process-local state left under the old id
+    // kept pointing at a chat that no longer exists (an orphan notification
+    // whose tap opened a blank screen, a phantom "typing…", a pagination anchor
+    // for nothing).
     private fun rekeyChatState(fromId: String, toId: String) {
         historyAnchor.remove(fromId)?.let { historyAnchor.putIfAbsent(toId, it) }
         if (historyExhausted.remove(fromId)) historyExhausted.add(toId)
@@ -2010,11 +1954,6 @@ object Bridge : EventListener {
     }
 
     /**
-     * The tail every incoming message shares, whichever protocol brought it in:
-     * store it, order the chat list, pull the media a bubble or a notification
-     * needs right now, and raise that notification.
-     *
-     * The flags are the things the three protocols genuinely disagree on.
      * [notify] is false for history backfill. [fetchMedia] is false when our
      * own send already has the file on this device — Signal downloading it back
      * raced the local copy. [bump] is false for an edit, which must not reorder
@@ -2032,6 +1971,9 @@ object Bridge : EventListener {
         // would create a row that can never be matched to a real message
         if (row.id.isEmpty()) { Log.w(TAG, "message with empty id for ${row.chatId}"); return }
         db.upsertMessage(row)
+        // Every protocol's own echo comes through here, which is what lets
+        // [retrySend] tell its replacement apart from any other own message.
+        if (row.fromMe && row.chatId == retryChat && row.id != retryRowId) retryEchoed = true
         afterStore()
         if (bump) db.bumpChat(row.chatId, row.timeSent)
         // A row that already carries a path has its bytes: Telegram hands one
@@ -2087,7 +2029,6 @@ object Bridge : EventListener {
     }
 
     fun closeChat(chatId: String, owner: Any? = null) {
-        // only the instance that last claimed the chat may release it
         // Before the owner check: openChat ran once for THIS screen, so its
         // close has to run too. Two screens on one chat (a share, or a
         // notification deep-link onto an open chat) otherwise left TDLib's
@@ -2202,9 +2143,17 @@ object Bridge : EventListener {
     override fun onChatReadSelf(chatId: String, msgId: String) {
         if (wiping) return
         // WhatsApp reports the chat only; Signal names the message read, and
-        // anything newer that landed here since must stay unread.
-        if (msgId.isEmpty()) db.markChatRead(chatId) else db.markChatReadUpTo(chatId, msgId)
-        if (db.latestUnread(chatId) == null) {
+        // anything newer that landed here since must stay unread — so only the
+        // Signal path can be left with an unread the notification still belongs
+        // to. Marking the whole chat read leaves none by construction.
+        val allRead = if (msgId.isEmpty()) {
+            db.markChatRead(chatId)
+            true
+        } else {
+            db.markChatReadUpTo(chatId, msgId)
+            db.latestUnread(chatId) == null
+        }
+        if (allRead) {
             appContext?.let { ctx -> notifyExecutor.execute { Notifications.cancel(ctx, chatId) } }
         }
         notifyChat(chatId)
@@ -2217,11 +2166,10 @@ object Bridge : EventListener {
         notifyChatsChanged()
     }
 
-    // Separator for the composite "chatId + userId" keys below. Written as an
-    // escape, NOT as a literal control character: two raw NUL bytes in this file
-    // used to make grep classify the largest Kotlin source in the project as
-    // binary and skip it, so `grep -r` over app/src silently missed every
-    // reference that lives here.
+    // Written as an escape, NOT as a literal control character: two raw NUL
+    // bytes in this file used to make grep classify the largest Kotlin source
+    // in the project as binary and skip it, so `grep -r` over app/src silently
+    // missed every reference that lives here.
     private const val KEY_SEP = "\u0000"
 
     private val stateClearers = ConcurrentHashMap<String, Runnable>()
@@ -2306,17 +2254,14 @@ object Bridge : EventListener {
     internal fun notifyPairError(proto: String, code: String) =
         notifyUi { it.onPairError(proto, code) }
 
-    /**
-     * The chat list minus any paused account's rows. Behind one accessor rather
-     * than at each call site: the share/forward picker read db.chats() directly
-     * and went on offering chats that could neither send nor receive.
-     */
-    /** Whether an account is switched on in Manage accounts. */
     fun protoEnabled(proto: String): Boolean {
         val ctx = appContext ?: return true
         return Prefs.protoEnabled(ctx, proto)
     }
 
+    // Behind one accessor rather than at each call site: the share/forward
+    // picker read db.chats() directly and went on offering chats that could
+    // neither send nor receive.
     fun visibleChats(): List<ChatRow> {
         val ctx = appContext ?: return db.chats()
         val hidden = Accounts.ALL.filterNot { Prefs.protoEnabled(ctx, it.proto) }

@@ -14,13 +14,31 @@ if (tgFile.exists()) {
         "  then fill in your own api_id and api_hash from https://my.telegram.org"
     )
 }
-def tgApiId = tgProps.getProperty('api_id', '').trim()
+def tgApiIdRaw = tgProps.getProperty('api_id', '').trim()
 def tgApiHash = tgProps.getProperty('api_hash', '').trim()
-if (!(tgApiId ==~ /^[0-9]+$/)) {
-    throw new GradleException("telegram.properties: api_id must be digits only, got '${tgApiId}'")
+// Parse instead of pasting the raw text into BuildConfig: a value with a
+// leading zero would compile as a Java octal literal, and an out-of-range one
+// as a cryptic javac error.
+def tgApiId
+try {
+    tgApiId = Integer.parseInt(tgApiIdRaw)
+} catch (NumberFormatException ignored) {
+    throw new GradleException("telegram.properties: api_id must be a decimal integer, got '${tgApiIdRaw}'")
+}
+if (tgApiId <= 0) {
+    throw new GradleException("telegram.properties: api_id must be positive, got '${tgApiIdRaw}'")
 }
 if (!(tgApiHash ==~ /^[0-9a-fA-F]{32}$/)) {
     throw new GradleException("telegram.properties: api_hash must be 32 hex characters")
+}
+
+// Gradle's files() silently ignores a missing file, so without this a fresh
+// clone fails much later with unresolved-reference Kotlin errors.
+if (!file('libs/wmbridge.aar').exists()) {
+    throw new GradleException(
+        "app/libs/wmbridge.aar not found.\n" +
+        "  Run ./build.sh to build the Go bridge first."
+    )
 }
 
 android {
@@ -32,14 +50,14 @@ android {
     }
 
     defaultConfig {
-        buildConfigField "int", "TG_API_ID", tgApiId
+        buildConfigField "int", "TG_API_ID", tgApiId.toString()
         buildConfigField "String", "TG_API_HASH", "\"${tgApiHash}\""
 
         applicationId "org.unichat.app"
         minSdk 29
         targetSdk 35
-        versionCode 219
-        versionName "0.48.6"
+        versionCode 227
+        versionName "0.48.14"
         ndk {
             // arm64 only: the three-ABI APK carried ~50 MB of native libraries no
             // real device could ever load. Must stay in step with build.sh's

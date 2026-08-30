@@ -11,17 +11,21 @@ open class BaseActivity : AppCompatActivity() {
 
     protected open val padForSystemBars: Boolean = true
 
-    // resolve returns the chat id to open (String) or a string resource to
-    // toast (Int); it runs on Io.lookup because it can block for up to 75s
+    // resolve runs on Io.lookup because it can block for up to 75s
     protected fun resolveThenOpen(progressRes: Int, resolve: () -> Any, open: (String) -> Unit) {
-        // 0 means say nothing: the chat opens quickly enough that announcing it
-        // is just a toast the user has to watch expire.
+        // 0 means say nothing
         if (progressRes != 0) {
             android.widget.Toast
                 .makeText(this, progressRes, android.widget.Toast.LENGTH_SHORT).show()
         }
         Io.lookup.execute {
-            val out = resolve()
+            // an uncaught throwable in an execute()d Runnable kills the process
+            val out = try {
+                resolve()
+            } catch (e: Exception) {
+                android.util.Log.w("BaseActivity", "resolve failed", e)
+                R.string.number_check_failed
+            }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 when (out) {
@@ -46,9 +50,9 @@ open class BaseActivity : AppCompatActivity() {
     }, open)
 
     /**
-     * Repaints a screen in its protocol's colours. Keyed on the protocol, not
-     * on a two-way "is it Telegram" flag: under that flag every non-Telegram
-     * chat took the WhatsApp overlay, so Signal chats came out green.
+     * Keyed on the protocol, not on a two-way "is it Telegram" flag: under that
+     * flag every non-Telegram chat took the WhatsApp overlay, so Signal chats
+     * came out green.
      */
     protected fun applyProtocolTheme(proto: String) = applyProtocolTheme(Accounts.of(proto))
 
@@ -96,11 +100,9 @@ open class BaseActivity : AppCompatActivity() {
 
     override fun attachBaseContext(newBase: Context) {
         // Override ONLY fontScale, on an otherwise-empty Configuration. Copying
-        // the full current configuration would pin its orientation/dimensions,
-        // which — now that activities handle rotation instead of being
-        // recreated — would keep reporting the pre-rotation size to dialogs and
-        // resource lookups. An empty Configuration leaves those fields unset so
-        // they track the device on each rotation.
+        // the full current configuration pins its orientation/dimensions, and
+        // since activities handle rotation instead of being recreated, dialogs
+        // and resource lookups then keep seeing the pre-rotation size.
         val override = Configuration()
         override.fontScale = Prefs.fontScale(newBase)
         super.attachBaseContext(newBase.createConfigurationContext(override))

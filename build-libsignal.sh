@@ -143,7 +143,8 @@ echo "== Building libsignal_ffi $VERSION for $ABI (LTO, this takes a few minutes
 # libsignal pins its own nightly via rust-toolchain; rustup installs that on
 # first use, but the Android target has to be added to it explicitly or the
 # build fails on a missing std for the target.
-( cd "$SRC" && rustup target add "$RUST_TARGET" >/dev/null 2>&1 || true )
+( cd "$SRC" && rustup target add "$RUST_TARGET" >/dev/null 2>&1 ) ||
+    echo "libsignal: warning: 'rustup target add $RUST_TARGET' failed; expect cargo to die on a missing std for the target" >&2
 ( cd "$SRC" && cargo build -p libsignal-ffi --release --target "$RUST_TARGET" )
 
 mkdir -p "$OUT"

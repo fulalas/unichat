@@ -72,11 +72,13 @@ class ShareActivity : BaseActivity() {
         // other screen's DB reads for the whole share.
         Io.files.execute {
             if (streams.isNotEmpty()) {
-                // Each shared item is read from its content URI exactly once into
-                // a master file; a send deletes its own cacheDir staging file, so
-                // every (item, chat) pair gets its own local copy.
+                // A send deletes its own cacheDir staging file, so every (item,
+                // chat) pair needs its own copy of the master.
                 var staged = 0
                 var attempted = 0
+                // the caption used to ride item 0 unconditionally, so when that
+                // item failed to stage the user's text was silently sent to no one
+                val captioned = HashSet<String>()
                 for ((itemIndex, stream) in streams.withIndex()) {
                     val name = uriDisplayName(stream) ?: "shared"
                     // Per item, not the intent's type: a multi-item share of
@@ -94,10 +96,11 @@ class ShareActivity : BaseActivity() {
                         val local = duplicateInCache(master, name, itemIndex, i + 1)
                             ?: return@forEachIndexed
                         staged++
-                        val caption = if (itemIndex == 0) text.orEmpty() else ""
+                        val caption =
+                            if (!text.isNullOrEmpty() && captioned.add(chatId)) text else ""
                         Bridge.sendFile(chatId, local.absolutePath, name, itemMime, caption)
                     }
-                    master.delete() // only the per-chat copies are sent
+                    master.delete()
                 }
                 if (staged == 0) {
                     runOnUiThread { failAndFinish(R.string.share_failed) }
@@ -145,8 +148,7 @@ class ShareActivity : BaseActivity() {
             out
         } catch (_: Exception) {
             // a half-written copy left behind survives until the 24h startup
-            // sweep, and every retried share adds another (copyUriToCache
-            // unlinks on failure for the same reason)
+            // sweep, and every retried share adds another
             out.delete()
             null
         }

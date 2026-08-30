@@ -35,10 +35,10 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-// EventListener is implemented on the Kotlin side. Callbacks arrive on
-// arbitrary Go threads; the app must dispatch to its own threads as needed.
+// Callbacks arrive on arbitrary Go threads; the app must dispatch to its own
+// threads as needed.
 type EventListener interface {
-	OnStateChanged(state string) // connecting, connected, disconnected, logged_out, outdated
+	OnStateChanged(state string)
 	OnQrCode(code string)
 	OnPairCode(code string)
 	OnPairError(code string)
@@ -71,7 +71,7 @@ const (
 )
 
 type conn struct {
-	id int // key in conns, assigned by Init
+	id int
 	// The live client, behind an atomic pointer: resetDevice replaces it after a
 	// logout or a remote unlink, while callers on other goroutines (every
 	// exported function, the event dispatcher, the login loop) read it. As a
@@ -95,13 +95,13 @@ type conn struct {
 	pendingPairPhone string
 	pairSentRound    int
 	loginRound       int
-	// the single outstanding on-demand history request. A response carrying
-	// messages names its chat, but an empty end-of-history sync names no
-	// conversation, so it is attributed to this slot. The app keeps at most
-	// one on-demand request in flight (enforced app-side), which makes the
-	// single slot unambiguous even for empty responses. historyForExport is
-	// sticky (not cleared on consume) so a duplicate/late page is still
-	// routed away from local storage until the next request changes the mode.
+	// A history response carrying messages names its chat, but an empty
+	// end-of-history sync names no conversation, so it is attributed to this
+	// slot. The app keeps at most one on-demand request in flight (enforced
+	// app-side), which makes the single slot unambiguous even for empty
+	// responses. historyForExport is sticky (not cleared on consume) so a
+	// duplicate/late page is still routed away from local storage until the
+	// next request changes the mode.
 	historyChat      string
 	historyForExport bool
 	historyActive    bool
@@ -109,8 +109,7 @@ type conn struct {
 	contactsSyncing bool
 }
 
-// How long to wait for the phone's media retry response before giving up. A
-// sleeping phone has to receive the push, wake, and re-upload, so this is
+// A sleeping phone has to receive the push, wake, and re-upload, so this is
 // generous; when it elapses the download is failed (status 3) and the pending
 // entry dropped, so the bubble never stays stuck "downloading" forever and the
 // mediaRetries map can't accumulate entries for requests that go unanswered.
@@ -125,10 +124,19 @@ type pendingMediaRetry struct {
 	timer         *time.Timer
 }
 
-func (c *conn) setPendingMediaRetry(msgId string, r *pendingMediaRetry) {
+// Publish-if-absent: two concurrent DownloadFile calls for the same message
+// (the bind-time auto-download vs tap race downloadToPath documents) both pass
+// the hasPendingMediaRetry guard, and letting the second overwrite the first
+// orphaned a timer that later failed a download the phone's answer had
+// already delivered.
+func (c *conn) setPendingMediaRetry(msgId string, r *pendingMediaRetry) bool {
 	mx.Lock()
+	defer mx.Unlock()
+	if _, exists := c.mediaRetries[msgId]; exists {
+		return false
+	}
 	c.mediaRetries[msgId] = r
-	mx.Unlock()
+	return true
 }
 
 func (c *conn) hasPendingMediaRetry(msgId string) bool {
@@ -201,8 +209,7 @@ func getConn(connId int) *conn {
 	return conns[connId]
 }
 
-// getClient returns the current whatsmeow client. Never read the field
-// directly: resetDevice swaps it from another goroutine (see conn.clientPtr).
+// Never read clientPtr directly: resetDevice swaps it from another goroutine.
 func (c *conn) getClient() *whatsmeow.Client { return c.clientPtr.Load() }
 
 func (c *conn) setClient(client *whatsmeow.Client) { c.clientPtr.Store(client) }
@@ -212,11 +219,11 @@ func (c *conn) log(level int, msg string) {
 	c.listener.OnLog(level, msg)
 }
 
-// setState records a state transition and delivers it to the listener in the
-// order it was recorded. The callback used to be made after releasing mx, so
-// two racing writers (a Kotlin thread calling Connect/Logout, whatsmeow's event
-// goroutine, the login loop) could record "connecting" then "connected" yet
-// deliver them the other way round. Nothing corrects that afterwards: the
+// Transitions are delivered in the order they were recorded. The callback used
+// to be made after releasing mx, so two racing writers (a Kotlin thread calling
+// Connect/Logout, whatsmeow's event goroutine, the login loop) could record
+// "connecting" then "connected" yet deliver them the other way round. Nothing
+// corrects that afterwards: the
 // transition is deduplicated against c.state, so no further callback fires
 // until the next genuine change, and the app's onStateChanged is
 // last-write-wins — the UI sat on the loser indefinitely.
@@ -374,9 +381,6 @@ func Connect(connId int) bool {
 	return true
 }
 
-// Disconnect drops the socket but keeps the pairing, so the account can be
-// paused from Manage accounts and resumed with Connect. Unlike Logout it
-// touches neither the device store nor the local rows.
 func Disconnect(connId int) {
 	c := getConn(connId)
 	if c == nil {
@@ -483,8 +487,6 @@ func loginLoop(c *conn, gen int) {
 			case whatsmeow.QRChannelEventCode:
 				c.setLoginQrReady(gen, true)
 				c.listener.OnQrCode(evt.Code)
-				// keep an ever-valid pairing code on screen: re-request on
-				// each fresh socket round if one was asked for before
 				if phone, round := c.pairRequestDue(); phone != "" {
 					go sendPairCode(c, phone, round)
 				}
@@ -639,18 +641,15 @@ func Logout(connId int) {
 	}
 }
 
-// StateStoreBroken is reported when the device store could not be reopened
-// after a logout or a remote unlink. Linking again needs the process restarted.
 // Kotlin matches on this exact word (LoginActivity).
 const StateStoreBroken = "store_broken"
 
-// resetDevice rebuilds the client on a fresh device store. A logout — ours or a
-// remote unlink (events.LoggedOut) — poisons the device's in-memory stores, so
-// the old client can never pair again (Connect fails with ErrDeviceDeleted).
-// Rebuilding here makes a re-login work without restarting the app. Also drops
-// the per-session caches, which otherwise leak into the next account: stale read
-// watermarks marked its incoming messages already-read, and an armed media-retry
-// timer fired into the new session.
+// A logout — ours or a remote unlink (events.LoggedOut) — poisons the device's
+// in-memory stores, so the old client can never pair again (Connect fails with
+// ErrDeviceDeleted). Rebuilding here makes a re-login work without restarting
+// the app. The per-session caches otherwise leak into the next account: stale
+// read watermarks marked its incoming messages already-read, and an armed
+// media-retry timer fired into the new session.
 func (c *conn) resetDevice() bool {
 	ctx := context.TODO()
 	c.getClient().Disconnect()
@@ -817,9 +816,6 @@ func SendLocation(connId int, chatId string, latitude float64, longitude float64
 	return sendWithEcho(c, chatJid, &message, "send location")
 }
 
-// The vcard is built by the app (see ChatActivity.sendContactCard). The echo
-// path parses it straight back through contactText, so a sent card renders
-// exactly like a received one with no separate local-echo shape.
 func SendContactMessage(connId int, chatId string, displayName string, vcard string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1033,14 +1029,13 @@ func sendMedia(c *conn, chatId string, filePath string, echoText string, msgType
 	return resp.ID
 }
 
-// uploadFile encrypts and uploads the file at filePath, keeping it on disk
-// throughout. The plain Upload takes the whole plaintext as a []byte and
-// allocates a second, encrypted copy of it, so an outgoing video or document —
-// picked by the user, with no size limit anywhere in the path — cost about
-// twice its size in the heap of a mobile process, held until the send
-// completed. UploadReader streams both passes through a scratch file instead;
-// it is named like downloadToPath's temp files so sweepPartialMedia reclaims it
-// if the process is killed mid-send.
+// The plain Upload takes the whole plaintext as a []byte and allocates a
+// second, encrypted copy of it, so an outgoing video or document — picked by
+// the user, with no size limit anywhere in the path — cost about twice its size
+// in the heap of a mobile process, held until the send completed. UploadReader
+// streams both passes through a scratch file instead; it is named like
+// downloadToPath's temp files so sweepPartialMedia reclaims it if the process
+// is killed mid-send.
 func uploadFile(c *conn, client *whatsmeow.Client, msgId string, filePath string,
 	mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
 	var resp whatsmeow.UploadResponse
@@ -1152,11 +1147,10 @@ func SendVideoMessage(connId int, chatId string, filePath string, caption string
 		})
 }
 
-// finishMediaSend swaps the echo's source-file path for a permanent media
-// copy (the staged source is deleted by the app once the send returns). If
-// the copy fails, the file state is reset instead so the bubble re-downloads
-// via the fileId recorded by echoSentMessage rather than pointing forever at
-// the soon-deleted staging file.
+// The app deletes the staged source once the send returns, so the echo's path
+// must be swapped for a permanent copy. If the copy fails, the file state is
+// reset instead so the bubble re-downloads via the fileId recorded by
+// echoSentMessage rather than pointing forever at the soon-deleted staging file.
 func finishMediaSend(c *conn, chatJid types.JID, msgId string, ext string, srcPath string) {
 	chatId := getChatId(c.getClient(), &chatJid, nil)
 	if localPath := copyToMedia(c, msgId, ext, srcPath); localPath != "" {
@@ -1227,7 +1221,23 @@ func SendDocumentMessage(connId int, chatId string, filePath string, fileName st
 		})
 }
 
+// The fileId crosses gomobile and is stored per message row, and DownloadFile
+// never reads the thumbnail bytes or the ContextInfo — whose quoted message
+// can embed its own thumbnail — so carrying them bloated it several-fold.
 func encodeFileId(kind string, m proto.Message) string {
+	m = proto.Clone(m)
+	switch t := m.(type) {
+	case *waE2E.ImageMessage:
+		t.JPEGThumbnail, t.ContextInfo = nil, nil
+	case *waE2E.VideoMessage:
+		t.JPEGThumbnail, t.ContextInfo = nil, nil
+	case *waE2E.AudioMessage:
+		t.ContextInfo = nil
+	case *waE2E.DocumentMessage:
+		t.JPEGThumbnail, t.ContextInfo = nil, nil
+	case *waE2E.StickerMessage:
+		t.PngThumbnail, t.ContextInfo = nil, nil
+	}
 	raw, err := proto.Marshal(m)
 	if err != nil {
 		return ""
@@ -1362,7 +1372,10 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 			c.listener.OnFileDownloaded(chatId, msgId, "", 3)
 		}
 	})
-	c.setPendingMediaRetry(msgId, pending)
+	if !c.setPendingMediaRetry(msgId, pending) {
+		pending.timer.Stop()
+		return ""
+	}
 	if rerr := c.getClient().SendMediaRetryReceipt(context.Background(), info, downloadable.GetMediaKey()); rerr != nil {
 		if p, ok := c.takePendingMediaRetry(msgId); ok && p.timer != nil {
 			p.timer.Stop()
@@ -1412,7 +1425,11 @@ func downloadToPath(c *conn, chatId string, msgId string, downloadable whatsmeow
 }
 
 func sweepPartialMedia(c *conn) {
-	dir := c.path + "/media"
+	sweepPartials(c.path+"/media", ".part")
+	sweepPartials(c.path+"/avatars", ".tmp")
+}
+
+func sweepPartials(dir string, marker string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -1423,11 +1440,11 @@ func sweepPartialMedia(c *conn) {
 			continue
 		}
 		name := e.Name()
-		i := strings.LastIndex(name, ".part")
+		i := strings.LastIndex(name, marker)
 		if i < 0 {
 			continue
 		}
-		suffix := name[i+len(".part"):]
+		suffix := name[i+len(marker):]
 		if suffix == "" || strings.TrimLeft(suffix, "0123456789") != "" {
 			continue
 		}
@@ -1494,10 +1511,8 @@ func mediaPath(c *conn, msgId string, ext string) (string, error) {
 	return dir + "/" + safeName(msgId, false) + cleanExt, nil
 }
 
-// safeName maps a remote-controlled string to a filesystem-safe one: letters,
-// digits and '-' survive, everything else becomes '_'. allowDot additionally
-// keeps '.', which the avatar cache needs because a chat id contains one and
-// media paths must not, so the extension stays the only dot there.
+// allowDot keeps '.', which the avatar cache needs because a chat id contains
+// one and media paths must not, so the extension stays the only dot there.
 func safeName(s string, allowDot bool) string {
 	return strings.Map(func(r rune) rune {
 		switch {
@@ -1701,9 +1716,9 @@ func GetMyAbout(connId int) string {
 	return infos[self].Status
 }
 
-// GetUserAbout answers "" both for a contact with no About and for one whose
-// privacy settings hide it — the two are indistinguishable to a client, so the
-// screen simply shows nothing rather than claiming either.
+// "" covers both a contact with no About and one whose privacy settings hide
+// it — the two are indistinguishable to a client, so the screen simply shows
+// nothing rather than claiming either.
 func GetUserAbout(connId int, userId string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1721,11 +1736,10 @@ func GetUserAbout(connId int, userId string) string {
 	return infos[jid].Status
 }
 
-// ResolveNumberFailed is what ResolveNumber answers when it could not ask at
-// all (no session, or the server did not respond). It cannot be mistaken for a
-// chat id, which always carries an '@'. "Not registered" must be told apart
-// from "could not check": reporting the first for the second tells someone
-// their contact is not on WhatsApp when the network merely dropped.
+// Cannot be mistaken for a chat id, which always carries an '@'. "Not
+// registered" ("") must be told apart from "could not check": reporting the
+// first for the second tells someone their contact is not on WhatsApp when the
+// network merely dropped.
 const ResolveNumberFailed = "failed"
 
 func ResolveNumber(connId int, phone string) string {
@@ -1869,8 +1883,6 @@ func MarkVoicePlayed(connId int, chatId string, senderId string, msgId string) {
 	markReceipt(c, chatId, senderId, msgId, time.Now(), types.ReceiptTypePlayed)
 }
 
-// SubscribePresence subscribes to online/last-seen updates for a user; they
-// arrive via OnPresence (only if allowed by the user's privacy settings).
 func SubscribePresence(connId int, userId string) {
 	c := getConn(connId)
 	if c == nil {
@@ -2141,8 +2153,11 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 	if resp.StatusCode != 200 {
 		return cached
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAvatarBytes))
-	if err != nil {
+	// The extra byte tells "hit the cap" apart from "exactly the cap": the
+	// LimitReader truncates silently, and the cut-off JPEG then replaced the
+	// good cached copy that was the fallback.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAvatarBytes+1))
+	if err != nil || len(data) > maxAvatarBytes {
 		return cached
 	}
 	// Write to a temp file and rename: os.WriteFile truncates in place, and the
@@ -2158,6 +2173,7 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 	// executors.
 	tmp := fmt.Sprintf("%s.tmp%d", avatarPath, time.Now().UnixNano())
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		os.Remove(tmp)
 		return cached
 	}
 	if err := os.Rename(tmp, avatarPath); err != nil {
@@ -2169,7 +2185,7 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 
 var avatarHTTP = &http.Client{Timeout: 20 * time.Second}
 
-const maxAvatarBytes = 8 << 20 // 8 MiB is far beyond any profile picture
+const maxAvatarBytes = 8 << 20 // far beyond any profile picture
 
 func GetCachedAvatarPath(connId int, chatId string) string {
 	c := getConn(connId)
@@ -2212,6 +2228,21 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 		c.setState("outdated")
 
 	case *events.StreamReplaced:
+		c.setState("disconnected")
+
+	// whatsmeow marks these three disconnects as expected, so no
+	// events.Disconnected follows them — without these cases the state stayed
+	// "connecting" forever and the UI hung on it.
+	case *events.TemporaryBan:
+		c.log(LogWarning, "temporarily banned: "+evt.String())
+		c.setState("disconnected")
+
+	case *events.ConnectFailure:
+		c.log(LogError, fmt.Sprintf("connect failure %s: %s", evt.Reason, evt.Message))
+		c.setState("disconnected")
+
+	case *events.CATRefreshError:
+		c.log(LogError, fmt.Sprintf("CAT refresh error %v", evt.Error))
 		c.setState("disconnected")
 
 	case *events.AppStateSyncComplete:
@@ -2278,10 +2309,10 @@ func handleMediaRetryEvent(c *conn, evt *events.MediaRetry) {
 	if !ok {
 		return
 	}
-	// The answer beat the timeout — cancel it. The timer is always set: it is
-	// armed before the entry is published, so taking the entry out of the map
-	// under mx also gives us a fully initialised struct. (Kept nil-safe because
-	// resetDevice walks the same field.)
+	// The timer is always set: it is armed before the entry is published, so
+	// taking the entry out of the map under mx also gives us a fully
+	// initialised struct. (Kept nil-safe because resetDevice walks the same
+	// field.)
 	if pending.timer != nil {
 		pending.timer.Stop()
 	}
@@ -2330,11 +2361,9 @@ func handleReceipt(c *conn, receipt *events.Receipt) {
 	}
 }
 
-// historyPage measures one conversation's page as the history walk sees it:
-// how many entries the phone sent, and the key of the oldest of them. Counted
-// off the raw key, so an entry this app cannot parse or display still counts —
-// a page of nothing but stubs looked empty, and the walk read that as the end
-// of the history and left everything older unfetched forever.
+// Counted off the raw key, so an entry this app cannot parse or display still
+// counts — a page of nothing but stubs looked empty, and the walk read that as
+// the end of the history and left everything older unfetched forever.
 func historyPage(msgs []*waHistorySync.HistorySyncMsg) (size int, oldestId string, oldestTime int64, oldestFromMe bool) {
 	for _, syncMessage := range msgs {
 		webMessageInfo := syncMessage.Message
@@ -2377,7 +2406,7 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 			continue
 		}
 		if isStatusBroadcast(chatJid) {
-			continue // skip Status/Stories
+			continue
 		}
 
 		type parsedMsg struct {
@@ -2500,11 +2529,9 @@ func isDisplayable(msg *waE2E.Message) bool {
 	return ok
 }
 
-// reactionUserId normalizes a reaction sender to their phone JID whenever a
-// LID→PN mapping is known, so one person's reactions always share a single
-// sender id regardless of path: live group events carry LIDs, while history
-// keys and the local send echo carry phone JIDs. Without this, the same
-// user's reaction can be stored twice and removals can miss the stored row.
+// Live group events carry LIDs, while history keys and the local send echo
+// carry phone JIDs. Without normalizing to the phone JID, the same user's
+// reaction can be stored twice and removals can miss the stored row.
 func reactionUserId(c *conn, jid types.JID) string {
 	if jid.Server == types.HiddenUserServer {
 		if pn, _ := c.getClient().Store.LIDs.GetPNForLID(context.TODO(), jid); !pn.IsEmpty() {
@@ -2626,11 +2653,11 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 		content.quotedType, messageInfo.PushName, content.forwarded)
 }
 
-// handleUndecryptableMessage covers the one UndecryptableMessage case that
-// never resolves into a normal *events.Message: a view-once message on a
-// linked/companion device. WhatsApp intentionally never forwards view-once
-// media keys to companion devices, so the phone reports it as permanently
-// unavailable (type "view_once") instead of encrypted content, and no retry
+// The one UndecryptableMessage case that never resolves into a normal
+// *events.Message: a view-once message on a linked/companion device.
+// WhatsApp intentionally never forwards view-once media keys to companion
+// devices, so the phone reports it as permanently unavailable (type
+// "view_once") instead of encrypted content, and no retry
 // will ever turn it into a decryptable one. Every other UndecryptableMessage
 // cause is followed by an automatic retry that arrives as a normal Message
 // event, so this must not emit anything for those.
@@ -2651,7 +2678,7 @@ func handleUndecryptableMessage(c *conn, evt *events.UndecryptableMessage) {
 
 type msgContent struct {
 	text       string
-	msgType    string // "" = plain text, else the app's content kind ("image", "sticker", …)
+	msgType    string
 	fileId     string
 	quotedId   string
 	quotedText string
@@ -2735,10 +2762,10 @@ func fromContext(ci *waE2E.ContextInfo) msgContent {
 	}
 }
 
-// viewOnceType marks view-once media: its keys are never shared with
-// linked/companion devices, so it can only be opened on the primary phone and
-// there is nothing here to store or download. Carried as a message TYPE rather
-// than a canned English body so previewLabel owns (and translates) the label.
+// View-once keys are never shared with linked/companion devices, so it can only
+// be opened on the primary phone and there is nothing here to store or
+// download. Carried as a message TYPE rather than a canned English body so
+// previewLabel owns (and translates) the label.
 const viewOnceType = "viewonce"
 
 // ownSend: the ViewOnce bit governs what the RECIPIENT may do with the media,
@@ -2836,12 +2863,11 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 	// A labelled TYPE rather than ok=false for the message kinds this client
 	// can't render: dropping them left an invisible hole in the conversation
 	// (the chat didn't even move up the list, and a reply quoting one showed a
-	// blank quote), which reads as lost messages. The label itself is the app's
-	// to write — these used to carry English prose ("[Poll]") as their body,
-	// which then appeared verbatim mid-conversation whatever the language, and
-	// which the exporter and previewLabel both had to special-case around.
-	// previewLabel (Db.kt) owns the type -> wording mapping, as it already did
-	// for quoted-message labels and view-once media.
+	// blank quote), which reads as lost messages. These used to carry English
+	// prose ("[Poll]") as their body, which then appeared verbatim
+	// mid-conversation whatever the language, and which the exporter and
+	// previewLabel both had to special-case around; previewLabel (Db.kt) owns
+	// the type -> wording mapping.
 	if live := msg.GetLiveLocationMessage(); live != nil {
 		m := fromContext(live.GetContextInfo())
 		m.msgType = "livelocation"

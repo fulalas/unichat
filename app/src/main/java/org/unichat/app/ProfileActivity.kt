@@ -37,8 +37,7 @@ class ProfileActivity : BaseActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         proto = intent.getStringExtra("proto") ?: ProtoPicker.WA
-        // this screen belongs to one account, so it wears that
-        // protocol's accent; must precede any view inflation
+        // must precede any view inflation
         applyProtocolTheme(proto)
         setContentView(R.layout.activity_profile)
         supportActionBar?.apply {
@@ -77,14 +76,10 @@ class ProfileActivity : BaseActivity() {
         loadAbout()
     }
 
-    /**
-     * The three of these are blocking: WhatsApp's name is a gomobile hop that
-     * takes the process-wide Go lock, and Signal's id and number are JNI calls
-     * with a SQLite read behind the name. Run on the main thread they froze the
-     * screen for as long as the bridge took to answer.
-     *
-     * loadAvatar waits for [selfId], which is resolved here.
-     */
+    // The three calls below are blocking: WhatsApp's name is a gomobile hop
+    // that takes the process-wide Go lock, and Signal's id and number are JNI
+    // calls with a SQLite read behind the name. Run on the main thread they
+    // froze the screen for as long as the bridge took to answer.
     private fun loadIdentity() {
         io.execute {
             val id = account.selfId()
@@ -105,13 +100,16 @@ class ProfileActivity : BaseActivity() {
         }
     }
 
-    /** Pixel size of the 200dp header, the most the avatar is ever shown at.
-     *  Decoding to it instead of full resolution avoids allocating an entire
-     *  server-sized photo (up to 8 MiB of source) just to draw it small. */
+    // Decoding to the header size instead of full resolution avoids allocating
+    // an entire server-sized photo (up to 8 MiB of source) just to draw it
+    // small.
     private val avatarPx by lazy { (200 * resources.displayMetrics.density).toInt() }
 
     private fun loadAvatar() {
-        io.execute {
+        // Off the shared serial worker: the full-size fetch blocks on the
+        // network (a 20s TDLib download, a timeout-less WhatsApp request) and
+        // would hold up every other screen's DB reads behind it.
+        Io.lookup.execute {
             var path = Bridge.getAvatarFullPath(selfId)
             if (path.isEmpty()) path = Bridge.getAvatarPath(selfId)
             val bmp = if (path.isEmpty()) null else ImageLoader.decodeSampled(path, avatarPx)
@@ -215,7 +213,7 @@ class ProfileActivity : BaseActivity() {
                 // This callback is posted to the MAIN thread by the bridge, so
                 // decode and delete on a worker and only touch views back here.
                 if (!ok) {
-                    file.delete()
+                    io.execute { file.delete() }
                     if (!isFinishing) {
                         Toast.makeText(this, R.string.profile_photo_failed, Toast.LENGTH_SHORT).show()
                     }
@@ -243,8 +241,6 @@ class ProfileActivity : BaseActivity() {
         // Catch Throwable, not just Exception: decoding a large gallery photo can
         // throw OutOfMemoryError (an Error), which we must not let crash the app.
         return try {
-            // decode bounds first, then downsample, so a huge image never loads
-            // full-size into memory
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             contentResolver.openInputStream(uri).use { BitmapFactory.decodeStream(it, null, bounds) }
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
@@ -275,11 +271,10 @@ class ProfileActivity : BaseActivity() {
         }
     }
 
-    // Largest power-of-two subsample that keeps BOTH dimensions >= target.
-    // Deliberately different from ImageLoader.sampleSize, which uses `||`
-    // because it decodes for display: here the result is centre-cropped to a
-    // square and scaled to AVATAR_PX, so `||` on a panoramic source would leave
-    // a crop far smaller than AVATAR_PX to upscale from.
+    // Requires BOTH dimensions >= target, where ImageLoader.sampleSize uses
+    // `||` because it decodes for display: here the result is centre-cropped to
+    // a square and scaled to AVATAR_PX, so `||` on a panoramic source would
+    // leave a crop far smaller than AVATAR_PX to upscale from.
     private fun sampleSizeFor(w: Int, h: Int, target: Int): Int {
         var s = 1
         while (w / (s * 2) >= target && h / (s * 2) >= target) s *= 2

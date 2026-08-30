@@ -11,9 +11,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 /**
- * The card under a message that links somewhere: site name, title, description
- * and picture, read from the page's Open Graph tags.
- *
  * Neither protocol hands us this. WhatsApp puts a preview in the message only
  * when the SENDER's client attached one, and TDLib resolves them behind an
  * option this client does not run, so the page is fetched here — once per URL,
@@ -28,6 +25,9 @@ object LinkPreview {
     // read short and every YouTube link came back "no preview". Reading stops at
     // </head> (see readAtMost), so an ordinary page still costs a few KB.
     private const val MAX_HTML_BYTES = 2 * 1024 * 1024
+    // a <meta charset> is only honoured in the head, and browsers stop looking
+    // for it after the first KB — so the whole 2 MB never has to be decoded
+    private const val CHARSET_SNIFF_BYTES = 4 * 1024
     private const val MAX_IMAGE_BYTES = 4 * 1024 * 1024
     private const val CONNECT_TIMEOUT_MS = 12_000
     private const val READ_TIMEOUT_MS = 12_000
@@ -53,9 +53,9 @@ object LinkPreview {
     private val decoder = Executors.newFixedThreadPool(2)
     private val main = Handler(Looper.getMainLooper())
 
-    // url -> answer. A null VALUE is not possible in a ConcurrentHashMap, so a
-    // link with no preview is memoised as a Row with hasPreview=false rather
-    // than as an absent key, which would look like "never asked".
+    // A null VALUE is not possible in a ConcurrentHashMap, so a link with no
+    // preview is memoised as a Row with hasPreview=false rather than as an
+    // absent key, which would look like "never asked".
     private val cache = ConcurrentHashMap<String, Row>()
 
     // Everyone waiting on a URL still being fetched, NOT merely the fact that
@@ -68,10 +68,8 @@ object LinkPreview {
     fun cached(url: String): Row? = cache[url]
 
     /**
-     * The first http(s) link in [text], given a scheme when it was typed
-     * without one (as Linkify does, so a tap opens what the text linkifies to).
-     * Returns null for text with no link — the common case, so the cheap '.'
-     * test comes first.
+     * A link typed without a scheme is given one, as Linkify does, so a tap
+     * opens what the text linkifies to.
      */
     fun firstUrl(text: String): String? {
         if (text.indexOf('.') < 0) return null
@@ -95,16 +93,15 @@ object LinkPreview {
     }
 
     /**
-     * Asks for [url]'s preview if it is not already known or being fetched.
-     * [onReady] runs on the main thread once there is an answer — including a
-     * negative one, so a caller that hid its card can stop waiting for it.
+     * [onReady] runs on the main thread, and runs for a negative answer too, so
+     * a caller that hid its card can stop waiting for it.
      */
     fun request(ctx: Context, url: String, onReady: (Row) -> Unit) {
         cache[url]?.let { onReady(it); return }
         synchronized(waiters) {
             val list = waiters.getOrPut(url) { ArrayList() }
             list.add(onReady)
-            if (list.size > 1) return // a fetch is already running; we are queued on it
+            if (list.size > 1) return
         }
         val appCtx = ctx.applicationContext
         fetcher.execute {
@@ -193,8 +190,12 @@ object LinkPreview {
                 ) {
                     return null
                 }
-                val charset = type.substringAfter("charset=", "").trim().ifEmpty { "UTF-8" }
                 val bytes = conn.inputStream.use { readAtMost(it, MAX_HTML_BYTES, HEAD_END) }
+                // legacy pages (Shift_JIS, windows-125x) often declare the
+                // encoding only in a <meta> tag; decoding them as UTF-8 wrote
+                // mojibake titles into the Db, where nothing expires them
+                val charset = type.substringAfter("charset=", "").trim()
+                    .ifEmpty { sniffCharset(bytes) }.ifEmpty { "UTF-8" }
                 return runCatching { String(bytes, charset(charset)) }
                     .getOrElse { String(bytes, Charsets.UTF_8) }
             } catch (e: Exception) {
@@ -206,8 +207,18 @@ object LinkPreview {
         return null
     }
 
+    // The URL is sender-chosen and fetched with no interaction, so it must not
+    // be able to reach loopback or LAN addresses (SSRF). open() is called for
+    // every hop, so a public host redirecting inward is refused too.
+    private fun privateAddress(a: java.net.InetAddress): Boolean =
+        a.isLoopbackAddress || a.isAnyLocalAddress || a.isLinkLocalAddress ||
+            a.isSiteLocalAddress ||
+            (a is java.net.Inet6Address && (a.address[0].toInt() and 0xFE) == 0xFC)
+
     private fun open(url: String): HttpURLConnection? = runCatching {
-        (URL(url).openConnection() as HttpURLConnection).apply {
+        val target = URL(url)
+        require(java.net.InetAddress.getAllByName(target.host).none(::privateAddress))
+        (target.openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = false
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = READ_TIMEOUT_MS
@@ -216,10 +227,21 @@ object LinkPreview {
         }
     }.getOrNull()
 
+    private val META_CHARSET = Regex(
+        "<meta[^>]+charset\\s*=\\s*[\"']?\\s*([\\w.:-]+)", RegexOption.IGNORE_CASE
+    )
+
+    // ISO-8859-1 maps every byte, and a charset declaration is plain ASCII
+    private fun sniffCharset(bytes: ByteArray): String {
+        val head = String(bytes, 0, minOf(bytes.size, CHARSET_SNIFF_BYTES), Charsets.ISO_8859_1)
+        return META_CHARSET.find(head)?.groupValues?.get(1).orEmpty()
+    }
+
+    // matched case-insensitively (see indexOfBytes): a page emitting </HEAD>
+    // defeated the early stop and the whole 2 MB cap was downloaded
     private val HEAD_END = "</head>".toByteArray()
 
     /**
-     * Reads up to [limit] bytes, stopping early once [stopAfter] has been seen.
      * Everything this class reads lives in the document head, and pages that
      * bury the Open Graph tags behind hundreds of KB of inline script would
      * otherwise be downloaded whole — megabytes, on someone's mobile data, for
@@ -249,12 +271,16 @@ object LinkPreview {
         return out.toByteArray()
     }
 
+    private fun lowerAscii(b: Byte): Byte =
+        if (b >= 'A'.code.toByte() && b <= 'Z'.code.toByte()) (b + 32).toByte() else b
+
+    /** [needle] must be lowercase; the haystack is matched case-insensitively. */
     private fun indexOfBytes(haystack: ByteArray, needle: ByteArray, from: Int): Int {
         var i = from.coerceAtLeast(0)
         val last = haystack.size - needle.size
         outer@ while (i <= last) {
             for (k in needle.indices) {
-                if (haystack[i + k] != needle[k]) {
+                if (lowerAscii(haystack[i + k]) != needle[k]) {
                     i++
                     continue@outer
                 }
@@ -278,7 +304,8 @@ object LinkPreview {
     // Deliberately regex over the raw head rather than a real parser: the app
     // ships no HTML parser, and everything read here is a handful of meta tags.
     private fun parseMeta(html: String): Map<String, String> {
-        val head = html.substringBefore("</head>", html).take(MAX_HTML_BYTES)
+        val cut = html.indexOf("</head>", ignoreCase = true)
+        val head = (if (cut >= 0) html.substring(0, cut) else html).take(MAX_HTML_BYTES)
         val out = HashMap<String, String>()
         for (tag in META_TAG.findAll(head)) {
             var key = ""
@@ -312,7 +339,6 @@ object LinkPreview {
     // Deliberately not Html.fromHtml: it parses the value as a block of HTML and
     // folds every line break into a space, so a description written as separate
     // paragraphs came out as one run-on line with its words stuck together.
-    // A meta tag's content is plain text with entities, nothing more.
     private fun unescape(text: String): String {
         if (text.indexOf('&') < 0) return text.trim()
         return ENTITY.replace(text) { m ->
@@ -335,11 +361,10 @@ object LinkPreview {
         return String(Character.toChars(value))
     }
 
-    // A link glued to the word before it. YouTube strips the line breaks out of
-    // its own og:description when writing the tag, so the text arrives as
+    // YouTube strips the line breaks out of its own og:description when writing
+    // the tag, so the text arrives as
     // "…at the Apollohttp://livingcolour.comhttp://facebook.com/livingcolour" —
-    // the break is not something this app lost, it is not in the page. Put one
-    // back, since a run-on line is what the reader would otherwise see.
+    // the break is not something this app lost, it is not in the page.
     private val GLUED_URL = Regex("(?<=[^\\s(\\[<\"'])(https?://)")
 
     private fun tidyDescription(text: String): String = GLUED_URL.replace(text, "\n$1")
@@ -390,27 +415,31 @@ object LinkPreview {
 
     private val bitmaps = newBitmapCache(48)
     private val waiting = PendingViews<Int>()
-    private val decoding: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    /** Paints a preview's picture, decoded off the main thread and shared
-     *  between every bubble carrying the same link. [widthPx] is the width it
-     *  is drawn at — see [applyBounds]. */
     fun loadImage(path: String, view: android.widget.ImageView, widthPx: Int) {
         view.tag = path
         bitmaps.get(path)?.let { applyBounds(view, it, widthPx); view.setImageBitmap(it); return }
         view.setImageDrawable(null)
-        waiting.await(path, view, widthPx)
-        if (!decoding.add(path)) return
+        if (waiting.await(path, view, widthPx)) dispatchDecode(path, widthPx)
+    }
+
+    private fun dispatchDecode(path: String, widthPx: Int) {
         decoder.execute {
             var delivering = false
+            val queued = waiting.peek(path)
             try {
+                if (queued.isEmpty()) return@execute
                 val bmp = ImageLoader.decodeSampled(path, widthPx) ?: return@execute
                 bitmaps.put(path, bmp)
                 delivering = true
                 main.post { deliver(path, bmp) }
             } finally {
-                decoding.remove(path)
-                if (!delivering) waiting.abandon(path)
+                // Only this run's own waiters are dropped; a bubble that queued
+                // after the peek could not claim a decode of its own, so it is
+                // re-dispatched here instead of keeping its blank placeholder.
+                if (!delivering && waiting.settle(path, queued).isNotEmpty()) {
+                    dispatchDecode(path, widthPx)
+                }
             }
         }
     }
@@ -425,9 +454,6 @@ object LinkPreview {
     }
 
     /**
-     * Sizes the view to the card's full width at the picture's own proportions,
-     * so it is neither cut nor left sitting narrow with space beside it.
-     *
      * The bounds have to be set explicitly. A match_parent width does not work
      * inside the card: LinearLayout re-measures a match_parent child with its
      * FIRST-PASS height pinned as exact, which switches adjustViewBounds off —

@@ -97,8 +97,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         }
         updateSubtitle()
         refreshAccountMenu()
-        // A contact saved to the phone while the app was in the background is
-        // only on Signal as far as this app knows once it has asked again.
         Signal.refreshContacts()
         reload()
         syncWatchedChats()
@@ -118,8 +116,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
 
     // The diff-based adapter only rebinds rows whose data changed, so the
     // day-relative time labels ("Yesterday", weekday names) would go stale
-    // across midnight; force a rebind whenever the calendar day changes —
-    // on return to this screen and, while it stays open, at midnight.
+    // across midnight without a forced rebind.
     private var renderedDay = TimeFormat.dayStamp()
 
     private fun refreshDayIfChanged() {
@@ -249,8 +246,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     // Any active account, not WhatsApp: an address-book number said "not on
-    // WhatsApp" even with only Telegram and Signal linked. With one account the
-    // picker answers itself.
+    // WhatsApp" even with only Telegram and Signal linked.
     private fun openPhoneEntry(chat: ChatRow) = ProtoPicker.pick(this) { proto ->
         resolveNumberThenOpen(Accounts.of(proto), PhoneBook.numberOf(chat.id)) { id ->
             Bridge.rememberContact(id, chat.name)
@@ -270,7 +266,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             val fromPhone = PhoneBook.search(this, q)
             val folded = Search.fold(q)
             runOnUiThread {
-                if (query != q) return@runOnUiThread // a newer query superseded this one
+                if (query != q) return@runOnUiThread
                 // match what the row actually SHOWS: an unresolved chat renders
                 // as "+15551234567" via displayLabel, so matching only name/id
                 // (neither of which has the '+') made the visible row vanish
@@ -281,16 +277,13 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                         Search.contains(it.id, folded)
                 }
                 // a saved contact who also has a chat matches in both lists;
-                // keep the chat row (it carries recency/unread) and drop the
-                // contact duplicate, keyed on the shared JID
+                // the chat row is the one that carries recency/unread
                 val seen = chatMatches.mapTo(HashSet()) { it.id }
                 val known = chatMatches + contacts.filter { it.id !in seen }
-                // address-book people are the last resort: anyone already known
-                // to either service is shown as themselves, with their history
-                // Numbers already reachable, from both shapes a row can carry
-                // them in: a phone JID, and a contact row's "+55…" preview —
-                // which is the only handle on someone whose chat is keyed by a
-                // @lid. Telegram ids hold no number, so those can't be matched.
+                // Both shapes a row can carry a number in: a phone JID, and a
+                // contact row's "+55…" preview — which is the only handle on
+                // someone whose chat is keyed by a @lid. Telegram ids hold no
+                // number, so those can't be matched.
                 val knownDigits = HashSet<String>()
                 for (row in known) {
                     if (isPhoneId(row.id)) knownDigits.add(row.id.substringBefore('@'))
@@ -353,9 +346,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     override fun onChatsChanged() = reloadFromEvent()
 
     /**
-     * Someone came online or went away. Re-stamps the rows from the list already
-     * in memory rather than re-reading the DB: presence is chatty, and nothing
-     * stored has changed — only the value withChatStates copies in.
+     * Re-stamps the rows from the list already in memory rather than re-reading
+     * the DB: presence is chatty, and nothing stored has changed — only the
+     * value withChatStates copies in.
      */
     override fun onPresence(userId: String, isOnline: Boolean, lastSeen: Long) {
         if (!started || query.isNotEmpty()) return
@@ -400,8 +393,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         updateSubtitle()
         // Android blocks activity starts from the background; when stopped,
         // leave the task alone — onStart routes to login via hasAnySession().
-        // With optional accounts, one protocol logging out only leaves this
-        // screen when no other account remains.
         if (state == "logged_out" && started) {
             if (!Bridge.hasAnySession()) {
                 startActivity(Intent(this, LoginActivity::class.java))
@@ -478,9 +469,8 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         menu.add(0, M_FONT, 4, R.string.font_size)
         menu.add(0, M_ACCOUNTS, 5, R.string.manage_accounts)
         menuLinkedAccounts = Accounts.linked().size
-        // One entry covering add and remove, for every protocol. The old
-        // "Link account" item hid itself at two accounts, which left no way to
-        // reach a third once WhatsApp and Telegram were both linked.
+        // The old "Link account" item hid itself at two accounts, which left no
+        // way to reach a third once WhatsApp and Telegram were both linked.
         menu.add(0, M_ABOUT, 6, R.string.about)
         return true
     }
@@ -532,10 +522,8 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     /**
-     * Opens the same person on a different account, by their number.
-     *
-     * Only the address book is scanned for who else is on a network, and only at
-     * startup — so someone reachable on one protocol could not be reached on
+     * Only the address book is scanned for who else is on a network, and only
+     * at startup — so someone reachable on one protocol could not be reached on
      * another even when the account knew their number. This asks the chosen
      * network about that one number, there and then.
      */

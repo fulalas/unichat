@@ -7,23 +7,16 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-// MAIN-THREAD ONLY (like the SimpleDateFormat instances it holds): the
-// formatters run per row bind, so the scratch Calendars below are reused
-// instead of allocating two GregorianCalendars per call in the scroll path.
+// MAIN-THREAD ONLY: the shared SimpleDateFormats and scratch Calendars are not
+// thread-safe.
 object TimeFormat {
-    // Honors the device's "Use 24-hour format" setting AND the current locale
-    // AND the current time zone; refreshClockFormat() re-reads all three
-    // (BaseActivity calls it on every onStart, so a change in Settings takes
-    // effect the next time a screen is shown). The locale is tracked because
-    // these formatters used to be built once at object init: after a system or
-    // per-app locale change the process is not necessarily restarted, so
-    // weekday and month names kept rendering in the previous language for the
-    // rest of its life. The zone is tracked for the same reason and is even
-    // wider-reaching: a SimpleDateFormat captures TimeZone.getDefault() in its
-    // internal Calendar at construction, and so do the scratch Calendars below,
-    // so after the device zone changes (travel, auto time zone) every clock
-    // time, date separator, Today/Yesterday decision and dayStamp() rollover
-    // would stay in the old zone.
+    // Locale and zone are tracked, not just the 24h setting: Android does not
+    // necessarily restart the process on a system or per-app locale change, so
+    // formatters built once at object init kept rendering weekday and month
+    // names in the previous language. SimpleDateFormat and Calendar also capture
+    // TimeZone.getDefault() at construction, so after a zone change (travel,
+    // auto time zone) every clock time, separator, Today/Yesterday decision and
+    // dayStamp() rollover stayed in the old zone.
     private var use24h: Boolean? = null
     private var locale: Locale = Locale.getDefault()
     private var zoneId: String = TimeZone.getDefault().id
@@ -82,8 +75,8 @@ object TimeFormat {
         return when (days) {
             0 -> clock(epochSeconds)
             1 -> context.getString(R.string.yesterday)
-            // 2..6 only: a negative delta means the stamp is in the future
-            // (clock skew), which must fall through to the absolute date
+            // 2..6, not < 7: a negative delta means a clock-skewed future stamp,
+            // which must fall through to the absolute date
             in 2..6 -> dayFmt.format(then.time)
             else -> dateFmt.format(then.time)
         }
@@ -103,7 +96,6 @@ object TimeFormat {
         return context.getString(R.string.day_at_time, day, time)
     }
 
-    // var, not val: rebuilt by refreshClockFormat on a locale or time-zone change
     private var sepFmt = SimpleDateFormat("MMMM d", locale)
     private var sepYearFmt = SimpleDateFormat("MMMM d, yyyy", locale)
 
@@ -132,12 +124,10 @@ object TimeFormat {
         c.get(Calendar.YEAR) * 1000 + c.get(Calendar.DAY_OF_YEAR)
 
     /**
-     * Signed difference in whole calendar days (to - from), correct across year
-     * boundaries and negative for a `from` in the future. Computed from the
-     * Julian day number rather than DAY_OF_YEAR, which used to need a 999/0
-     * sentinel for the cross-year case — and got it wrong in both directions
-     * (a Dec 31 message read on Jan 1 rendered as a date instead of
-     * "Yesterday", and a clock-skewed future stamp rendered as "Today").
+     * Julian day, not DAY_OF_YEAR: the old 999/0 sentinel for the cross-year
+     * case got it wrong both ways — a Dec 31 message read on Jan 1 rendered as
+     * a date instead of "Yesterday", and a clock-skewed future stamp rendered
+     * as "Today".
      */
     private fun daysBetween(from: Calendar, to: Calendar): Int =
         (julianDay(to) - julianDay(from)).toInt()

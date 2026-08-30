@@ -21,11 +21,10 @@ class ZoomImageView @JvmOverloads constructor(
 
     var onSingleTap: (() -> Unit)? = null
 
-    private var zoom = 1f // 1 = image fit to screen
+    private var zoom = 1f
     private var tx = 0f
     private var ty = 0f
     private var anim: Runnable? = null
-    private var contentWidth = 0f
     private val matrix = Matrix()
 
     init {
@@ -76,20 +75,18 @@ class ZoomImageView @JvmOverloads constructor(
     )
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        // Claim the gesture from the pager this view sits in. Two reasons, both
-        // of which look like "pinch is broken": a pinch IS horizontal movement,
-        // so at fit-to-screen the pager would intercept the second finger and
-        // turn a zoom into a page swipe; and once zoomed in, every drag belongs
-        // to the image, so paging must not start at all.
+        // The gesture must be claimed from the pager: a pinch IS horizontal
+        // movement, so at fit-to-screen the pager intercepted the second finger
+        // and turned a zoom into a page swipe; and once zoomed in every drag
+        // belongs to the image, so paging must not start at all.
         val pinching = event.pointerCount > 1 || scaleDetector.isInProgress
         if (pinching || zoom > 1f) parent?.requestDisallowInterceptTouchEvent(true)
 
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
 
-        // Released only once the image is back to fit-to-screen — checked after
-        // the detectors have run, so a pinch that ends at 1x hands paging back
-        // immediately rather than one gesture later.
+        // Checked after the detectors have run, so a pinch ending at 1x hands
+        // paging back immediately rather than one gesture later.
         if (event.actionMasked == MotionEvent.ACTION_UP ||
             event.actionMasked == MotionEvent.ACTION_CANCEL
         ) {
@@ -114,6 +111,7 @@ class ZoomImageView @JvmOverloads constructor(
 
     override fun setImageBitmap(bm: android.graphics.Bitmap?) {
         super.setImageBitmap(bm)
+        anim = null
         zoom = 1f
         apply()
     }
@@ -134,7 +132,7 @@ class ZoomImageView @JvmOverloads constructor(
             override fun run() {
                 if (anim !== this) return
                 val t = ((SystemClock.uptimeMillis() - start) / ZOOM_ANIM_MS).coerceAtMost(1f)
-                val eased = 1f - (1f - t) * (1f - t) // ease-out
+                val eased = 1f - (1f - t) * (1f - t)
                 applyZoom(from + (target - from) * eased, fx, fy)
                 if (t < 1f) postOnAnimation(this) else anim = null
             }
@@ -145,10 +143,8 @@ class ZoomImageView @JvmOverloads constructor(
 
     /**
      * ViewPager2 asks this before claiming a horizontal drag. A zoomed-in image
-     * always answers yes, in BOTH directions: the drag belongs to the picture
-     * until the user zooms back out, so reaching an edge must not hand the
-     * gesture to the pager. Handing it over at the edge meant a zoomed photo
-     * would page one way but not the other, which reads as a broken swipe.
+     * must answer yes in BOTH directions: handing the gesture over at an edge
+     * meant a zoomed photo paged one way but not the other.
      */
     override fun canScrollHorizontally(direction: Int): Boolean = zoom > 1f
 
@@ -170,7 +166,6 @@ class ZoomImageView @JvmOverloads constructor(
         val scale = minOf(vw / dw, vh / dh) * zoom
         val cw = dw * scale
         val ch = dh * scale
-        contentWidth = cw
         tx = if (cw <= vw) (vw - cw) / 2f else tx.coerceIn(vw - cw, 0f)
         ty = if (ch <= vh) (vh - ch) / 2f else ty.coerceIn(vh - ch, 0f)
         matrix.setScale(scale, scale)

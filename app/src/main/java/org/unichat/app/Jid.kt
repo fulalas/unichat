@@ -16,14 +16,12 @@ fun isSgGroupId(id: String): Boolean {
     return bare.length != 36
 }
 
-/** True for a phone-number JID — the only id kind that holds a real phone
- *  number. A contact's @lid alias and a group's @g.us id do not. */
+// A phone JID is the only id kind that holds a real phone number; a contact's
+// @lid alias and a group's @g.us id do not.
 fun isPhoneId(id: String): Boolean = id.endsWith("@s.whatsapp.net")
 
-/** Renders a phone JID as "+<phone number>" — the unknown-contact fallback.
- *  Any other id (a @lid alias, a group) has no phone number to show, so it is
- *  returned unchanged: prefixing '+' to a LID rendered it as a plausible-looking
- *  but entirely fake phone number in the chat title. */
+// Any non-phone id is returned unchanged: prefixing '+' to a LID rendered it as
+// a plausible-looking but entirely fake phone number in the chat title.
 fun phoneLabel(id: String): String =
     if (isPhoneId(id)) "+" + id.substringBefore("@") else id
 
@@ -54,19 +52,16 @@ fun resolveMentions(text: String, lookup: (String) -> String?): String {
 fun resolveMentions(text: String, names: Map<String, String>): String =
     if (names.isEmpty()) text else resolveMentions(text) { names[it] }
 
-/** A mention as it was composed: the `@Name` in the text, and who it means. */
 class Mention(val label: String, val id: String)
 
 class MentionHit(val start: Int, val end: Int, val id: String)
 
-/**
- * The mentions of a message that already went on the wire. Its body carries the
- * bare ids, not the "@Name" the composer typed, so resending it has to read them
- * back out — without this a retried mention reached the group as plain text and
- * never notified the person. [known] decides which id form the digits stand for:
- * a group mention is a @lid, a one-to-one one is a phone jid, and the digits
- * alone cannot tell them apart.
- */
+// A message that already went on the wire carries bare ids, not the "@Name" the
+// composer typed, so resending it has to read them back out — without this a
+// retried mention reached the group as plain text and never notified the
+// person. [known] decides which id form the digits stand for: a group mention
+// is a @lid, a one-to-one one is a phone jid, and the digits alone cannot tell
+// them apart.
 fun storedMentions(text: String, known: (String) -> Boolean): List<Mention> =
     MENTION.findAll(text).map { m ->
         val digits = m.groupValues[1]
@@ -74,16 +69,11 @@ fun storedMentions(text: String, known: (String) -> Boolean): List<Mention> =
         Mention("@$digits", if (known(lid)) lid else "$digits@s.whatsapp.net")
     }.distinctBy { it.id }.toList()
 
-/**
- * Where the mentions are in a composed message. The composer writes the
- * member's name, not their id, so a draft that outlived the screen still
- * resolves — longest name first, on word boundaries ("mail@Bob" is an address
- * and "@Bobby" is someone else), and no name claimed inside another's.
- *
- * Matched through [Search], like every other name match in the app: "@joao"
- * mentions João. Folding is one character in, one out, so an offset into the
- * folded name still points at the same character of the raw text.
- */
+// Matched on the member's name, not their id, so a draft that outlived the
+// screen still resolves. Longest name first and on word boundaries: "mail@Bob"
+// is an address and "@Bobby" is someone else. [Search] folding is one character
+// in, one out, so an offset into the folded name still points at the same
+// character of the raw text.
 fun mentionHits(text: String, members: List<Mention>): List<MentionHit> {
     if (!text.contains('@')) return emptyList()
     val hits = ArrayList<MentionHit>()
@@ -104,12 +94,10 @@ fun mentionHits(text: String, members: List<Mention>): List<MentionHit> {
     return hits.sortedBy { it.start }
 }
 
-/**
- * The WhatsApp wire form: the body carries the mentioned person's own digits
- * (its clients draw the chip by matching them against MentionedJID), so the
- * composed names are spliced out — back to front, or every offset after the
- * first splice would be wrong.
- */
+// On the wire the body carries the mentioned person's own digits (WhatsApp
+// clients draw the chip by matching them against MentionedJID), so the composed
+// names are spliced out — back to front, or every offset after the first splice
+// would be wrong.
 fun waMentionText(text: String, members: List<Mention>): Pair<String, List<String>> {
     val hits = mentionHits(text, members)
     if (hits.isEmpty()) return text to emptyList()
@@ -132,7 +120,6 @@ fun selfProtocol(ctx: android.content.Context, chatId: String): String {
     return ""
 }
 
-/** True for a note to self on any protocol. */
 fun isSelfChat(ctx: android.content.Context, chatId: String): Boolean =
     selfProtocol(ctx, chatId).isNotEmpty()
 

@@ -8,23 +8,21 @@ import android.graphics.Shader
 import android.os.Handler
 import android.os.Looper
 import android.widget.ImageView
-import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlin.math.min
 
 object AvatarLoader {
 
-    private const val REFRESH_MS = 60 * 60 * 1000L // 1 hour
+    private const val REFRESH_MS = 60 * 60 * 1000L
     // A contact with no profile picture writes no file, so there is nothing to
     // cache and every bind used to re-issue a network lookup through the
     // bridge. Remember the miss for a while instead.
-    private const val NO_AVATAR_MS = 30 * 60 * 1000L // 30 minutes
+    private const val NO_AVATAR_MS = 30 * 60 * 1000L
 
     private val cache = newBitmapCache(32)
     private val loadedAt = ConcurrentHashMap<String, Long>()
     private val missedAt = ConcurrentHashMap<String, Long>()
-    private val inFlight = Collections.synchronizedSet(HashSet<String>())
 
     private val requests = PendingViews<Int>()
 
@@ -74,8 +72,8 @@ object AvatarLoader {
         val missed = missedAt[chatId]
         if (missed != null && System.currentTimeMillis() - missed < NO_AVATAR_MS) return
 
-        requests.await(chatId, imageView, sizePx)
-        if (!inFlight.add(chatId)) return // a fetch for this id is already running; we are queued on it
+        // a fetch for this id is already running; we are queued on it
+        if (!requests.await(chatId, imageView, sizePx)) return
 
         if (cached != null) fetcher.execute { resolve(chatId, sizePx, cachedOnly = false) }
         else decoder.execute { resolve(chatId, sizePx, cachedOnly = true) }
@@ -84,8 +82,10 @@ object AvatarLoader {
     private fun resolve(chatId: String, sizePx: Int, cachedOnly: Boolean) {
         var delivering = false
         var handedOff = false
+        var pending = emptyList<PendingViews.Entry<Int>>()
+        var px = sizePx
         try {
-            val pending = requests.peek(chatId)
+            pending = requests.peek(chatId)
             // Skip only when nothing holds a live view any more and the
             // bitmap is already cached. Deliberately does NOT read
             // imageView.tag: View is not thread-safe, and this runs on a
@@ -93,14 +93,14 @@ object AvatarLoader {
             // reference, so we may decode something momentarily off-screen —
             // deliver() re-checks the tag on the main thread and simply
             // won't paint it, and the decode still populates the cache.
-            if (pending.isNullOrEmpty() && cache.get(chatId) != null) return
-            val px = pending?.maxOfOrNull { it.payload } ?: sizePx
+            if (pending.isEmpty() && cache.get(chatId) != null) return
+            px = pending.maxOfOrNull { it.payload } ?: sizePx
             val path =
                 if (cachedOnly) Bridge.getCachedAvatarPath(chatId) else Bridge.getAvatarPath(chatId)
             if (path.isEmpty()) {
                 if (cachedOnly) {
-                    handedOff = true
                     fetcher.execute { resolve(chatId, px, cachedOnly = false) }
+                    handedOff = true
                     return
                 }
                 forget(chatId)
@@ -122,21 +122,24 @@ object AvatarLoader {
             missedAt.remove(chatId)
             delivering = true
             main.post { deliver(chatId, circled) }
+        } catch (t: Throwable) {
+            // Bridge JNI calls and circleCrop's allocations can throw (OOM
+            // included); uncaught on this pool it took the whole process down.
+            android.util.Log.e("AvatarLoader", "resolve failed for $chatId", t)
         } finally {
-            if (!handedOff) {
-                inFlight.remove(chatId)
-                // nothing will be painted, so don't leave the queue behind
-                if (!delivering) requests.abandon(chatId)
+            // Nothing will be painted, so this run's own waiters go; anything
+            // queued after its peek could not claim a run of its own, so it is
+            // re-fetched here instead of being dropped with them.
+            if (!handedOff && !delivering && requests.settle(chatId, pending).isNotEmpty()) {
+                fetcher.execute { resolve(chatId, px, cachedOnly = false) }
             }
         }
     }
 
-    /**
-     * The chat has no usable picture (any more). The cached bitmap has to go
-     * with the miss: keeping it meant a picture the contact removed stayed on
-     * screen for the rest of the process's life, because every later bind took
-     * the cache-hit branch and the refresh always landed back here.
-     */
+    // The cached bitmap has to go with the miss: keeping it meant a picture the
+    // contact removed stayed on screen for the rest of the process's life,
+    // because every later bind took the cache-hit branch and the refresh always
+    // landed back here.
     private fun forget(chatId: String) {
         cache.remove(chatId)
         loadedAt.remove(chatId)

@@ -137,9 +137,16 @@ ensure_signalmeow() {
         # a release the patch predates would otherwise kill every build until
         # someone refreshed it by hand — the calendar must not break the build.
         if [ "$SIGNALMEOW_TAG" != "$pinned" ]; then
-            echo "   staying on $pinned; refresh the patch to take $SIGNALMEOW_TAG" >&2
+            # Keep a working stamped checkout: resetting to the hardcoded pin
+            # here discarded a newer adopted tag and re-cloned the OLDER one —
+            # the same silent downgrade the stamp exists to prevent.
+            if [ -n "$have" ] && [ -d "$dest" ]; then
+                echo "   keeping $have; refresh the patch to take $SIGNALMEOW_TAG" >&2
+                SIGNALMEOW_TAG="$have"
+                return
+            fi
+            echo "   falling back to $pinned; refresh the patch to take $SIGNALMEOW_TAG" >&2
             SIGNALMEOW_TAG="$pinned"
-            [ "$have" = "$pinned" ] && return
         else
             echo "   refresh gobridge/ext/signal-local.patch; the Go bridge cannot link without it" >&2
             exit 1
@@ -299,7 +306,10 @@ if [ "$APK_ONLY" != 1 ]; then
         exit 1
     fi
     SO_TMP=$(mktemp -d)
-    unzip -q -o -j "$DIR/app/libs/wmbridge-new.aar" jni/arm64-v8a/libgojni.so -d "$SO_TMP"
+    # `|| true`: unzip exits non-zero when the entry is absent (or the aar is
+    # corrupt), and under set -e that killed the script HERE, skipping the
+    # tailored error branch below and leaving $SO_TMP and wmbridge-new.aar behind.
+    unzip -q -o -j "$DIR/app/libs/wmbridge-new.aar" jni/arm64-v8a/libgojni.so -d "$SO_TMP" || true
     if [ ! -f "$SO_TMP/libgojni.so" ]; then
         rm -rf "$SO_TMP" "$DIR/app/libs/wmbridge-new.aar"
         echo "gomobile: no jni/arm64-v8a/libgojni.so in the aar" >&2

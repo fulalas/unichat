@@ -35,12 +35,9 @@ object Prefs {
     fun setFontScale(ctx: Context, scale: Float) =
         prefs(ctx).edit().putFloat(KEY_FONT, scale.coerceIn(FONT_MIN, FONT_MAX)).apply()
 
-    /**
-     * Where a chat was left, as the id of the first visible message plus its
-     * pixel offset. An anchor, not the layout manager's saved state: adapter
-     * positions are meaningless in a fresh process, where the loaded window is
-     * rebuilt from scratch.
-     */
+    // A message id plus pixel offset, not the layout manager's saved state:
+    // adapter positions are meaningless in a fresh process, where the loaded
+    // window is rebuilt from scratch.
     fun scrollAnchor(ctx: Context, chatId: String): Pair<String, Int>? {
         val raw = prefs(ctx).getString(KEY_SCROLL + chatId, null) ?: return null
         val at = raw.lastIndexOf(':')
@@ -56,35 +53,32 @@ object Prefs {
         e.apply()
     }
 
-    /**
-     * Whether a chat has been paged back to its very first message. Persisted,
-     * unlike Bridge's in-memory copy, because search uses it to tell you it
-     * really did read everything — an answer that must survive a restart.
-     */
+    // Persisted, unlike Bridge's in-memory copy, because search uses it to tell
+    // you it really did read everything — an answer that must survive a
+    // restart.
     fun historyComplete(ctx: Context, chatId: String): Boolean =
         prefs(ctx).getBoolean(KEY_COMPLETE + chatId, false)
 
     fun setHistoryComplete(ctx: Context, chatId: String) =
         prefs(ctx).edit().putBoolean(KEY_COMPLETE + chatId, true).apply()
 
-    /**
-     * Forgets the claim for one chat. A deleted or re-linked account re-syncs
-     * from nothing, and a search still promising it had read everything would
-     * be exactly the false comfort this replaced.
-     */
+    // A deleted or re-linked account re-syncs from nothing, and a search still
+    // promising it had read everything would be exactly the false comfort this
+    // replaced.
     fun clearHistoryComplete(ctx: Context, chatId: String) {
         prefs(ctx).edit().remove(KEY_COMPLETE + chatId).apply()
     }
 
-    /** The same, for every chat [matches] names. Takes a predicate rather than
-     *  clearing the lot: unlinking one account must not retract the claim for
-     *  the chats of an account that is still linked. */
-    fun clearHistoryCompleteWhere(ctx: Context, matches: (String) -> Boolean) {
+    // Takes a predicate rather than clearing the lot: unlinking one account
+    // must not touch the chats of an account that is still linked. Drafts and
+    // anchors included because a re-linked account inherited the old sync's
+    // message text and anchors pointing at ids that no longer exist.
+    fun clearChatPrefsWhere(ctx: Context, matches: (String) -> Boolean) {
         val p = prefs(ctx)
         val e = p.edit()
         for (key in p.all.keys) {
-            if (key.startsWith(KEY_COMPLETE) && matches(key.removePrefix(KEY_COMPLETE))) {
-                e.remove(key)
+            for (prefix in arrayOf(KEY_COMPLETE, KEY_DRAFT, KEY_SCROLL)) {
+                if (key.startsWith(prefix) && matches(key.removePrefix(prefix))) e.remove(key)
             }
         }
         e.apply()
@@ -100,19 +94,15 @@ object Prefs {
         e.apply()
     }
 
-    /**
-     * Own Telegram user id. Persisted because it otherwise costs a getMe round
-     * trip after TDLib authorizes: a share sheet that starts the process asks
-     * for it in the same breath, and got "tg:0" — a target that cannot be sent
-     * to and opens an empty chat.
-     */
+    // Persisted because it otherwise costs a getMe round trip after TDLib
+    // authorizes: a share sheet that starts the process asks for it in the same
+    // breath, and got "tg:0" — a target that cannot be sent to and opens an
+    // empty chat.
     fun tgSelfId(ctx: Context): Long = prefs(ctx).getLong(KEY_TG_SELF, 0L)
 
     fun setTgSelfId(ctx: Context, id: Long) =
         prefs(ctx).edit().putLong(KEY_TG_SELF, id).apply()
 
-    /** A paused protocol stays linked but is kept off the network. Defaults to
-     *  on, so an account is live the moment it is linked. */
     fun protoEnabled(ctx: Context, proto: String): Boolean =
         prefs(ctx).getBoolean(KEY_PROTO_ENABLED + proto, true)
 
@@ -122,23 +112,21 @@ object Prefs {
     fun clearProtoEnabled(ctx: Context, proto: String) =
         prefs(ctx).edit().remove(KEY_PROTO_ENABLED + proto).apply()
 
-    /** Mirrors the server-side account attribute; registration sets it true. */
+    // Mirrors the server-side account attribute, which registration sets true.
     fun sgDiscoverable(ctx: Context): Boolean =
         prefs(ctx).getBoolean(KEY_SG_DISCOVERABLE, true)
 
     fun setSgDiscoverable(ctx: Context, on: Boolean) =
         prefs(ctx).edit().putBoolean(KEY_SG_DISCOVERABLE, on).apply()
 
-    /** Honoured locally: the account record that would publish it lives in the
-     *  storage service, which this account cannot write yet. */
+    // Honoured locally only: the account record that would publish it lives in
+    // the storage service, which this account cannot write yet.
     fun sgReadReceipts(ctx: Context): Boolean =
         prefs(ctx).getBoolean(KEY_SG_READ_RECEIPTS, true)
 
     fun setSgReadReceipts(ctx: Context, on: Boolean) =
         prefs(ctx).edit().putBoolean(KEY_SG_READ_RECEIPTS, on).apply()
 
-    /** Whether the PIN has already unlocked the account's stored contact list.
-     *  Manage accounts stops offering the recovery once it has. */
     fun sgContactsRestored(ctx: Context): Boolean =
         prefs(ctx).getBoolean(KEY_SG_CONTACTS_RESTORED, false)
 

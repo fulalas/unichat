@@ -36,11 +36,12 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
     // one automatic try per picture: a failed page binds again on every swipe
     // past it, and each attempt is a blocking fetch that would never stop
     private val windowFailed = HashSet<String>()
+    // a corrupt or truncated file used to leave a silent blank page — say so
+    // once instead of failing the same decode on every rebind
+    private val decodeFailed = HashSet<String>()
     private val windowMedia = java.util.concurrent.Executors.newFixedThreadPool(2)
-    // Pulling older history: a fetched page often holds no images at all, so
-    // one request is rarely enough. This counts the pages still worth pulling
-    // before giving up, and is refilled time the user swipes at the oldest
-    // page.
+    // A fetched page of older history often holds no images at all, so one
+    // request is rarely enough.
     private var olderRoundsLeft = 0
     private var awaitingOlder = false
 
@@ -140,9 +141,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
     }
 
     /**
-     * Folds a server-fetched page of pictures into the album, keeping the one
-     * on screen under the finger.
-     *
      * Ordered by message id alone, NOT by time: the rows handed over through
      * the Intent carry no timestamp, so sorting by time would bunch them all
      * before the fetched ones. Telegram ids grow with the chat, which is the
@@ -175,7 +173,6 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
     private var windowOlderDone = false
     private var windowNewerDone = false
 
-    /** Grows the album when the user reaches either end of it. */
     private fun extendWindowAlbum() {
         if (!windowAlbum || windowLoading || images.isEmpty()) return
         val at = pager.currentItem
@@ -201,10 +198,9 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
     }
 
     /**
-     * Fetches one search-window picture. The normal download path records its
-     * progress on the message's stored row, and these rows have none — so it
-     * hands the path straight back, exactly as the chat screen does for the
-     * bubbles of the same window.
+     * The normal download path records its progress on the message's stored
+     * row, and search-window rows have none — so this one hands the path
+     * straight back, exactly as the chat screen does for the same window.
      */
     private fun fetchWindowImage(msg: MessageRow) {
         if (msg.id in windowFailed) return
@@ -321,10 +317,21 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // A request outstanding when we stopped is still owed an answer, and its
+        // timeout went with the callbacks: without re-arming it a page that never
+        // lands leaves awaitingOlder set for good, and no later swipe can pull
+        // any older history again.
+        if (awaitingOlder) pager.postDelayed(olderTimeout, Bridge.historyTimeoutMs)
+    }
+
     override fun onStop() {
         super.onStop()
         pager.removeCallbacks(olderTimeout)
-        awaitingOlder = false
+        // awaitingOlder is deliberately kept: the bridge allows one history
+        // request at a time, and clearing it here let the next swipe fire a
+        // second one that the bridge silently dropped as busy.
         olderRoundsLeft = 0
     }
 
@@ -373,6 +380,10 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
                 }
                 return
             }
+            if (path in decodeFailed) {
+                holder.progress.visibility = View.GONE
+                return
+            }
             holder.progress.visibility = View.VISIBLE
             ImageLoader.decodeAsync(path, decodeTarget) { bitmap ->
                 if (isFinishing || isDestroyed) return@decodeAsync
@@ -382,6 +393,11 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
                 holder.progress.visibility = View.GONE
                 if (bitmap != null) holder.image.setImageBitmap(bitmap)
                 else if (images.isEmpty()) finish()
+                else if (decodeFailed.add(path)) {
+                    Toast.makeText(
+                        this@ImageViewActivity, R.string.image_show_failed, Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         }
     }

@@ -4,18 +4,11 @@ import android.graphics.Bitmap
 import android.util.LruCache
 import android.widget.ImageView
 import java.lang.ref.WeakReference
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * Shared sizing rule for the app's in-memory bitmap caches. Both callers used
- * to declare an identical `maxMemory / 8` LruCache independently, which meant
- * the real combined bitmap budget was a quarter of the heap and tuning one copy
- * silently left the other at the old ceiling.
- *
- * [heapDivisor] splits the budget explicitly: avatars are small and many
- * (1/32), chat images are large and few (1/12), link-preview pictures are few
- * and small (1/48), so together they stay under ~15% of the heap.
+ * Callers used to each declare their own `maxMemory / 8` LruCache, so the real
+ * combined bitmap budget was a quarter of the heap and tuning one copy left the
+ * others at the old ceiling. [heapDivisor] splits one budget explicitly.
  */
 fun newBitmapCache(heapDivisor: Int): LruCache<String, Bitmap> {
     val sizeKb = (Runtime.getRuntime().maxMemory() / 1024 / heapDivisor).toInt().coerceAtLeast(4096)
@@ -24,31 +17,56 @@ fun newBitmapCache(heapDivisor: Int): LruCache<String, Bitmap> {
     }
 }
 
+/**
+ * The waiters and the claim on the run serving them live behind one lock
+ * because every attempt to keep them apart raced: queueing a waiter is not
+ * atomic against the run's take/settle, and the two happen on different
+ * threads. A waiter landing in that window was either wiped while its own claim
+ * failed, or added to a list already dropped from the map — either way nothing
+ * painted it and the row kept its placeholder until rebound. The four callers
+ * each patched that differently before it moved in here.
+ */
 class PendingViews<T> {
 
     class Entry<T>(val view: WeakReference<ImageView>, val payload: T)
 
-    private val map = ConcurrentHashMap<String, CopyOnWriteArrayList<Entry<T>>>()
-
-    // Looped, because computeIfAbsent + add is not atomic against take/abandon
-    // and the two run on different threads (await on the main one, abandon in
-    // the decode pool's finally). Losing that race added the entry to a list no
-    // longer in the map, so the later take() found nothing, the view was never
-    // painted, and the row kept its placeholder until it was rebound.
-    fun await(key: String, view: ImageView, payload: T) {
-        while (true) {
-            val list = map.computeIfAbsent(key) { CopyOnWriteArrayList() }
-            list.removeIf { it.view.get().let { v -> v == null || v === view } }
-            list.add(Entry(WeakReference(view), payload))
-            if (map[key] === list) return
-        }
+    private class Waiters<T> {
+        val entries = ArrayList<Entry<T>>()
+        var running = false
     }
 
-    fun peek(key: String): List<Entry<T>>? = map[key]
+    private val queues = HashMap<String, Waiters<T>>()
 
-    fun take(key: String): List<Entry<T>> = map.remove(key).orEmpty()
+    @Synchronized
+    fun await(key: String, view: ImageView, payload: T): Boolean {
+        val q = queues.getOrPut(key) { Waiters() }
+        q.entries.removeAll { it.view.get().let { v -> v == null || v === view } }
+        q.entries.add(Entry(WeakReference(view), payload))
+        if (q.running) return false
+        q.running = true
+        return true
+    }
 
-    fun abandon(key: String) {
-        map.remove(key)
+    @Synchronized
+    fun peek(key: String): List<Entry<T>> = queues[key]?.entries?.toList().orEmpty()
+
+    @Synchronized
+    fun take(key: String): List<Entry<T>> = queues.remove(key)?.entries.orEmpty()
+
+    /**
+     * Returns the waiters queued after the run started; they could not claim a
+     * run of their own, so the caller must dispatch one for them. Dropping
+     * [done] is what makes a permanently failing load terminate instead of
+     * re-dispatching itself for ever.
+     */
+    @Synchronized
+    fun settle(key: String, done: List<Entry<T>>): List<Entry<T>> {
+        val q = queues[key] ?: return emptyList()
+        q.entries.removeAll(done)
+        if (q.entries.isEmpty()) {
+            queues.remove(key)
+            return emptyList()
+        }
+        return q.entries.toList()
     }
 }

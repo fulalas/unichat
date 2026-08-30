@@ -13,12 +13,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.SwitchCompat
 
 /**
- * Add, pause or remove accounts. Every protocol is listed whether or not it is
- * linked, so an unlinked one stays reachable — the old overflow entry hid
- * itself once two accounts existed, which made a third protocol unusable.
- *
- * Pausing and removing are deliberately different actions: the switch only
- * takes the account off the network, while the bin destroys its local data.
+ * Every protocol is listed whether or not it is linked: the old overflow entry
+ * hid itself once two accounts existed, which made a third protocol unusable.
  */
 class AccountsActivity : BaseActivity(), Bridge.UiListener {
 
@@ -38,10 +34,10 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
         render()
     }
 
-    // Rows by protocol, so a state change repaints the one row it belongs to.
-    // Rebuilding the whole list instead tore the switch down from inside its own
-    // OnCheckedChangeListener, and an account-state event landing mid-gesture
-    // destroyed the thumb under the finger.
+    // Kept per protocol so a state change repaints one row. Rebuilding the whole
+    // list tore the switch down from inside its own OnCheckedChangeListener, and
+    // an account-state event landing mid-gesture destroyed the thumb under the
+    // finger.
     private val rows = HashMap<String, View>()
 
     private fun render() {
@@ -57,7 +53,6 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
                 .setBackgroundColor(protocolAccentOf(proto))
             row.findViewById<TextView>(R.id.accountName).text = account.label(this)
 
-            // Attached once here; bindRow owns everything that changes.
             row.findViewById<Button>(R.id.accountLink)
                 .setOnClickListener { startSetup(proto) }
             row.findViewById<ImageButton>(R.id.accountDelete)
@@ -77,16 +72,12 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
             enabled -> getString(R.string.account_active)
             else -> getString(R.string.account_paused)
         }
-        // Signal only: the contact list lives behind the account PIN, and
-        // registering left it locked. Offer the recovery until it is done,
-        // then say so instead of asking again — the row stays tappable, so
-        // it can still be run a second time.
+        // Signal keeps the contact list behind the account PIN, and registering
+        // leaves it locked, so the recovery has to be reachable from here.
         if (proto == ProtoPicker.SG && linked) {
             row.setOnClickListener {
                 startActivity(Intent(this, SignalPinActivity::class.java))
             }
-            // Appended, not substituted: the row still has to say whether
-            // the account is active or paused.
             val hint = if (Prefs.sgContactsRestored(this)) {
                 getString(R.string.signal_contacts_restored)
             } else {
@@ -97,8 +88,6 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
             row.setOnClickListener(null)
             row.isClickable = false
         }
-        // Link is the only action that makes sense before an account
-        // exists; pause and remove would both have nothing to act on.
         row.findViewById<Button>(R.id.accountLink).visibility =
             if (linked) View.GONE else View.VISIBLE
         row.findViewById<ImageButton>(R.id.accountDelete).visibility =
@@ -139,19 +128,16 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
 
     private fun remove(proto: String, name: String) {
         Accounts.of(proto).logout()
-        // Deliberately NOT deleting the protocol's directory here. Every logout
-        // above only QUEUES work on that protocol's own executor, so wiping the
-        // tree from this thread pulled the files out from under a still-running
-        // TDLib and an open Signal sqlite handle. Each protocol clears its own
-        // storage as part of logging out.
+        // Do NOT delete the protocol's directory here: logout only queues work on
+        // that protocol's own executor, so wiping the tree from this thread pulled
+        // the files out from under a running TDLib and an open Signal sqlite
+        // handle. Each protocol clears its own storage as part of logging out.
         Prefs.clearProtoEnabled(this, proto)
         Toast.makeText(this, getString(R.string.account_removed, name), Toast.LENGTH_SHORT).show()
         render()
     }
 
 
-    // Only the account that changed: a full rebuild here destroyed whatever
-    // switch the user happened to have under their finger.
     override fun onAccountState(proto: String, state: String) = refreshRow(proto)
 
 

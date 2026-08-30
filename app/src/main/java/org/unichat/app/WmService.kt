@@ -95,13 +95,10 @@ class WmService : Service() {
         return START_STICKY
     }
 
-    /**
-     * Android 15+ caps some foreground-service types (dataSync) at ~6h/24h and
-     * calls this when the budget runs out; not handling it is a
-     * ForegroundServiceDidNotStopInTimeException kill. The connection is declared
-     * as specialUse (untimed), so this is a backstop: re-assert the foreground
-     * notification so the service keeps running under the untimed types.
-     */
+    // Android 15+ caps some foreground-service types (dataSync) at ~6h/24h and
+    // calls this when the budget runs out; not handling it is a
+    // ForegroundServiceDidNotStopInTimeException kill. The connection is
+    // declared as specialUse (untimed), so this is only a backstop.
     override fun onTimeout(startId: Int, fgsType: Int) {
         ensureForeground()
     }
@@ -313,12 +310,8 @@ class WmService : Service() {
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
-    // The sensor may only act while the user is inside the chat that owns the
-    // current (playing or paused) voice message, with the screen on — or off
-    // because OUR wake lock blanked it at the ear, which must keep the "far"
-    // transition working. A user-initiated screen-off, another screen, a
-    // finished message, or a paused message reset to the start all disarm it;
-    // playback itself is never touched by disarming.
+    // A screen blanked by OUR OWN wake lock still counts as usable, otherwise
+    // the "far" transition stops working once the phone is at the ear.
     private fun updateProximity() {
         val screenUsable = getSystemService(PowerManager::class.java).isInteractive ||
             proximityWakeLock?.isHeld == true
@@ -329,8 +322,8 @@ class WmService : Service() {
         if (eligible) registerProximity() else unregisterProximity()
     }
 
-    // user pressed power: the proximity sensor must not act in any context,
-    // while audio keeps running exactly the way it was
+    // A screen-off the user asked for must disarm the sensor; the one our own
+    // wake lock causes must not. Audio keeps running either way.
     private val screenReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {

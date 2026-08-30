@@ -9,9 +9,10 @@ import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
 
-/** Prefixes of cacheDir staging files, shared with Bridge.cleanStaleCache's
- *  startup sweep — every staging producer must use one of these. */
+/** Bridge.cleanStaleCache's startup sweep only reclaims these prefixes, so every
+ *  staging producer must use one of them. */
 val STAGING_PREFIXES = listOf("attach", "share", "rec", "avatar")
 
 private val UNSAFE_FILE_CHARS = Regex("[^A-Za-z0-9._-]")
@@ -21,16 +22,22 @@ private val UNSAFE_DISPLAY_CHARS = Regex("[\\\\/:*?\"<>|\\p{Cntrl}]")
 fun safeDisplayFileName(name: String): String =
     name.replace(UNSAFE_DISPLAY_CHARS, "_").trim().ifEmpty { "chat" }
 
+// The clock alone is not unique: ShareActivity stages the same item twice
+// within one millisecond, and the second open truncated a file already queued
+// for sending.
+private val stagingSeq = AtomicLong()
+
 fun Context.stagingFile(prefix: String, name: String): File {
     val safe = name.replace(UNSAFE_FILE_CHARS, "_")
-    return File(cacheDir, "${prefix}_${System.currentTimeMillis()}_$safe")
+    return File(cacheDir, "${prefix}_${System.currentTimeMillis()}_${stagingSeq.incrementAndGet()}_$safe")
 }
 
 fun Context.uriDisplayName(uri: Uri): String? {
     try {
         contentResolver.query(uri, null, null, null, null)?.use { c ->
             val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0 && c.moveToFirst()) return c.getString(idx)
+            // a NULL value must fall through to lastPathSegment, not answer null
+            if (idx >= 0 && c.moveToFirst()) c.getString(idx)?.let { return it }
         }
     } catch (_: Exception) {
         return null
@@ -38,11 +45,9 @@ fun Context.uriDisplayName(uri: Uri): String? {
     return uri.lastPathSegment
 }
 
-/** Copies a content Uri into a staging file; null on any failure. The partial
- *  file is unlinked on the way out: leaving it meant a source that fails
- *  part-way (a provider dying, a full disk) dropped a half-written file in
- *  cacheDir that only the 24h startup sweep ever reclaimed, and a caller that
- *  retried just added another. */
+/** The partial file must be unlinked on failure: a source dying part-way (a
+ *  provider gone, a full disk) left a half-written file in cacheDir that only
+ *  the 24h startup sweep reclaimed, and a retrying caller just added another. */
 fun Context.copyUriToCache(uri: Uri, prefix: String, name: String): File? {
     val out = stagingFile(prefix, name)
     return try {
@@ -65,13 +70,11 @@ fun mimeOfPath(path: String, fallback: String = "application/octet-stream"): Str
         .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: fallback
 
 /**
- * Copies [file] into the public Downloads collection under [name], answering
- * the name it actually landed under (MediaStore appends "(1)" and the like on a
- * collision) or null on failure. Goes through MediaStore rather than writing a
- * File in DIRECTORY_DOWNLOADS: from Android 10 on that path is not writable
- * without legacy storage, and MediaStore needs no permission for its own row.
- * IS_PENDING hides the row until the copy finishes, so a file picker never
- * offers a half-written file.
+ * MediaStore, not a File in DIRECTORY_DOWNLOADS: from Android 10 on that path
+ * is not writable without legacy storage, and MediaStore needs no permission
+ * for its own row. IS_PENDING hides the row until the copy finishes, so a file
+ * picker never offers a half-written file. The returned name is re-read because
+ * MediaStore appends "(1)" and the like on a collision.
  */
 fun Context.copyToDownloads(file: File, name: String): String? {
     val values = ContentValues().apply {

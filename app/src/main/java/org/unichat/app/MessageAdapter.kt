@@ -25,7 +25,6 @@ import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 class MessageAdapter(
@@ -102,9 +101,11 @@ class MessageAdapter(
     fun clearSelection() {
         if (!selectionMode && selected.isEmpty()) return
         selectionMode = false
-        val ids = selected.keys.toList()
+        val ids = HashSet(selected.keys)
         selected.clear()
-        for (id in ids) rebindRow(id)
+        // one pass, not a linear indexOfMessage scan per id: clearing a bulk
+        // drag-select in a search window ran millions of comparisons in a frame
+        messages.forEachIndexed { i, m -> if (m.id in ids) notifyItemChanged(i) }
         onSelectionChanged()
     }
 
@@ -131,11 +132,15 @@ class MessageAdapter(
 
     private val differ = AsyncListDiffer(this, DIFF)
     private val messages: List<MessageRow> get() = differ.currentList
+    // AsyncListDiffer applies a submit asynchronously: refreshRows used to
+    // resubmit differ.currentList, and while a submit was still diffing that
+    // bumped the generation and silently dropped the newer list — new messages
+    // vanished until the next full submit
+    private var submitted: List<MessageRow> = emptyList()
     private var names: Map<String, String> = emptyMap()
 
     var seekDragging = false
         private set
-    // raw for the callers that hand it back to the server, folded for matching
     var highlightQuery: String = ""
         set(value) {
             field = value
@@ -151,8 +156,6 @@ class MessageAdapter(
     private var flashArmedAt = 0L
     private var flashPlayedAt = 0L
 
-    /** What a reply's card shows of the message it answers: who wrote it, and
-     *  as much of it as we hold. */
     data class QuotedPreview(val name: String, val text: String, val msgType: String)
 
     fun submit(
@@ -162,13 +165,11 @@ class MessageAdapter(
         onCommitted: (() -> Unit)? = null,
     ) {
         val hadRows = differ.currentList.isNotEmpty()
-        // A sender's name can appear on any row, so a change there redraws the
-        // window. A quoted preview reaches exactly the rows that answer that one
-        // message, and those have to redraw too — a reply that arrives before
-        // the message it quotes renders "Message", and when that message syncs
-        // in the reply row itself is unchanged, so nothing else would ask. The
-        // whole window used to redraw for it: in a reply-heavy group that is
-        // every image reloaded and every span rebuilt per incoming reply.
+        // A reply that arrives before the message it quotes renders "Message",
+        // and when that message syncs in the reply row itself is unchanged, so
+        // nothing else would ask for a redraw. The whole window used to redraw
+        // for it: in a reply-heavy group that is every image reloaded and every
+        // span rebuilt per incoming reply.
         val namesChanged = hadRows && newNames != names
         val staleQuotes = if (hadRows && !namesChanged) {
             (newQuoteNames.keys + quoteNames.keys)
@@ -178,6 +179,7 @@ class MessageAdapter(
         }
         names = newNames
         quoteNames = newQuoteNames
+        submitted = newMessages
         differ.submitList(newMessages) {
             // dropped here, not before submitList: the differ applies the new
             // list asynchronously, and selectedMessages() runs on every
@@ -198,9 +200,10 @@ class MessageAdapter(
     fun messagesSnapshot(): List<MessageRow> = messages
 
     fun refreshRows(fresh: Map<String, MessageRow>) {
-        if (fresh.isEmpty() || messages.isEmpty()) return
-        if (messages.none { it.id in fresh }) return
-        differ.submitList(messages.map { fresh[it.id] ?: it }) { rowsById = null }
+        if (fresh.isEmpty() || submitted.isEmpty()) return
+        if (submitted.none { it.id in fresh }) return
+        submitted = submitted.map { fresh[it.id] ?: it }
+        differ.submitList(submitted) { rowsById = null }
     }
 
     fun refreshAudioRows(recycler: RecyclerView) {
@@ -318,13 +321,9 @@ class MessageAdapter(
         if (pct != null) holder.videoProgress.progress = pct
     }
 
-    /**
-     * Bind-time auto-download eligibility, in one place instead of once per media
-     * branch. Also retries a previously-failed download (fileStatus == 3):
-     * history media that failed before the media-retry recovery existed would be
-     * stuck at that status forever otherwise. Bridge throttles it to one
-     * automatic retry per failure.
-     */
+    // Retries a previously-failed download (fileStatus == 3): history media that
+    // failed before the media-retry recovery existed would be stuck at that
+    // status forever otherwise. Bridge throttles it to one retry per failure.
     private fun maybeAutoDownload(msg: MessageRow) {
         // A stored path outlives its file: our own Telegram sends reference the
         // cacheDir staging copy, which the daily sweep deletes after a day. The
@@ -389,21 +388,19 @@ class MessageAdapter(
         val reactionPill: TextView = view.findViewById(R.id.reactionPill)
         var flashFade: Runnable? = null
         var current: MessageRow? = null
-        // per-view link gesture state — one instance per holder so a touch on
-        // another row can't clobber this row's in-flight link press
+        // one instance per holder, so a touch on another row can't clobber this
+        // row's in-flight link press
         internal val linkMovement = LinkPressMovement()
         var quoteDelegateRect: android.graphics.Rect? = null
         var audioIconRes: Int = 0
-        // last gravity applied to the bubble / reaction pill: assigning
-        // layoutParams always calls requestLayout(), even when nothing changed
         var bubbleGravity: Int = -1
         var pillGravity: Int = -1
         var imageFrameBottomMargin: Int = -1
         var cappedForWidth: Int = -1
     }
 
-    // stop a bubble's animation when its view is recycled off-screen, so a long
-    // chat full of GIFs doesn't keep dozens of decoders ticking in the pool
+    // a long chat full of GIFs would otherwise keep dozens of decoders ticking
+    // in the recycler pool
     override fun onViewRecycled(holder: Holder) {
         super.onViewRecycled(holder)
         ImageLoader.clearAnimating(holder.image)
@@ -452,26 +449,31 @@ class MessageAdapter(
         }
         holder.image.clipToOutline = true
 
-        // Attach every touch handler once, here — not on each bind. Each reads
-        // holder.current (the row most recently bound to this holder), so no new
-        // lambda is allocated per row per rebind. Behaviour matches the old
-        // per-bind wiring: media/label taps route by type, everything else
-        // opens the actions menu. Long-press enters multi-select; while in
-        // selection mode every tap toggles the row instead of its normal action.
+        // Handlers are attached once here, not on each bind: each reads
+        // holder.current, so no lambda is allocated per row per rebind.
 
-        fun tapWhileSelecting(): Boolean {
-            if (!selectionMode) return false
-            holder.current?.let { toggleSelection(it) }
-            return true
+        // Every row listener goes through this gate. The retry check used to be
+        // copied into each listener and the audio seekbar was written without
+        // it, which played back — and offered to download — a voice note that
+        // never left the device. Only the taps that must still reach the actions
+        // menu opt out.
+        fun tappedRow(retryIfFailed: Boolean = true): MessageRow? {
+            val m = holder.current
+            if (selectionMode) {
+                m?.let { toggleSelection(it) }
+                return null
+            }
+            if (retryIfFailed && m != null && m.sendFailed) {
+                onRetrySend(m)
+                return null
+            }
+            return m
         }
         val openActions = View.OnClickListener {
-            if (tapWhileSelecting()) return@OnClickListener
-            holder.current?.let(onMessageActions)
+            tappedRow(retryIfFailed = false)?.let(onMessageActions)
         }
         val routeByType = View.OnClickListener {
-            if (tapWhileSelecting()) return@OnClickListener
-            val m = holder.current ?: return@OnClickListener
-            if (m.sendFailed) return@OnClickListener onRetrySend(m)
+            val m = tappedRow() ?: return@OnClickListener
             when (m.msgType) {
                 "document" -> onDocumentClick(m)
                 "video" -> onVideoOpen(m)
@@ -490,14 +492,10 @@ class MessageAdapter(
         holder.itemView.setOnLongClickListener(longPress)
         holder.bubble.setOnClickListener(routeByType)
         holder.contactMessageBtn.setOnClickListener {
-            if (tapWhileSelecting()) return@setOnClickListener
-            val m = holder.current ?: return@setOnClickListener
-            if (m.sendFailed) onRetrySend(m) else onContactMessage(m)
+            tappedRow()?.let(onContactMessage)
         }
         holder.contactAddBtn.setOnClickListener {
-            if (tapWhileSelecting()) return@setOnClickListener
-            val m = holder.current ?: return@setOnClickListener
-            if (m.sendFailed) onRetrySend(m) else onContactClick(m)
+            tappedRow()?.let(onContactClick)
         }
         holder.contactMessageBtn.setOnLongClickListener(longPress)
         holder.contactAddBtn.setOnLongClickListener(longPress)
@@ -506,7 +504,7 @@ class MessageAdapter(
         holder.text.movementMethod = link
         holder.text.setOnClickListener {
             if (link.openedLink) {
-                link.openedLink = false // the link tap already acted
+                link.openedLink = false
             } else {
                 routeByType.onClick(it)
             }
@@ -527,11 +525,9 @@ class MessageAdapter(
         holder.image.setOnLongClickListener(longPress)
         holder.audioRow.setOnLongClickListener(longPress)
         holder.image.setOnClickListener {
-            if (tapWhileSelecting()) return@setOnClickListener
-            val m = holder.current ?: return@setOnClickListener
-            if (m.sendFailed) return@setOnClickListener onRetrySend(m)
+            val m = tappedRow() ?: return@setOnClickListener
             // a path whose file is gone opens an empty viewer: fetch instead
-            if (m.filePath.isNotEmpty() && File(m.filePath).exists()) {
+            if (Bridge.fileOnDisk(m)) {
                 onImageClick(m)
             } else {
                 onNeedDownload(m, true)
@@ -542,12 +538,11 @@ class MessageAdapter(
             }
         }
         holder.quotePreview.setOnClickListener {
-            if (tapWhileSelecting()) return@setOnClickListener
-            holder.current?.let(onQuoteClick)
+            tappedRow(retryIfFailed = false)?.let(onQuoteClick)
         }
         holder.quotePreview.setOnLongClickListener(longPress)
         holder.linkPreview.setOnClickListener {
-            if (tapWhileSelecting()) return@setOnClickListener
+            tappedRow(retryIfFailed = false) ?: return@setOnClickListener
             (holder.linkPreview.tag as? String)?.let(onLinkPreviewClick)
         }
         holder.linkPreview.setOnLongClickListener(longPress)
@@ -568,26 +563,20 @@ class MessageAdapter(
             }
         }
         holder.videoButton.setOnClickListener {
-            if (tapWhileSelecting()) return@setOnClickListener
-            val m = holder.current ?: return@setOnClickListener
-            if (m.sendFailed) onRetrySend(m) else onDocumentClick(m)
+            tappedRow()?.let(onDocumentClick)
         }
         holder.videoButton.setOnLongClickListener(longPress)
         holder.videoRow.setOnClickListener {
-            if (tapWhileSelecting()) return@setOnClickListener
-            val m = holder.current ?: return@setOnClickListener
-            if (m.sendFailed) onRetrySend(m) else onVideoOpen(m)
+            tappedRow()?.let(onVideoOpen)
         }
         holder.videoRow.setOnLongClickListener(longPress)
         // on the frame, not the icon: the icon is hidden while the spinner runs,
         // and a gone view takes no taps
         holder.audioButtonFrame.setOnClickListener {
-            if (tapWhileSelecting()) return@setOnClickListener
-            val m = holder.current ?: return@setOnClickListener
-            if (m.sendFailed) return@setOnClickListener onRetrySend(m)
+            val m = tappedRow() ?: return@setOnClickListener
             // the stored path can be stale (a swept Telegram staging copy);
             // re-download instead of "playing" a file that is no longer there
-            if (m.filePath.isNotEmpty() && java.io.File(m.filePath).exists()) {
+            if (Bridge.fileOnDisk(m)) {
                 AudioPlayer.playPause(m.filePath, m.chatId, m.id)
             } else {
                 onNeedDownload(m, true)
@@ -596,8 +585,7 @@ class MessageAdapter(
         }
         holder.audioButtonFrame.setOnLongClickListener(longPress)
         holder.reactionPill.setOnClickListener {
-            if (tapWhileSelecting()) return@setOnClickListener
-            holder.current?.let(onReactionsClick)
+            tappedRow(retryIfFailed = false)?.let(onReactionsClick)
         }
         holder.reactionPill.setOnLongClickListener(longPress)
         holder.audioSpeed.setOnClickListener { AudioPlayer.cycleSpeed() }
@@ -606,12 +594,16 @@ class MessageAdapter(
             override fun onStartTrackingTouch(sb: SeekBar?) { seekDragging = true }
             override fun onStopTrackingTouch(sb: SeekBar?) {
                 seekDragging = false
-                val m = holder.current ?: return
-                if (m.filePath.isEmpty()) return
+                val m = tappedRow() ?: return
                 if (AudioPlayer.currentMsgId == m.id) {
                     AudioPlayer.seekTo(sb?.progress ?: 0)
-                } else {
+                } else if (Bridge.fileOnDisk(m)) {
                     AudioPlayer.play(m.filePath, m.chatId, m.id, sb?.progress ?: 0)
+                } else {
+                    // same stale-path rule as the play button: "playing" a swept
+                    // staging copy silently did nothing
+                    onNeedDownload(m, true)
+                    applyAudioState(holder, m)
                 }
             }
         })
@@ -842,7 +834,7 @@ class MessageAdapter(
         holder.contactActions.visibility = View.GONE
         holder.contactCard.visibility = View.GONE
         holder.text.visibility = View.VISIBLE
-        holder.text.textSize = 15f // default; emoji-only messages enlarge below
+        holder.text.textSize = 15f
         val density = ctx.resources.displayMetrics.density
         val padH: Int; val padV: Int
         if (msg.msgType in PICTURE_TYPES) {
@@ -1015,9 +1007,8 @@ class MessageAdapter(
             holder.linkImage.setImageDrawable(null)
         } else {
             holder.linkImage.visibility = View.VISIBLE
-            // The card's full width, with the height left to follow the
-            // picture's own proportions: no cap, because capping would either
-            // cut the picture or box it in — this app never crops an image.
+            // No height cap: capping would either cut the picture or box it in,
+            // and this app never crops an image.
             LinkPreview.loadImage(row.imagePath, holder.linkImage, holder.linkTitle.maxWidth)
         }
     }
@@ -1041,8 +1032,6 @@ class MessageAdapter(
         return found
     }
 
-    // Which rows are waiting on which link, so an answer rebinds those rows
-    // instead of re-scanning the whole loaded window for the URL that arrived.
     private val previewWaiters = HashMap<String, MutableSet<String>>()
 
     fun onLinkPreviewReady(url: String) {
@@ -1059,19 +1048,12 @@ class MessageAdapter(
     }
 }
 
-/**
- * LinkMovementMethod that separates tap from hold on links: it tracks which
- * link the current gesture started on (so the row's long-press handler can
- * copy it instead of opening the actions menu) and can swallow the touch-up
- * that ends a handled long press, so holding a link never opens it. It also
- * flags the up that did open a link, letting the TextView's click listener
- * skip the actions dialog for that tap. autoLink must stay off in the layout:
- * TextView's autoLink path re-installs the stock method on every setText.
- *
- * One instance per holder (not a shared singleton): its gesture state is not
- * tied to a widget, so sharing it would let a touch on one row clobber another
- * row's in-flight press (RecyclerView splits multi-pointer events across rows).
- */
+// autoLink must stay off in the layout: TextView's autoLink path re-installs
+// the stock movement method on every setText.
+//
+// One instance per holder (not a shared singleton): its gesture state is not
+// tied to a widget, so sharing it would let a touch on one row clobber another
+// row's in-flight press (RecyclerView splits multi-pointer events across rows).
 internal class LinkPressMovement : android.text.method.LinkMovementMethod() {
     var pressedLink: android.text.style.URLSpan? = null
         private set
@@ -1095,7 +1077,6 @@ internal class LinkPressMovement : android.text.method.LinkMovementMethod() {
     // Handles link opening itself instead of deferring to the stock
     // LinkMovementMethod: that one clamps a tap to the nearest character, so
     // touching empty bubble space beside/after a link's line would open it.
-    // A link opens only when the gesture starts AND ends on its drawn text.
     override fun onTouchEvent(
         widget: TextView, buffer: Spannable, event: android.view.MotionEvent,
     ): Boolean {
@@ -1153,16 +1134,13 @@ object ImageLoader {
     }
     private val executor = Executors.newFixedThreadPool(2)
     private val main = Handler(Looper.getMainLooper())
-    // files with a decode already queued/running, so a fling that passes the
-    // same path in several holders doesn't decode it repeatedly
-    private val inFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private data class Tag(val path: String, val msgId: String)
 
     private val waiting = PendingViews<Boolean>()
 
-    /** True while [view] still shows [path] — the tag is rewritten on every bind,
-     *  so a recycled holder must not be painted with the decode it started. */
+    // The tag is rewritten on every bind, so a recycled holder must not be
+    // painted with the decode it started.
     private fun stillOn(view: ImageView, path: String) = (view.tag as? Tag)?.path == path
 
     private fun deliverBitmap(path: String, bitmap: Bitmap) {
@@ -1176,12 +1154,21 @@ object ImageLoader {
     }
 
     // An AnimatedImageDrawable cannot be shared between views, so it goes to the
-    // first view still bound to this path; any other waiter re-decodes, or
-    // reuses this instance from animCache once it detaches.
-    private fun deliverAnimated(path: String, drawable: AnimatedImageDrawable) {
+    // first view still bound to this path and every other waiter is re-queued
+    // for a decode of its own: dropping them left those bubbles blank until the
+    // next rebind, since this instance is attached now and animCache only hands
+    // back a detached one.
+    private fun deliverAnimated(path: String, drawable: AnimatedImageDrawable, targetPx: Int) {
+        var served = false
+        var claimed = false
         for (w in waiting.take(path)) {
             val view = w.view.get() ?: continue
             if (!stillOn(view, path)) continue
+            if (served) {
+                if (waiting.await(path, view, w.payload)) claimed = true
+                continue
+            }
+            served = true
             clearAnimating(view)
             applyBounds(view, drawable.intrinsicWidth, drawable.intrinsicHeight, w.payload)
             view.setImageDrawable(drawable)
@@ -1189,8 +1176,8 @@ object ImageLoader {
             // cache only after it's attached (callback now set) so a concurrent
             // bind can't grab and re-attach this same instance to a second view
             animCache.put(path, drawable)
-            return
         }
+        if (claimed) dispatchDecode(path, targetPx)
     }
 
     fun load(msg: MessageRow, imageView: ImageView) {
@@ -1218,10 +1205,8 @@ object ImageLoader {
             imageView.setImageBitmap(cached)
             return
         }
-        // Reuse a previously-decoded animation rather than decoding it again,
-        // but only while it isn't attached to another view — a live callback
-        // means another bubble is showing it, and an AnimatedImageDrawable
-        // can't be shared. Saves re-decoding the same sticker on every scroll.
+        // Reused only while unattached: a live callback means another bubble is
+        // showing it, and an AnimatedImageDrawable can't be shared.
         val reuse = animCache.get(path)
         if (reuse != null && reuse.callback == null) {
             clearAnimating(imageView)
@@ -1230,8 +1215,8 @@ object ImageLoader {
             reuse.start()
             return
         }
-        // Cache miss. Only flash the placeholder when this holder is now
-        // showing a *different* message (RecyclerView recycled it). A sent
+        // Only flash the placeholder when this holder is now showing a
+        // *different* message (RecyclerView recycled it). A sent
         // image swaps its path from the staging cache file to the permanent
         // media copy after upload, and that re-decodes identical bytes for the
         // same message — keep the current bitmap on screen and swap it in place
@@ -1246,21 +1231,23 @@ object ImageLoader {
         // view about 840px wide, so a handful of photos filled the cache and
         // scrolling back re-decoded everything.
         val targetPx = if (sticker) 512 else imageView.maxWidth.coerceAtLeast(512)
-        // queue this view BEFORE claiming the slot, so a decode already running
-        // for this path still delivers to it
-        waiting.await(path, imageView, sticker)
-        if (!inFlight.add(path)) return // a decode for this file is already running; we are queued on it
+        // a decode for this file may already be running; then we are only queued on it
+        if (waiting.await(path, imageView, sticker)) dispatchDecode(path, targetPx)
+    }
+
+    private fun dispatchDecode(path: String, targetPx: Int) {
         executor.execute {
             var delivering = false
+            // Deliberately does NOT read imageView.tag: this is a worker
+            // thread and View is not thread-safe. Staleness is judged from
+            // the waiting list instead — a view recycled onto another row
+            // still holds a live reference, so a file that just went
+            // off-screen may still be decoded, but deliverBitmap re-checks
+            // the tag on the main thread and won't paint it, and the result
+            // lands in the cache for the next bind either way.
+            val queued = waiting.peek(path)
             try {
-                // Deliberately does NOT read imageView.tag: this is a worker
-                // thread and View is not thread-safe. Staleness is judged from
-                // the waiting list instead — a view recycled onto another row
-                // still holds a live reference, so a file that just went
-                // off-screen may still be decoded, but deliverBitmap re-checks
-                // the tag on the main thread and won't paint it, and the result
-                // lands in the cache for the next bind either way.
-                if (waiting.peek(path).isNullOrEmpty()) return@execute
+                if (queued.isEmpty()) return@execute
                 val ready = cache.get(path)
                 if (ready != null) {
                     delivering = true
@@ -1288,12 +1275,15 @@ object ImageLoader {
                     main.post { deliverBitmap(path, drawable.bitmap) }
                 } else if (drawable is AnimatedImageDrawable) {
                     delivering = true
-                    main.post { deliverAnimated(path, drawable) }
+                    main.post { deliverAnimated(path, drawable, targetPx) }
                 }
             } finally {
-                inFlight.remove(path)
-                // nothing will be painted, so don't leave the queue behind
-                if (!delivering) waiting.abandon(path)
+                // Only this run's own waiters are dropped; anything queued after
+                // its peek could not claim a decode of its own, so it is
+                // re-dispatched here instead of starving on the placeholder.
+                if (!delivering && waiting.settle(path, queued).isNotEmpty()) {
+                    dispatchDecode(path, targetPx)
+                }
             }
         }
     }
@@ -1317,9 +1307,9 @@ object ImageLoader {
         }
     }
 
-    // Stops any animation on the view and detaches it, releasing its decoded
-    // frame buffers so a recycled or hidden bubble isn't holding onto them.
-    // Static bitmaps are left in place — they're cheap and shared via the cache.
+    // Detaching releases the decoded frame buffers, so a recycled or hidden
+    // bubble isn't holding onto them. Static bitmaps are left in place — they
+    // are cheap and shared via the cache.
     fun clearAnimating(imageView: ImageView) {
         val d = imageView.drawable
         if (d is AnimatedImageDrawable) {
@@ -1334,13 +1324,10 @@ object ImageLoader {
         return sample
     }
 
-    /**
-     * Decodes [path] on the image pool and delivers the result on the main
-     * thread. Deliberately not Io.executor, the app-wide serial worker every
-     * screen's DB reads share: a viewer-sized decode runs for hundreds of
-     * milliseconds, and queueing three of them (ViewPager2 keeps neighbours
-     * bound) stalled the chat list and the open chat behind the swipe.
-     */
+    // Deliberately not Io.executor, the app-wide serial worker every screen's DB
+    // reads share: a viewer-sized decode runs for hundreds of milliseconds, and
+    // queueing three of them (ViewPager2 keeps neighbours bound) stalled the
+    // chat list and the open chat behind the swipe.
     fun decodeAsync(path: String, maxDim: Int, onDone: (Bitmap?) -> Unit) {
         executor.execute {
             val bitmap = decodeSampled(path, maxDim)

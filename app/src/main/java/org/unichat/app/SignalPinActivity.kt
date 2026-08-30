@@ -6,14 +6,10 @@ import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 
-/**
- * Recovers the Signal contact list by unlocking SVR with the account PIN.
- *
- * Registering this app as the primary device minted a new master key, which
- * left the account's existing storage-service manifest — the contact list,
- * groups and settings — on the server but undecryptable. The PIN is the only
- * thing that unwraps the original key.
- */
+// Registering this app as the primary device minted a new master key, which
+// left the account's existing storage-service manifest — the contact list,
+// groups and settings — on the server but undecryptable. The PIN is the only
+// thing that unwraps the original key.
 class SignalPinActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {

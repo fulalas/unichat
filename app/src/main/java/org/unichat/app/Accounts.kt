@@ -4,42 +4,35 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * A protocol seen as an account: whether it is linked, what it is called, how
- * it is set up, paused and removed, and who the user is on it.
- *
- * Bridge's Protocol interface is the other half of the same idea — one chat's
- * messages. Together they are what keeps `when (proto)` out of the screens:
- * this used to be twenty branches spread over eleven files, so adding a
- * protocol meant finding all of them.
+ * With Bridge's Protocol interface, this is what keeps `when (proto)` out of
+ * the screens: it used to be twenty branches spread over eleven files, so
+ * adding a protocol meant finding all of them.
  */
 interface Account {
     val proto: String
 
-    /** Namespace for this protocol's rows in the shared Db. WhatsApp is the
-     *  unprefixed one, so its prefix is empty and never matches an id. */
+    /** WhatsApp is the unprefixed protocol, so its prefix is empty and never
+     *  matches an id. */
     val idPrefix: String
 
     val labelRes: Int
     val accentRes: Int
 
-    /** Null when the base theme is already this protocol's colour. */
     val themeOverlayRes: Int?
 
     fun isLinked(): Boolean
     val state: String
     fun selfId(): String
 
-    /** Own id, waiting for the protocol to come up if it has just started. Only
-     *  Telegram has to wait; for the rest this is [selfId]. Blocking. */
+    /** Blocking: only Telegram has to wait for the protocol to come up after a
+     *  start. */
     fun selfIdBlocking(): String = selfId()
     fun myName(): String
 
-    /** Empty when the protocol does not tell us the number. */
     fun myPhone(): String
 
     fun setupIntent(ctx: Context): Intent
 
-    /** The Manage accounts pause: off the network, but still linked. */
     fun setNetworkEnabled(enabled: Boolean)
     fun logout()
 
@@ -53,10 +46,9 @@ interface Account {
     fun fetchPrivacySettings(onResult: (Map<String, String>?) -> Unit)
     fun setPrivacySetting(name: String, value: String, onResult: (Boolean) -> Unit)
 
-    /** Which rows the privacy screen shows for this account. "last" is last
-     *  seen, "online" its who-can-see-me-online follow-up, "profile" the photo
-     *  audience, "status" the About audience, "discoverable" findable by
-     *  number, "readreceipts" the switch. The screen hides what is not here. */
+    /** "last" is last seen, "online" its who-can-see-me-online follow-up,
+     *  "profile" the photo audience, "status" the About audience,
+     *  "discoverable" findable by number, "readreceipts" the switch. */
     val privacyKeys: Set<String>
 
     /**
@@ -66,13 +58,9 @@ interface Account {
      */
     fun chatIdForNumber(number: String): String
 
-    /** Said when [chatIdForNumber] comes back empty. */
     val notOnNetworkRes: Int
 
-    /**
-     * A chat id built from this protocol's own id as it appears on a contact
-     * card, or "" when the card carries none this account can use. Blocking.
-     */
+    /** "" when the contact card carries no id this account can use. Blocking. */
     fun chatIdForCardId(cardId: String): String
 
     fun label(ctx: Context): String = ctx.getString(labelRes)
@@ -80,10 +68,10 @@ interface Account {
 
 object Accounts {
     /**
-     * Every protocol the app speaks, linked or not. THIS is the order the user
-     * sees, everywhere one is offered — Manage accounts, the "which account?"
-     * picker, the login tabs, the notes-to-self pinned above the forward list.
-     * Telegram first because its own chat is where files get sent.
+     * THIS is the order the user sees, everywhere a protocol is offered —
+     * Manage accounts, the "which account?" picker, the login tabs, the
+     * notes-to-self pinned above the forward list. Telegram first because its
+     * own chat is where files get sent.
      */
     val ALL: List<Account> = listOf(TgAccount, SgAccount, WaAccount)
 
@@ -109,8 +97,8 @@ object Accounts {
 
     fun linked(): List<Account> = ALL.filter { it.isLinked() }
 
-    /** Linked and switched on. A paused account is off its network, so it can
-     *  neither send nor read a profile back. */
+    /** A paused account is off its network, so it can neither send nor read a
+     *  profile back. */
     fun active(): List<Account> = ALL.filter { it.isLinked() && Bridge.protoEnabled(it.proto) }
 }
 
@@ -225,9 +213,7 @@ private object SgAccount : Account {
     override fun myPhone() = Signal.myPhone()
 
     // Signal registers this app as the account's primary device, which is
-    // nothing like linking a companion: its own screen owns the warning. That
-    // screen also offers linking, for anyone who would rather ride along with
-    // the Signal app than replace it.
+    // nothing like linking a companion: its own screen owns the warning.
     override fun setupIntent(ctx: Context) = Intent(ctx, SignalRegisterActivity::class.java)
     override fun setNetworkEnabled(enabled: Boolean) =
         if (enabled) Signal.connect() else Signal.disconnect()
@@ -260,7 +246,7 @@ private object SgAccount : Account {
         Signal.setPrivacy(name, value, onResult)
 
     // None of the per-audience choices: a Signal profile is visible to anyone
-    // you message. The two it does have are its own.
+    // you message.
     override val privacyKeys = setOf("discoverable", "readreceipts")
 
     override fun chatIdForNumber(number: String) = Signal.lookupNumber(number)

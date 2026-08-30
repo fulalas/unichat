@@ -80,7 +80,6 @@ object Notifications {
 
         val contentIntent = chatContentIntent(context, chatId, chatName)
 
-        // when the user swipes the notification away, keep our history in sync.
         // Unique data per chat so PendingIntents never collide by request code.
         val deleteIntent = PendingIntent.getService(
             context, 0,
@@ -109,15 +108,16 @@ object Notifications {
         syncSummary(context, manager)
     }
 
-    /**
-     * Single owner of the "a group summary exists iff two or more chats have a
-     * live notification" rule — posting it, and dropping it so it never lingers
-     * as an empty header. The count comes from the notifications actually on
-     * screen (not our in-process line history, which can disagree after the
-     * user taps the summary itself).
-     */
-    private fun syncSummary(context: Context, manager: NotificationManager) {
-        if (liveChatNotifications(manager).size >= 2) {
+    // liveCount is overridable because NotificationManager.cancel is a one-way
+    // binder call applied asynchronously: re-reading activeNotifications right
+    // after cancelling still lists the cancelled children, which kept an empty
+    // summary alive. Such callers pass the survivors they computed themselves.
+    private fun syncSummary(
+        context: Context,
+        manager: NotificationManager,
+        liveCount: Int = liveChatNotifications(manager).size,
+    ) {
+        if (liveCount >= 2) {
             val summary = Notification.Builder(context, CHANNEL_MESSAGES)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setGroup(GROUP)
@@ -136,12 +136,9 @@ object Notifications {
         }
     }
 
-    /**
-     * Tags of the per-chat message notifications currently in the shade. Read
-     * from the system rather than from [history] so it stays correct across a
-     * process restart (posted notifications outlive us) and after the user
-     * dismisses one without our delete intent running.
-     */
+    // Read from the system rather than from [history]: posted notifications
+    // outlive the process, and the user can dismiss one without our delete
+    // intent running.
     private fun liveChatNotifications(manager: NotificationManager): List<String> =
         try {
             manager.activeNotifications
@@ -149,7 +146,7 @@ object Notifications {
                 .mapNotNull { it.tag }
         } catch (e: Exception) {
             // activeNotifications can throw if the process has no listener
-            // access yet; fall back to what we remember posting
+            // access yet
             history.keys.toList()
         }
 
@@ -166,12 +163,10 @@ object Notifications {
             )
     }
 
-    /**
-     * Moves a chat's notification state to a new id after the LID→phone merge
-     * re-keyed it. Without this the posted notification kept the dead tag, so
-     * cancelling by the new id was a no-op (it stayed in the shade) and tapping
-     * it opened a chat whose rows had moved — a permanently blank screen.
-     */
+    // After the LID→phone merge re-keys a chat, the posted notification kept
+    // the dead tag: cancelling by the new id was a no-op (it stayed in the
+    // shade) and tapping it opened a chat whose rows had moved — a permanently
+    // blank screen.
     fun rekey(context: Context, fromId: String, toId: String) {
         val manager = context.getSystemService(NotificationManager::class.java)
         // Cancelled unconditionally: [history] is in-process state while the
@@ -208,20 +203,21 @@ object Notifications {
         syncSummary(context, context.getSystemService(NotificationManager::class.java))
     }
 
-    // Cancels only the message notifications this object posted (not the
-    // foreground-service or media-playback notifications), and only for the
-    // chats [owns] names. Enumerated from the shade, so notifications a
-    // PREVIOUS process posted are cancelled too — logging out after a process
-    // restart used to leave them behind, still deep-linking into chats whose
-    // rows had just been deleted. The predicate is what keeps one account's
-    // unlink from clearing another account's alerts.
+    // Enumerated from the shade so notifications a PREVIOUS process posted are
+    // cancelled too — logging out after a process restart used to leave them
+    // behind, still deep-linking into chats whose rows had just been deleted.
+    // The predicate is what keeps one account's unlink from clearing another
+    // account's alerts.
     fun cancelMessagesFor(context: Context, owns: (String) -> Boolean) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        for (tag in liveChatNotifications(manager)) {
-            if (!owns(tag)) continue
-            manager.cancel(tag, MSG_ID)
-            history.remove(tag)
-        }
-        syncSummary(context, manager)
+        val (mine, others) = liveChatNotifications(manager).partition(owns)
+        for (tag in mine) manager.cancel(tag, MSG_ID)
+        // Every owned entry, not just the ones with a live notification:
+        // tapping the auto-cancel summary removes the children without firing
+        // their delete intent, so history outlives the shade. Relinking a
+        // different account that shares a bare JID then had notifyMessage
+        // reuse the stale deque and replay the previous account's lines.
+        history.keys.removeAll { owns(it) }
+        syncSummary(context, manager, others.size)
     }
 }

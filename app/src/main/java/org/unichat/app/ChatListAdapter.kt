@@ -17,8 +17,6 @@ class ChatListAdapter(
 ) : RecyclerView.Adapter<ChatListAdapter.Holder>() {
 
     companion object {
-        // ChatRow is a data class, so `==` covers every rendered field
-        // (including transientState, which carries the typing indicator)
         private val DIFF = object : DiffUtil.ItemCallback<ChatRow>() {
             override fun areItemsTheSame(a: ChatRow, b: ChatRow) = a.id == b.id
             override fun areContentsTheSame(a: ChatRow, b: ChatRow) = a == b
@@ -51,8 +49,8 @@ class ChatListAdapter(
         val holder = Holder(view)
         holder.avatar.clipToOutline = true
         holder.avatar.outlineProvider = ViewOutlineProvider.BACKGROUND
-        // attach listeners once here (not per bind); they dispatch off
-        // holder.current, resolving the display name at click time
+        // set once here, not per bind: they dispatch off holder.current so a
+        // recycled row acts on the chat it currently shows
         holder.itemView.setOnClickListener { holder.current?.let(onClick) }
         holder.itemView.setOnLongClickListener {
             holder.current?.let(onLongClick)
@@ -98,8 +96,6 @@ class ChatListAdapter(
         holder.muteIcon.visibility = if (chat.muted) View.VISIBLE else View.GONE
         if (chat.unread > 0) {
             holder.unreadBadge.visibility = View.VISIBLE
-            // the pill is one shared drawable, so tint it per row rather than
-            // letting every chat wear the same accent
             holder.unreadBadge.backgroundTintList =
                 android.content.res.ColorStateList.valueOf(context.protocolAccent(chat.id))
             holder.unreadBadge.text =

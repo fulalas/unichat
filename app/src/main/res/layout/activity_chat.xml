@@ -44,7 +44,7 @@
             android:layout_height="40dp"
             android:src="@drawable/ic_arrow_up"
             android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/search" />
+            android:contentDescription="@string/search_previous_match" />
 
         <ImageButton
             android:id="@+id/searchDown"
@@ -52,7 +52,7 @@
             android:layout_height="40dp"
             android:src="@drawable/ic_arrow_down"
             android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/search" />
+            android:contentDescription="@string/search_next_match" />
 
         <ImageButton
             android:id="@+id/searchClose"

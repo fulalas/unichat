@@ -42,19 +42,16 @@ object Tg {
     // on `executor`, where they would stall opening a chat, muting or logging
     // out for the whole run.
     private val pager = Executors.newSingleThreadExecutor()
-    // Media downloads: a small pool of their own. On the pager they queued
-    // behind the startup chat-list load and every history page — with a
-    // blocking request each, a screenful of photos took minutes to appear.
+    // On the pager, downloads queued behind the startup chat-list load and every
+    // history page — with a blocking request each, a screenful of photos took
+    // minutes to appear.
     private val downloader = Executors.newFixedThreadPool(3)
 
-    /**
-     * Blocking Telegram calls made from UI code (profile, privacy). Kept off
-     * Io.executor, the app-wide serial worker every screen's DB reads share:
-     * one request() can block for 15s, which would stall the chat list behind it.
-     */
+    // Kept off Io.executor, the app-wide serial worker every screen's DB reads
+    // share: one request() can block for 15s, which would stall the chat list
+    // behind it.
     val io: java.util.concurrent.ExecutorService = Executors.newSingleThreadExecutor()
 
-    /** Runs a blocking TDLib call on [io] and answers on the main thread. */
     internal fun <T> async(work: () -> T, onResult: (T) -> Unit) = io.execute {
         val result = work()
         Bridge.runOnUi { onResult(result) }
@@ -74,10 +71,10 @@ object Tg {
 
     private val readInbox = ConcurrentHashMap<Long, Long>()
     private val readOutbox = ConcurrentHashMap<Long, Long>()
-    // file id -> every (chatId, msgId) waiting on that download. A set, not a
-    // single pair: TDLib dedups files by remote id, so the same sticker or a
-    // re-sent photo shares one file id across messages, and keeping only the
-    // last one left the earlier bubbles stuck on a spinner forever.
+    // A set of waiting messages per file id, not a single one: TDLib dedups
+    // files by remote id, so the same sticker or a re-sent photo shares one file
+    // id across messages, and keeping only the last one left the earlier bubbles
+    // stuck on a spinner forever.
     private val fileTargets = ConcurrentHashMap<Int, MutableSet<Pair<String, String>>>()
     private val historyBusy = CopyOnWriteArraySet<String>()
     private val historyExhausted = CopyOnWriteArraySet<String>()
@@ -88,6 +85,14 @@ object Tg {
     // reactions, and eating the repair budget that stale voice notes need.
     private val repairAttempted: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    // updateMessageContent re-fetches the message off the serial executor, so a
+    // logout wipe or a deletion can land while its request is in flight. Both
+    // bump this from the executor (or ahead of queueing onto it) and the store
+    // is dropped once its generation has moved on — otherwise the re-fetch
+    // re-inserted the message after the wipe, which showed up as a ghost chat
+    // from the account just unlinked, and brought a deleted message back.
+    private val refetchGen = AtomicLong(0)
+
     fun hasSession(): Boolean = appContext?.let { Prefs.tgLinked(it) } == true
 
     // Empty, never "tg:0", while the id is unknown: callers either compare it
@@ -95,12 +100,9 @@ object Tg {
     // fails the send and opens an empty chat.
     fun selfId(): String = if (myId == 0L) "" else idFor(myId)
 
-    /**
-     * Own id, waiting for TDLib to come up if this process has just started.
-     * Blocking; worker threads only. A share sheet starts the process and asks
-     * for its send targets straight away, so leaving out the notes-to-self entry
-     * (or offering it as tg:0) is what the first share of a session used to get.
-     */
+    // Blocking; worker threads only. A share sheet starts the process and asks
+    // for its send targets straight away, so leaving out the notes-to-self entry
+    // (or offering it as tg:0) is what the first share of a session used to get.
     fun selfIdBlocking(): String {
         selfId().let { if (it.isNotEmpty()) return it }
         // Short budgets: this runs on Io.executor, the serial worker every
@@ -249,6 +251,7 @@ object Tg {
                 fileTargets.clear()
                 historyExhausted.clear()
                 historyBusy.clear()
+                repairAttempted.clear()
                 avatarPaths.clear()
                 syncAllChat = null
                 exportChatId = null
@@ -257,6 +260,7 @@ object Tg {
                 myFirstName = ""
                 myLastName = ""
                 myPhone = ""
+                refetchGen.incrementAndGet()
                 executor.execute {
                     Bridge.db.clearTgData()
                     Bridge.notifyChatsChanged()
@@ -281,11 +285,9 @@ object Tg {
 
     @Volatile private var lastError: String = ""
 
-    /**
-     * Turns TDLib's error into text for the user. Its "message" is a code, not
-     * a sentence — the ones a person can act on are translated here, and
-     * anything else is shown behind a label so it stays diagnosable.
-     */
+    // TDLib's error "message" is a code, not a sentence: the ones a person can
+    // act on are translated here, anything else is shown behind a label so it
+    // stays diagnosable.
     fun authErrorText(ctx: Context, message: String): String = when {
         message.isEmpty() -> ctx.getString(R.string.tg_auth_failed)
         message.startsWith("PHONE_NUMBER_INVALID") -> ctx.getString(R.string.tg_err_phone_invalid)
@@ -326,11 +328,8 @@ object Tg {
         appContext?.let { Prefs.setTgLinked(it, false) }
     }
 
-    /**
-     * Pauses or resumes the account for the Manage accounts toggle. TDLib has
-     * no disconnect: telling it the device is offline is how you stop it
-     * talking to the network without logging out and losing the session.
-     */
+    // TDLib has no disconnect: telling it the device is offline is how you stop
+    // it talking to the network without logging out and losing the session.
     fun setNetworkEnabled(enabled: Boolean) = executor.execute {
         send(
             JSONObject().put("@type", "setNetworkType").put(
@@ -400,13 +399,22 @@ object Tg {
             "updateMessageContent" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
                 val msgId = obj.getLong("message_id")
-                executor.execute {
+                // pager, not executor: a live-location peer emits this every few
+                // seconds, and each blocking getMessage on the serial executor
+                // stalled chat opens and logout for minutes on a slow network.
+                // Only the request, though: the store goes back onto the
+                // executor, guarded by the generation read here.
+                val gen = refetchGen.get()
+                pager.execute {
                     val fresh = request(
                         JSONObject().put("@type", "getMessage")
                             .put("chat_id", obj.getLong("chat_id")).put("message_id", msgId)
                     )
-                    if (fresh != null) storeMessage(fresh)
-                    Bridge.notifyChat(chatId)
+                    executor.execute {
+                        if (refetchGen.get() != gen) return@execute
+                        if (fresh != null) storeMessage(fresh)
+                        Bridge.notifyChat(chatId)
+                    }
                 }
             }
             "updateMessageEdited" -> { /* content update arrives separately */ }
@@ -428,10 +436,13 @@ object Tg {
                 if (obj.optBoolean("is_permanent")) {
                     val chatId = idFor(obj.getLong("chat_id"))
                     val ids = obj.getJSONArray("message_ids")
-                    for (i in 0 until ids.length()) {
-                        Bridge.db.deleteMessage(chatId, ids.getLong(i).toString())
+                    executor.execute {
+                        refetchGen.incrementAndGet()
+                        for (i in 0 until ids.length()) {
+                            Bridge.db.deleteMessage(chatId, ids.getLong(i).toString())
+                        }
+                        Bridge.notifyChat(chatId)
                     }
-                    Bridge.notifyChat(chatId)
                 }
             }
             "updateChatReadInbox" -> {
@@ -488,6 +499,21 @@ object Tg {
                 Bridge.db.setPlayed(chatId, obj.getLong("message_id").toString())
                 Bridge.notifyChat(chatId)
             }
+            // Archive moves while the app runs (and often a chat's initial
+            // archive placement, after updateNewChat) arrive only here, not
+            // through updateNewChat's positions.
+            "updateChatPosition" -> {
+                val p = obj.getJSONObject("position")
+                // order is int64, which TDLib's JSON interface encodes as a string
+                val present = p.optString("order", "0") != "0"
+                val archived = when (p.getJSONObject("list").optString("@type")) {
+                    "chatListArchive" -> present
+                    "chatListMain" -> if (present) false else return
+                    else -> return
+                }
+                Bridge.db.setArchived(idFor(obj.getLong("chat_id")), archived)
+                Bridge.notifyChatsChanged()
+            }
             "updateFile" -> onFile(obj.getJSONObject("file"))
             "updateMessageInteractionInfo" -> onInteractionInfo(obj)
             "updateChatNotificationSettings" -> {
@@ -514,8 +540,10 @@ object Tg {
         readOutbox[raw] = chat.optLong("last_read_outbox_message_id")
         val last = chat.optJSONObject("last_message")
         Bridge.db.upsertChat(id, title, archived, last?.optLong("date") ?: 0)
+        // Unconditional: writing only muted=true kept a chat unmuted from
+        // another client while this app was offline muted here forever.
         val muted = chat.optJSONObject("notification_settings")?.optInt("mute_for", 0) ?: 0
-        if (muted > 0) Bridge.db.setMuted(id, true)
+        Bridge.db.setMuted(id, muted > 0)
         last?.let { storeMessage(it) }
         val type = chat.optJSONObject("type")?.optString("@type") ?: ""
         if (type == "chatTypeBasicGroup" || type == "chatTypeSupergroup") {
@@ -557,16 +585,11 @@ object Tg {
         )
     }
 
-    /**
-     * One TDLib message mapped onto the shared row shape, plus the played flag
-     * the row itself does not carry.
-     *
-     * Free of DB writes on purpose: a search renders the window around a hit
-     * WITHOUT storing it. Dropping a far-back window into the history would
-     * leave an island with a gap on either side of it, and pagination anchors
-     * on the oldest stored row — which is exactly how a chat ends up jumping
-     * over months of messages.
-     */
+    // Free of DB writes on purpose: a search renders the window around a hit
+    // WITHOUT storing it. Dropping a far-back window into the history would
+    // leave an island with a gap on either side of it, and pagination anchors
+    // on the oldest stored row — which is exactly how a chat ends up jumping
+    // over months of messages.
     private class Parsed(val row: MessageRow, val listened: Boolean)
 
     private fun parseMessage(msg: JSONObject): Parsed? {
@@ -588,11 +611,10 @@ object Tg {
         val content = msg.optJSONObject("content") ?: return null
         var msgType = ""
         var text = ""
-        // The backing file is resolved once, by the same navigation the download
-        // path uses. Each media branch used to re-walk its own content shape, so
-        // the stored reference and the fetched file could drift apart — the
-        // failure startDownload's comment below describes. Content kinds with no
-        // file (text, emoji) get "", and location overwrites it with coordinates.
+        // Resolved once, by the same navigation the download path uses. Each
+        // media branch used to re-walk its own content shape, so the stored
+        // reference and the fetched file could drift apart — the failure
+        // startDownload's comment below describes.
         var fileId = fileOf(content)?.optInt("id")?.toString() ?: ""
         var listened = false
         var latitude = 0.0
@@ -640,9 +662,9 @@ object Tg {
             }
             // A message that is just emoji comes as its own content type with the
             // plain characters in `emoji`; without this it fell through to the
-            // generic placeholder and rendered as "[AnimatedEmoji]".
-            // the placeholder fallback when `emoji` is absent, so the row stays
-            // recognisable to the repair pass instead of rendering blank
+            // generic placeholder and rendered as "[AnimatedEmoji]". Falling back
+            // to the placeholder when `emoji` is absent keeps the row
+            // recognisable to the repair pass instead of blank.
             "messageAnimatedEmoji", "messageDice" ->
                 text = content.optString("emoji").ifEmpty { placeholderFor(content) }
             "messageLocation" -> {
@@ -744,6 +766,16 @@ object Tg {
         }
     }
 
+    // For the pager/worker paths, which have no catch-all like the update
+    // loop's: one unexpected message shape killed the process there, and the
+    // re-fetch on the next chat open made it a crash loop.
+    private fun storeMessageSafe(msg: JSONObject) {
+        try { storeMessage(msg) } catch (e: Exception) { Log.e(TAG, "message store failed", e) }
+    }
+
+    private fun parseMessageSafe(msg: JSONObject): Parsed? =
+        try { parseMessage(msg) } catch (e: Exception) { Log.e(TAG, "message parse failed", e); null }
+
     private fun placeholderFor(content: JSONObject): String =
         "[" + content.optString("@type").removePrefix("message") + "]"
 
@@ -783,13 +815,10 @@ object Tg {
         Bridge.notifyChatRow(chatId, msgId)
     }
 
-    /**
-     * Mirrors a message's reactions into the Db. Called both for the live
-     * update AND when a message is stored: a message fetched from history
-     * already carries its reactions in interaction_info, and reading them only
-     * from the update meant every reaction that predated this session stayed
-     * invisible.
-     */
+    // Called both for the live update AND when a message is stored: a message
+    // fetched from history already carries its reactions in interaction_info,
+    // and reading them only from the update meant every reaction that predated
+    // this session stayed invisible.
     private fun applyReactions(
         chatId: String, msgId: String, info: JSONObject?, preview: Boolean,
     ) {
@@ -813,12 +842,10 @@ object Tg {
         if (preview) Bridge.notifyChatsChanged()
     }
 
-    /**
-     * Who reacted, from the server. The Db rows for a Telegram message are one
-     * per reaction TYPE with an aggregate count (see applyReactions), so they
-     * cannot answer this — and a channel or a big group may refuse to say at
-     * all, which reads here as nobody. Blocking; worker threads only.
-     */
+    // Asked of the server: the Db rows for a Telegram message are one per
+    // reaction TYPE with an aggregate count (see applyReactions), so they cannot
+    // answer this — and a channel or a big group may refuse to say at all, which
+    // reads here as nobody. Blocking; worker threads only.
     fun reactionSenders(chatId: String, msgId: String): List<Pair<String, String>> {
         val mid = msgId.toLongOrNull() ?: return emptyList()
         val answer = request(
@@ -853,17 +880,13 @@ object Tg {
         return true
     }
 
-    /**
-     * Resolves the message's CURRENT file and downloads that.
-     *
-     * The stored id is never used to fetch. A TDLib file id is an index into the
-     * session that issued it, and TDLib hands the same small integers out again
-     * to unrelated files in later runs — so a stored id can now name a totally
-     * different photo, which downloaded happily and was written onto this
-     * message as if it belonged to it. That is how one file ended up rendering
-     * in four messages across four different chats. Asking the message which
-     * file it has is the only answer that cannot be stale.
-     */
+    // The stored id is never used to fetch. A TDLib file id is an index into the
+    // session that issued it, and TDLib hands the same small integers out again
+    // to unrelated files in later runs — so a stored id can now name a totally
+    // different photo, which downloaded happily and was written onto this
+    // message as if it belonged to it. That is how one file ended up rendering
+    // in four messages across four different chats. Asking the message which
+    // file it has is the only answer that cannot be stale.
     private fun startDownload(msg: MessageRow, storedFid: Int) {
         val mid = msg.id.toLongOrNull() ?: return failDownload(msg)
         val fresh = request(
@@ -879,12 +902,9 @@ object Tg {
         if (!issueDownload(msg, fid)) failDownload(msg)
     }
 
-    /**
-     * Asks TDLib for one file. False when it rejects the id. A file it already
-     * holds is finished here and now: downloadFile answers with the completed
-     * file and no updateFile follows, because nothing changed — waiting for one
-     * left the bubble on its spinner for good.
-     */
+    // A file TDLib already holds is finished here and now: downloadFile answers
+    // with the completed file and no updateFile follows, because nothing changed
+    // — waiting for one left the bubble on its spinner for good.
     private fun issueDownload(msg: MessageRow, fid: Int): Boolean {
         val target = Pair(msg.chatId, msg.id)
         fileTargets.computeIfAbsent(fid) { ConcurrentHashMap.newKeySet() }.add(target)
@@ -934,14 +954,12 @@ object Tg {
         return local.optString("path")
     }
 
-    /**
-     * TDLib calls a file "downloaded" from its own bookkeeping, which outlives
-     * the file itself: our sends point at the cacheDir staging copy that the
-     * daily sweep deletes. Writing such a path back onto the message re-created
-     * the dead reference the caller had just cleared, and bind → download →
-     * "complete" → bind went round for good, so a path that does not resolve
-     * counts as no download at all.
-     */
+    // TDLib calls a file "downloaded" from its own bookkeeping, which outlives
+    // the file itself: our sends point at the cacheDir staging copy that the
+    // daily sweep deletes. Writing such a path back onto the message re-created
+    // the dead reference the caller had just cleared, and bind → download →
+    // "complete" → bind went round for good, so a path that does not resolve
+    // counts as no download at all.
     private fun usable(path: String) = path.isNotEmpty() && java.io.File(path).exists()
 
     private fun downloadRequest(fid: Int) = JSONObject().put("@type", "downloadFile")
@@ -1049,7 +1067,6 @@ object Tg {
             )
         }
         if (spans.isEmpty()) return ft
-        // in reading order, outer run before the ones nested in it
         spans.sortWith(compareBy({ it.first }, { -it.second }))
         val entities = JSONArray()
         for ((offset, length, type) in spans) {
@@ -1078,12 +1095,9 @@ object Tg {
         (m.start < start && m.end > start && m.end < end) ||
             (m.start > start && m.start < end && m.end > end)
 
-    /**
-     * Group members, ids only. A supergroup only answers this for members
-     * allowed to see the list, and the answer is one page long — a channel with
-     * thousands of subscribers is not something to enumerate on a profile
-     * screen, and there is no use for the rest of it.
-     */
+    // A supergroup only answers this for members allowed to see the list, and
+    // one page is taken on purpose — a channel with thousands of subscribers is
+    // not something to enumerate on a profile screen.
     fun groupMembers(chatId: String): List<String> {
         val chat = request(
             JSONObject().put("@type", "getChat").put("chat_id", chatIdOf(chatId))
@@ -1112,9 +1126,8 @@ object Tg {
         return ids
     }
 
-    /** Blocking; only for a member the update stream has not named yet. Null
-     *  when the request itself failed, which the caller must not keep paying
-     *  for once per remaining member. */
+    // Blocking. Null means the request itself failed, which the caller must not
+    // keep paying for once per remaining member.
     fun cacheUser(userId: String): String? {
         val user = request(
             JSONObject().put("@type", "getUser").put("user_id", chatIdOf(userId))
@@ -1227,14 +1240,11 @@ object Tg {
             quotedId,
         )
 
-    /**
-     * TDLib names a document after the basename of the file it is given, and
-     * attachments are staged as "<prefix>_<millis>_<name>", so the recipient
-     * saw that internal name. Hand it a correctly-named path instead: hard-link
-     * where the filesystem allows it, copy otherwise. The link/copy lives in a
-     * per-send directory that Bridge.cleanStaleCache reclaims by age — the
-     * upload continues after this call returns, so it cannot be deleted here.
-     */
+    // TDLib names a document after the basename of the file it is given, and
+    // attachments are staged as "<prefix>_<millis>_<name>", so the recipient saw
+    // that internal name. The link/copy made here lives in a per-send directory
+    // that Bridge.cleanStaleCache reclaims by age — the upload continues after
+    // this call returns, so it cannot be deleted here.
     fun sendDocument(chatId: String, path: String, fileName: String = "", quotedId: String = ""): Boolean {
         val src = java.io.File(path)
         val safe = safeDisplayFileName(fileName.ifEmpty { src.name })
@@ -1277,11 +1287,9 @@ object Tg {
             ),
     )
 
-    /**
-     * TDLib takes the card's fields directly, so only the first number travels
-     * as the contact's own — the rest ride along in the vCard, which is what
-     * Telegram itself does with a multi-number card.
-     */
+    // TDLib takes the card's fields directly, so only the first number travels
+    // as the contact's own — the rest ride along in the vCard, which is what
+    // Telegram itself does with a multi-number card.
     fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean {
         val parts = name.trim().split(" ", limit = 2)
         return sendMessage(
@@ -1350,12 +1358,8 @@ object Tg {
     }
 
     // TDLib requires a private chat to exist (createPrivateChat) before
-    // anything can be sent to it
-    /**
-     * Opens a chat with a phone number rather than a known user id, for a
-     * contact card that arrived on another protocol. Returns "" when the number
-     * has no Telegram account or is not visible to us.
-     */
+    // anything can be sent to it. "" means the number has no Telegram account
+    // or is not visible to us.
     fun createChatByPhone(number: String): String {
         // A failed request is not an answer: reported as "" it became "Not on
         // Telegram", which is the one thing it must never say for a lookup that
@@ -1375,13 +1379,11 @@ object Tg {
         return if (id != 0L) idFor(id) else ""
     }
 
-    /**
-     * Tells TDLib the chat is on screen. Required, not an optimisation: for a
-     * private chat DialogActionManager drops every incoming typing/recording
-     * action unless the dialog is open (or the peer's last-seen is exact), and
-     * supergroups/channels only receive updates at all while open — which is
-     * why chat actions never appeared before this was wired up.
-     */
+    // Required, not an optimisation: for a private chat TDLib's
+    // DialogActionManager drops every incoming typing/recording action unless
+    // the dialog is open (or the peer's last-seen is exact), and
+    // supergroups/channels only receive updates at all while open — which is
+    // why chat actions never appeared before this was wired up.
     fun openChat(chatId: String) = executor.execute {
         openCounts.merge(chatId, 1) { a, b -> a + b }
         if (ready) sendOpenChat(chatId)
@@ -1400,10 +1402,8 @@ object Tg {
     private fun sendOpenChat(chatId: String) =
         send(JSONObject().put("@type", "openChat").put("chat_id", chatIdOf(chatId)))
 
-    /**
-     * Marks an incoming voice note as listened, which is what clears the
-     * unplayed dot on the SENDER's side. viewMessages alone only marks it read.
-     */
+    // openMessageContent is what clears the unplayed dot on the SENDER's side;
+    // viewMessages alone only marks the message read.
     fun markVoicePlayed(chatId: String, msgId: String) = executor.execute {
         val mid = msgId.toLongOrNull() ?: return@execute
         send(
@@ -1476,12 +1476,10 @@ object Tg {
     private fun fetchHistory(chatId: String, fromMsgId: Long, limit: Int): Int =
         fetchHistoryPage(chatId, fromMsgId, limit).first
 
-    /**
-     * Stores one page and reports (count, oldest id in it). The oldest id is
-     * what a full walk anchors its next page on: anchoring on the oldest row in
-     * the DB instead only ever extends the history backwards, so a hole between
-     * two already-synced stretches could never be filled.
-     */
+    // The returned oldest id is what a full walk anchors its next page on:
+    // anchoring on the oldest row in the DB instead only ever extends the
+    // history backwards, so a hole between two already-synced stretches could
+    // never be filled.
     private fun fetchHistoryPage(chatId: String, fromMsgId: Long, limit: Int): Pair<Int, Long> {
         val res = request(
             JSONObject().put("@type", "getChatHistory")
@@ -1494,7 +1492,7 @@ object Tg {
         var oldest = 0L
         for (i in 0 until arr.length()) {
             val m = arr.getJSONObject(i)
-            storeMessage(m)
+            storeMessageSafe(m)
             val id = m.optLong("id")
             if (id > 0 && (oldest == 0L || id < oldest)) oldest = id
         }
@@ -1544,15 +1542,10 @@ object Tg {
         return SearchPage(ids, res.optInt("total_count"), res.optLong("next_from_message_id"))
     }
 
-    /**
-     * The chat's own pictures around [fromMsgId], asked of the server with a
-     * photo filter rather than sifted out of a slice of history: a search
-     * window holds ~50 messages, of which only a handful are pictures, so an
-     * album built from it ran out after a swipe or two.
-     *
-     * [newer] null centres the answer on the anchor; true walks forwards from
-     * it, false backwards. Blocking; worker threads only.
-     */
+    // Asked of the server with a photo filter rather than sifted out of a slice
+    // of history: a search window holds ~50 messages, of which only a handful
+    // are pictures, so an album built from it ran out after a swipe or two.
+    // Blocking; worker threads only.
     fun chatPhotos(chatId: String, fromMsgId: String, newer: Boolean?, limit: Int = 49): List<MessageRow> {
         val id = fromMsgId.toLongOrNull() ?: return emptyList()
         // TDLib's bounds, as in contextWindow: the offset may not pass -99, the
@@ -1578,7 +1571,7 @@ object Tg {
         ) ?: return emptyList()
         val arr = res.optJSONArray("messages") ?: return emptyList()
         val rows = ArrayList<MessageRow>(arr.length())
-        for (i in 0 until arr.length()) parseMessage(arr.getJSONObject(i))?.let { rows.add(it.row) }
+        for (i in 0 until arr.length()) parseMessageSafe(arr.getJSONObject(i))?.let { rows.add(it.row) }
         // prefer the stored row: it knows about a file already on this phone,
         // which the parsed one only does when TDLib still holds it locally
         val stored = Bridge.db.messagesByIds(chatId, rows.mapTo(HashSet()) { it.id }).associateBy { it.id }
@@ -1604,7 +1597,7 @@ object Tg {
         ) ?: return emptyList()
         val arr = res.optJSONArray("messages") ?: return emptyList()
         val rows = ArrayList<MessageRow>(arr.length())
-        for (i in 0 until arr.length()) parseMessage(arr.getJSONObject(i))?.let { rows.add(it.row) }
+        for (i in 0 until arr.length()) parseMessageSafe(arr.getJSONObject(i))?.let { rows.add(it.row) }
         val stored = Bridge.db.messagesByIds(chatId, rows.mapTo(HashSet()) { it.id }).associateBy { it.id }
         return rows.map { stored[it.id] ?: it }
             .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
@@ -1617,8 +1610,8 @@ object Tg {
             JSONObject().put("@type", "getChatHistory")
                 .put("chat_id", chatIdOf(chatId))
                 .put("from_message_id", id)
-                // older: everything before the anchor. newer: the anchor plus n
-                // messages after it, which is the only way TDLib walks forwards
+                // asking for the anchor plus n is the only way TDLib walks
+                // forwards from a message
                 .put("offset", if (newer) -n else 0)
                 .put("limit", if (newer) n + 1 else n)
                 .put("only_local", false),
@@ -1627,7 +1620,7 @@ object Tg {
         val arr = res.optJSONArray("messages") ?: return emptyList()
         val rows = ArrayList<MessageRow>(arr.length())
         for (i in 0 until arr.length()) {
-            val row = parseMessage(arr.getJSONObject(i))?.row ?: continue
+            val row = parseMessageSafe(arr.getJSONObject(i))?.row ?: continue
             val rowId = row.id.toLongOrNull() ?: continue
             // the anchor itself comes back in the "newer" answer
             if (if (newer) rowId > id else rowId < id) rows.add(row)
@@ -1637,12 +1630,9 @@ object Tg {
             .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
     }
 
-    /**
-     * Downloads one message's file and answers with its path, blocking until it
-     * lands. The ordinary download path writes progress onto the message's row,
-     * which a search window does not have — these messages are shown without
-     * being stored.
-     */
+    // Blocks until the file lands. The ordinary download path writes progress
+    // onto the message's row, which a search window does not have — those
+    // messages are shown without being stored.
     fun downloadNow(chatId: String, msgId: String): String {
         val mid = msgId.toLongOrNull() ?: return ""
         // resolved from the message, never from a stored id: TDLib file ids
@@ -1662,20 +1652,14 @@ object Tg {
         return if (usable(path)) path else ""
     }
 
-    /**
-     * Re-checks voice notes this chat still shows as unplayed. A message
-     * carries is_listened only when it is fetched, and paging only ever reaches
-     * BACKWARD past what is already stored, so a note stored before its
-     * recipient listened would keep its dot for good. Bounded to one
-     * getMessages call (TDLib caps it at 100) and run whenever the chat is
-     * opened or another page is pulled in, so it converges as you scroll.
-     */
+    // A message carries is_listened only when it is fetched, and paging only
+    // ever reaches BACKWARD past what is already stored, so a note stored before
+    // its recipient listened would keep its dot for good. Run on every chat open
+    // and every page, so it converges as you scroll.
     private fun syncPlayedState(chatId: String) {
-        // Two repairs share one round-trip (TDLib caps getMessages at 100):
-        // voice notes whose listened flag we may have missed, and messages
-        // stored either as a "[SomeType]" placeholder or as a bodyless contact
-        // card by an older build that did not keep their content yet.
-        // split budget so 40 placeholders can never starve the contact repair
+        // Two repairs share one round-trip because TDLib caps getMessages at
+        // 100; the budget is split so placeholders can never starve the contact
+        // repair.
         val stale = (Bridge.db.placeholderMessageIds(chatId, 30) +
             Bridge.db.emptyContactSenders(chatId, 10).map { it.first })
             .filter { repairAttempted.add("$chatId/$it") }
@@ -1693,7 +1677,7 @@ object Tg {
         for (i in 0 until msgs.length()) {
             // a message the server no longer has comes back as a null entry
             val m = msgs.optJSONObject(i) ?: continue
-            val msgId = m.getLong("id").toString()
+            val msgId = m.optLong("id").toString()
             val content = m.optJSONObject("content") ?: continue
             if (content.optString("@type") == "messageVoiceNote" &&
                 content.optBoolean("is_listened")
@@ -1703,7 +1687,7 @@ object Tg {
             }
             if (msgId in stale) {
                 Bridge.db.deleteMessage(chatId, msgId)
-                storeMessage(m)
+                storeMessageSafe(m)
                 changed = true
             }
         }
@@ -1718,12 +1702,9 @@ object Tg {
         return Bridge.asymptoticProgress(syncAllRounds)
     }
 
-    /**
-     * Walks the chat's whole history from the newest message backwards, storing
-     * every page. Deliberately restarts from the top rather than resuming from
-     * the oldest row held: only a full walk closes gaps left in the middle by
-     * partial syncs, which is the point of asking for all messages.
-     */
+    // Deliberately restarts from the newest message rather than resuming from
+    // the oldest row held: only a full walk closes gaps left in the middle by
+    // partial syncs, which is the point of asking for all messages.
     fun syncAllHistory(chatId: String): Boolean {
         if (syncAllChat != null && syncAllChat != chatId) return false
         if (syncAllChat == chatId) return true
@@ -1885,8 +1866,8 @@ object Tg {
 
     class PeerInfo(val phone: String, val username: String, val bio: String)
 
-    /** Blocking; worker threads only. Null for anything that is not a user —
-     *  a group's or channel's raw id is negative. */
+    // Blocking; worker threads only. Null for anything that is not a user — a
+    // group's or channel's raw id is negative.
     fun peerInfo(chatId: String): PeerInfo? {
         val uid = chatIdOf(chatId)
         if (uid <= 0) return null

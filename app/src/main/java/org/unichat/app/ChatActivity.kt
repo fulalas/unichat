@@ -47,8 +47,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // seeks and toast "message not loaded" while pages were still arriving.
         private val SEEK_TIMEOUT_MS = MAX_SEEK_PAGES * Bridge.historyTimeoutMs + 30_000L
         private const val SEEK_CONTEXT_ROWS = 20
+        private const val HOLD_MAX_MS = 5000L
+        private const val SETTLE_QUIET_MS = 400L
         private const val WINDOW_ALBUM_SPAN = 60
         private const val PRESENCE_RESUBSCRIBE_MS = 30_000L
+        private const val FOCUS_RECHECK_MS = 400L
         private val scrollStates =
             object : LinkedHashMap<String, android.os.Parcelable?>(16, 0.75f, true) {
                 override fun removeEldestEntry(eldest: Map.Entry<String, android.os.Parcelable?>) =
@@ -104,8 +107,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private var seekQuotedId: String? = null
     private var seekOrigin: MessageRow? = null
-    // A message the image viewer asked us to jump to, applied on the next list
-    // commit so the reload that follows onStart cannot scroll it away again.
+    // Applied on the next list commit: the reload that follows onStart would
+    // otherwise scroll the jump away again.
     private var pendingJumpId: String? = null
     private var seekCenter = false
     private var seekFetching = false
@@ -134,23 +137,19 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private var hitsLoading = false
     private var deepening = false
     private var idleRounds = 0
-    // how much of the chat the scan covers. Grows as deepening pulls older
-    // pages in, or the newly fetched messages would sit outside the window and
-    // every round would re-scan the very same rows.
+    // Must grow as deepening pulls older pages in, or the newly fetched messages
+    // sit outside the window and every round re-scans the very same rows.
     private var searchLimit = SEARCH_LOAD_LIMIT
     private var deepOldest = 0L
     // Its own thread: these calls block for up to 30s and must not sit in front
     // of the shared io queue that reloads the chat
     private val searchExec = java.util.concurrent.Executors.newSingleThreadExecutor()
-    // Whether the list is showing the temporary window around a search hit
-    // rather than the chat's own history. While it is, the normal (DB-backed)
-    // pagination is wrong — the window grows from the server, on both ends.
+    // While the list shows a search hit's window, the normal (DB-backed)
+    // pagination is wrong — that window grows from the server, on both ends.
     private var windowMode = false
     private var windowLoading = false
     private var windowTopDone = false
     private var windowBottomDone = false
-    // media of window rows, fetched one row at a time; ids in flight, ids that
-    // failed (so a rebind doesn't retry forever), and one waiting to be opened
     private val windowFetching = HashSet<String>()
     private val windowFailed = HashSet<String>()
     private var pendingWindowOpen: String? = null
@@ -216,8 +215,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         return out
     }
 
-    // the AudioPlayer state hook this instance installed, so onStop only clears
-    // the singleton's field when it is still ours (see onStop)
     private var audioHook: (() -> Unit)? = null
 
     private val audioTicker = object : Runnable {
@@ -248,8 +245,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // and rebuilt while it is up. Restored, or the photo the user chose "send
         // as view once" for came back as an ordinary, permanent send.
         pickViewOnce = savedInstanceState?.getBoolean(STATE_PICK_VIEW_ONCE) == true
-        // WhatsApp chats swap the blue chat palette for the green one; must
-        // happen before any view of this screen inflates
+        // must happen before any view of this screen inflates
         applyProtocolTheme(Accounts.ofChat(chatId))
         setContentView(R.layout.activity_chat)
 
@@ -534,9 +530,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         cancelHold()
     }
 
-    // Tolerant "scrolled to the bottom" test: a fling rarely stops on the exact
-    // last pixel, and while the newest message is on screen the user expects new
-    // ones to follow it — only genuinely scrolled-up positions keep their place.
+    // Deliberately tolerant: a fling rarely stops on the exact last pixel, and
+    // while the newest message is on screen the user expects new ones to follow
+    // it — only genuinely scrolled-up positions keep their place.
     private fun isAtBottom(): Boolean =
         !messageList.canScrollVertically(1) ||
             lm.findLastVisibleItemPosition() >= adapter.itemCount - 1
@@ -608,9 +604,13 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             // Read BEFORE the markChatRead below, which is what clears it. The
             // last few rows are skipped: they are on screen already, and asking
             // to centre the newest message only fights the bottom of the list.
+            // A row outside the loaded window is skipped too: it used to miss in
+            // consumePendingJump and start a seek that widened loadLimit to its
+            // depth, so opening a group with thousands of unread read and
+            // submitted every one of those rows, on this and every later reload.
             val unreadJump = if (markRead) {
                 Bridge.db.firstUnread(chatId)?.id?.takeIf { id ->
-                    messages.indexOfFirst { it.id == id } !in messages.size - 3 until messages.size
+                    messages.indexOfFirst { it.id == id } in 0 until messages.size - 3
                 }
             } else {
                 null
@@ -656,9 +656,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                                     messageList.scrollToPosition(adapter.itemCount - 1)
                             }
                         }
-                        // new message (incoming or our own): auto-scroll only
-                        // if already at the bottom; once scrolled up, never
-                        // move — just flag new content below
                         newestChanged -> {
                             if (atBottom) {
                                 messageList.scrollToPosition(adapter.itemCount - 1)
@@ -730,15 +727,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             if (canDown && hasNewBelow) android.view.View.VISIBLE else android.view.View.GONE
     }
 
-    // Always jumps straight to the target (no animation) — a smooth scroll across
-    // a far, media-heavy range crawls for seconds and drifts the landing. The
-    // green flash marks where it landed; holdScrollToMessage keeps it there while
-    // the window settles.
-    /**
-     * [center] parks the message in the middle of the screen instead of merely
-     * bringing it into view. A tall photo lands half cut off otherwise, which is
-     * the wrong place to leave someone who asked to go to that picture.
-     */
+    // Never a smooth scroll: across a far, media-heavy range it crawls for
+    // seconds and drifts the landing. [center] is for a tall photo, which lands
+    // half cut off when merely brought into view.
     private fun scrollToMessage(
         msgId: String, toastIfMissing: Boolean = true, center: Boolean = false,
     ): Boolean {
@@ -759,12 +750,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private var holdListener: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
 
-    // Jumps to a message instantly and keeps it pinned at the top for a short
-    // window afterwards: a freshly widened window decodes images / settles row
-    // heights over several layout passes, which would otherwise slide the target
-    // off-screen right after the jump. Re-pins each layout pass until it's stable
-    // (or the window elapses). Yields immediately if the user starts scrolling
-    // (see cancelHold in the scroll listener).
+    // The target has to stay pinned for a while after the jump: a freshly
+    // widened window decodes images / settles row heights over several layout
+    // passes, which slid the target off-screen right after it landed.
     private fun holdScrollToMessage(msgId: String, index: Int, center: Boolean = false) {
         if (center) lm.scrollToPositionWithOffset(index, 0) else messageList.scrollToPosition(index)
         cancelHold() // drop any previous hold so they can't fight over the target
@@ -774,9 +762,17 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // used to run it on EVERY layout pass for the whole hold. The adapter
         // list can only change through a reload, which re-issues the hold.
         var targetIndex = index
+        // The hold must outlive the decodes, not a stopwatch: a fixed 1500ms
+        // window expired while the media rows around the target were still
+        // decoding, and with stackFromEnd the relayout anchors on the bottom
+        // child, so each late-arriving image height shoved the already-released
+        // target off the top. Settle on quiet instead — no correction needed for
+        // SETTLE_QUIET_MS — with a hard cap as the safety net.
+        var lastAdjust = start
         val listener = object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
             override fun onGlobalLayout() {
-                if (SystemClock.uptimeMillis() - start > 1500) { cancelHold(); return }
+                val now = SystemClock.uptimeMillis()
+                if (now - start > HOLD_MAX_MS) { cancelHold(); return }
                 if (targetIndex >= adapter.itemCount) {
                     targetIndex = adapter.indexOfMessage(msgId)
                     if (targetIndex < 0) { cancelHold(); return }
@@ -789,25 +785,34 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 val first = lm.findFirstVisibleItemPosition()
                 val last = lm.findLastVisibleItemPosition()
                 if (targetIndex in first..last) {
-                    if (!center) { cancelHold(); return }
+                    if (!center) {
+                        if (now - lastAdjust > SETTLE_QUIET_MS) cancelHold()
+                        return
+                    }
                     // Centring needs the row's real height, which only exists
                     // once it is laid out — so it is applied here, and re-applied
                     // while the height keeps changing (an image decoding into a
                     // taller bubble moves the target under it).
                     val view = lm.findViewByPosition(targetIndex)
-                    if (view == null) { lm.scrollToPositionWithOffset(targetIndex, 0); return }
+                    if (view == null) {
+                        lm.scrollToPositionWithOffset(targetIndex, 0)
+                        lastAdjust = now
+                        return
+                    }
                     val visible = messageList.height -
                         messageList.paddingTop - messageList.paddingBottom
                     val wanted = (visible - view.height) / 2
                     if (kotlin.math.abs(view.top - messageList.paddingTop - wanted) <= 4) {
-                        cancelHold()
+                        if (now - lastAdjust > SETTLE_QUIET_MS) cancelHold()
                         return
                     }
                     lm.scrollToPositionWithOffset(targetIndex, wanted)
+                    lastAdjust = now
                     return
                 }
                 if (center) lm.scrollToPositionWithOffset(targetIndex, 0)
                 else messageList.scrollToPosition(targetIndex)
+                lastAdjust = now
             }
         }
         holdListener = listener
@@ -821,15 +826,16 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun onQuoteTapped(origin: MessageRow) {
         if (origin.quotedId.isEmpty()) return
-        if (seekQuotedId != null) clearSeek() // supersede any in-progress seek
-        if (scrollToMessage(origin.quotedId, toastIfMissing = false)) {
+        if (seekQuotedId != null) clearSeek()
+        if (scrollToMessage(origin.quotedId, toastIfMissing = false, center = true)) {
             if (quoteJumpReturns.lastOrNull() != origin.id) quoteJumpReturns.addLast(origin.id)
             return
         }
         seekQuotedId = origin.quotedId
         seekOrigin = origin
+        seekCenter = true
         seekFetching = false
-        updateSubtitle() // shows the "syncing message…" line
+        updateSubtitle()
         driveSeek()
     }
 
@@ -839,10 +845,24 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         io.execute {
             val depth = Bridge.db.messageDepth(chatId, target)
             runOnUiThread {
-                if (seekQuotedId != target) return@runOnUiThread // superseded/cancelled
+                if (seekQuotedId != target) return@runOnUiThread
                 if (depth > 0) {
                     val need = depth + SEEK_CONTEXT_ROWS
+                    // loadLimit only ever grows and is kept for the life of the
+                    // screen, so an uncapped widen made this and every later
+                    // reload read and submit the whole span down to the target.
+                    // Past the cap the target counts as unreachable, exactly like
+                    // one that is not stored at all.
+                    if (need > SEARCH_LOAD_LIMIT) return@runOnUiThread failSeek()
                     if (need > loadLimit) loadLimit = need
+                    // the reload replaces the search snapshot; positional match
+                    // state would index rows that are no longer there (same rule
+                    // as onChatMerged)
+                    if (searchActive) {
+                        searchMatches = emptyList()
+                        currentMatch = -1
+                        updateSearchCount()
+                    }
                     reload()
                 } else if (!seekFetching) {
                     // not stored: page history back from the replying message.
@@ -861,7 +881,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onSeekResult(chatId: String, msgId: String, found: Boolean) {
         if (chatId != this.chatId || msgId != seekQuotedId) return
-        if (found) driveSeek() // now stored → depth>0 → widen + reload + jump
+        if (found) driveSeek()
         else failSeek()
     }
 
@@ -869,7 +889,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val target = pendingJumpId ?: return
         pendingJumpId = null
         if (scrollToMessage(target, toastIfMissing = false, center = true)) return
-        if (seekQuotedId == target) return // already being sought
+        if (seekQuotedId == target) return
         if (seekQuotedId != null) clearSeek()
         seekQuotedId = target
         seekOrigin = null
@@ -902,7 +922,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         seekCenter = false
         seekFetching = false
         main.removeCallbacks(seekTimeout)
-        Bridge.cancelSeek() // stop the bridge paging history for an abandoned seek
+        Bridge.cancelSeek()
         updateSubtitle()
     }
 
@@ -1043,17 +1063,17 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchLimit = SEARCH_LOAD_LIMIT
         searchCount.text = ""
         hideKeyboard(searchInput)
-        reload() // restore the normal (recent) message window
+        reload()
     }
 
     // Coalesces keystrokes: runSearch rebinds rows and kicks off a scan, and it
     // ran on every character typed, next to the keyboard's own frame budget.
     private val searchDebounce = Runnable { runSearch(searchInput.text?.toString().orEmpty()) }
 
-    // Rebinds only what is on screen. notifyDataSetChanged() rebound the ENTIRE
-    // adapter — in search mode that window holds up to SEARCH_LOAD_LIMIT (5000)
-    // rows, each bind re-running highlighted(), Linkify and the padding/gravity
-    // work. Rows scrolled to later bind with the current query anyway.
+    // notifyDataSetChanged() rebound the ENTIRE adapter — in search mode that
+    // window holds up to SEARCH_LOAD_LIMIT (5000) rows, each bind re-running
+    // highlighted(), Linkify and the padding/gravity work. Rows scrolled to
+    // later bind with the current query anyway.
     private fun rebindVisible() {
         val first = lm.findFirstVisibleItemPosition()
         val last = lm.findLastVisibleItemPosition()
@@ -1145,12 +1165,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * Shows one hit surrounded by the messages that came before and after it.
-     * The window is rendered straight from the server answer and never stored:
-     * writing a far-back slice into the history would leave it stranded between
-     * two gaps, which is how a chat starts skipping months at a time.
-     */
+    // The window is rendered straight from the server answer and never stored:
+    // writing a far-back slice into the history would leave it stranded between
+    // two gaps, which is how a chat starts skipping months at a time.
     private fun showHit(index: Int) {
         val id = serverHits.getOrNull(index) ?: return
         val seq = ++windowSeq
@@ -1210,12 +1227,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * Fetches the picture, video or voice note of a row in the search window.
-     * Those rows are not stored, so the normal download path — which reports
-     * progress by writing to the message's row — has nothing to write to and
-     * left every attachment blank.
-     */
+    // Search-window rows are not stored, so the normal download path — which
+    // reports progress by writing to the message's row — has nothing to write
+    // to and left every attachment blank.
     private fun fetchWindowMedia(msg: MessageRow, userInitiated: Boolean = false) {
         // A stored path can outlive its file (our own sends reference the
         // cacheDir staging copy, swept after a day), and the window merge
@@ -1252,13 +1266,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * The viewer pages through an album. Normally it reads that album from the
-     * stored history itself, but a search window's rows are deliberately never
-     * stored (see showHit), so a picture opened from search results had no album
-     * at all and could not be swiped — the whole point of opening it there. Hand
-     * the window's own pictures over instead.
-     */
+    // The viewer normally reads the album it pages through from the stored
+    // history, but a search window's rows are deliberately never stored (see
+    // showHit), so a picture opened from search results had no album at all and
+    // could not be swiped.
     private fun openImageViewer(msg: MessageRow) {
         val intent = Intent(this, ImageViewActivity::class.java)
         intent.putExtra("path", msg.filePath)
@@ -1283,7 +1294,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun stepHit(delta: Int) {
         if (serverHits.isEmpty()) return
         val next = currentHit + delta
-        if (next < 0) return // already at the newest match
+        if (next < 0) return
         if (next >= serverHits.size) {
             if (serverNextFrom == 0L) return // nothing older left
             loadMoreHits()
@@ -1325,11 +1336,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * Says what was actually searched. A WhatsApp chat is searched locally, so
-     * "no matches" only ever means "none in what is on this device" — naming the
-     * oldest message it reached keeps that honest, and the button fetches more.
-     */
+    // A WhatsApp chat is searched locally, so "no matches" only ever means
+    // "none in what is on this device" — naming the oldest message the scan
+    // reached keeps that honest, and the button fetches more.
     private fun updateCoverage() {
         if (!searchActive || Tg.isTgId(chatId)) {
             searchCoverageRow.visibility = android.view.View.GONE
@@ -1366,12 +1375,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * Pulls older history one page at a time, re-scanning after each, until the
-     * chat's start is reached or the user stops. Explicitly asked for: syncing
-     * before every search would be slow, and doing it silently would spend the
-     * phone's battery on searches that were never going to match.
-     */
+    // A button, never automatic: syncing before every search would be slow, and
+    // doing it silently would spend the phone's battery on searches that were
+    // never going to match.
     private fun toggleDeepSearch() {
         if (deepening) {
             stopDeepening()
@@ -1418,12 +1424,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         main.removeCallbacks(deepTick)
     }
 
-    /**
-     * Something changed in the chat while deepening. Only an actually older
-     * message counts as the page that was asked for — an arriving message or a
-     * deletion fires the same event, and treating those as progress reset the
-     * "your phone didn't answer" counter forever.
-     */
+    // Only an actually older message counts as the page that was asked for — an
+    // arriving message or a deletion fires the same event, and treating those as
+    // progress reset the "your phone didn't answer" counter forever.
     private fun onDeepPage() {
         io.execute {
             val oldest = Bridge.db.oldestMessage(chatId)?.timeSent ?: 0L
@@ -1436,19 +1439,16 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 // the fetched page sits below the window's floor; without this
                 // every round would re-scan the same rows and find nothing new
                 searchLimit += LOCAL_PAGE
-                loadSearchWindow() // re-scans through runSearch once the diff commits
+                loadSearchWindow()
                 updateCoverage()
                 pullOlderPage()
             }
         }
     }
 
-    /**
-     * Records the first visible message and how far it sits below the top, so a
-     * later run can land on the same message even though every adapter position
-     * has been rebuilt. Nothing is stored while at the bottom — that chat should
-     * open on whatever arrived since.
-     */
+    // Anchored on a message id, not a position: every adapter position is
+    // rebuilt between runs. Nothing is stored while at the bottom — that chat
+    // should open on whatever arrived since.
     private fun saveScrollAnchor(atBottom: Boolean) {
         if (atBottom) {
             Prefs.setScrollAnchor(this, chatId, null, 0)
@@ -1515,10 +1515,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 else -> false
             }
         }
-        // popups take the window focus too (see onWindowFocusChanged)
-        ownDialogs++
-        popup.setOnDismissListener { ownDialogs-- }
-        popup.show()
+        showPopup(popup)
     }
 
     private fun startChatExport() {
@@ -1654,9 +1651,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /** The `@name` being typed at the caret, or null when the caret is not in
-     *  one. Digits and letters only: the query stops at the first space, so a
-     *  member whose name has one is still reached by its first word. */
+    // Digits and letters only: the query stops at the first space, so a member
+    // whose name has one is still reached by its first word.
     private fun mentionQuery(): String? {
         val caret = input.selectionStart
         if (caret <= 0 || input.selectionEnd != caret) return null
@@ -1738,11 +1734,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         override fun onDestroyActionMode(mode: android.view.ActionMode) {}
     }
 
-    /**
-     * Wraps (or unwraps) the selection in a WhatsApp formatting marker. The
-     * selection is restored around the same characters afterwards so the two
-     * markers can be combined, or the same one tapped again to undo it.
-     */
+    // The selection is restored around the same characters afterwards so the two
+    // markers can be combined, or the same one tapped again to undo it.
     private fun markSelection(marker: Char) {
         val e = input.text
         val start = minOf(input.selectionStart, input.selectionEnd)
@@ -1806,8 +1799,16 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             return
         }
         val mentions = composedMentions(text)
-        input.text.clear()
-        Prefs.setDraft(this, chatId, "")
+        if (editing != null) {
+            // the edit only borrowed the composer; sending it used to throw the
+            // pre-edit draft away, while cancel put it back
+            input.setText(draftBeforeEdit.orEmpty())
+            input.setSelection(input.text.length)
+            Prefs.setDraft(this, chatId, draftBeforeEdit.orEmpty())
+        } else {
+            input.text.clear()
+            Prefs.setDraft(this, chatId, "")
+        }
         mentionList.visibility = android.view.View.GONE
         val replying = replyTarget
         when {
@@ -1927,14 +1928,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * Marks the two ends of a voice note by touch. Those are the only moments
-     * in this app where something starts and stops without the user watching
-     * the screen — a message being typed and sent is its own confirmation.
-     *
-     * Through the view's haptic feedback rather than the vibrator: it needs no
-     * permission and obeys the phone's own haptics setting.
-     */
+    // Haptic feedback rather than the vibrator: it needs no permission and obeys
+    // the phone's own haptics setting.
     private fun buzz() {
         actionButton.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
     }
@@ -2093,20 +2088,15 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * The hold gesture on the clip and the mic: normal, or view-once. Returns
-     * false when this chat's network won't take a view-once send of that kind,
-     * so the press falls through instead of offering something that would be
-     * rejected (or, worse, silently sent normally).
-     */
+    // Returns false when this chat's network won't take a view-once send of that
+    // kind, so the press falls through instead of offering something that would
+    // be rejected (or, worse, silently sent normally).
     private fun askViewOnce(
         normalLabel: Int, viewOnceLabel: Int, kind: String, onPick: (Boolean) -> Unit,
     ): Boolean {
         if (!Bridge.viewOnceSupported(chatId, kind)) return false
         val items = arrayOf(getString(normalLabel), getString(viewOnceLabel))
-        AlertDialog.Builder(this)
-            .setItems(items) { _, which -> onPick(which == 1) }
-            .show().tracked()
+        showDialog { setItems(items) { _, which -> onPick(which == 1) } }
         return true
     }
 
@@ -2121,8 +2111,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             getString(R.string.attach_location),
             getString(R.string.attach_contact),
         )
-        AlertDialog.Builder(this)
-            .setItems(items) { _, which ->
+        showDialog {
+            setItems(items) { _, which ->
                 when (which) {
                     0 -> pickFileFor(viewOnce = false)
                     1 -> sendCurrentLocation()
@@ -2131,11 +2121,13 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     } catch (e: Exception) {
                         // a device with no contacts app at all: the throw would
                         // otherwise take the whole screen down
-                        Toast.makeText(this, R.string.contact_read_failed, Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            this@ChatActivity, R.string.contact_read_failed, Toast.LENGTH_SHORT
+                        ).show()
                     }
                 }
             }
-            .show().tracked()
+        }
     }
 
     private fun onContactPicked(uri: Uri) {
@@ -2318,15 +2310,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         startActivitySafely(intent)
     }
 
-    // A number without a country code is never guessed at — a wrong guess
-    // would open a chat with a stranger under the card's name.
-    /**
-     * A shared contact card is just a name and a number — it says nothing about
-     * where that person can be reached. Ask, instead of assuming the protocol
-     * the card happened to arrive on: a Signal card used to open a WhatsApp
-     * chat, because anything that was not Telegram fell through to WhatsApp.
-     * ProtoPicker skips the dialog when only one account is linked.
-     */
+    // A card says nothing about where that person can be reached, so ask instead
+    // of assuming the protocol it arrived on: a Signal card used to open a
+    // WhatsApp chat, because anything that was not Telegram fell through to
+    // WhatsApp. A number without a country code is never guessed at either — a
+    // wrong guess would open a chat with a stranger under the card's name.
     private fun messageContact(msg: MessageRow) =
         ProtoPicker.pick(this) { proto -> messageContactVia(proto, msg) }
 
@@ -2348,8 +2336,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 .ifEmpty { if (number.isEmpty()) "" else account.chatIdForNumber(number) }
             when {
                 id == Bridge.NUMBER_LOOKUP_FAILED -> R.string.number_check_failed
-                // Nothing was actually asked: the card carried no id this
-                // account can use, and no number to fall back on either.
                 id.isEmpty() && number.isEmpty() -> R.string.number_check_failed
                 id.isEmpty() -> account.notOnNetworkRes
                 else -> id
@@ -2393,9 +2379,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         openMediaFile(msg)
     }
 
-    // Whether the row's file is really here. A stored path can outlive its file
-    // (our own Telegram sends reference the cacheDir staging copy, swept after a
-    // day), and handing that path to an external viewer opens nothing.
+    // A stored path can outlive its file (our own Telegram sends reference the
+    // cacheDir staging copy, swept after a day), and handing that path to an
+    // external viewer opens nothing.
     private fun mediaOnDisk(msg: MessageRow): Boolean =
         msg.filePath.isNotEmpty() && File(msg.filePath).exists()
 
@@ -2404,7 +2390,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             openMediaFile(msg)
             return
         }
-        pendingVideoOpen = msg.id
+        // in a search window downloadWithToast arms pendingWindowOpen instead;
+        // arming both opened the video a second time after closeSearch's reload
+        if (!windowMode) pendingVideoOpen = msg.id
         downloadWithToast(msg)
     }
 
@@ -2439,28 +2427,24 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (!running) Toast.makeText(this, R.string.downloading, Toast.LENGTH_SHORT).show()
     }
 
-    /**
-     * A list dialog whose entries carry their own action, so dispatch is by
-     * identity rather than by comparing the tapped label against localized
-     * strings — which silently ran the wrong action for any translation that
-     * rendered two labels the same (the CAB dispatches by item id for the same
-     * reason). [titleRes]/[cancellable] cover the delete confirmation, which
-     * needs a title and a Cancel button; the message-action sheet has neither.
-     */
+    // Entries carry their own action, so dispatch is by identity rather than by
+    // comparing the tapped label against localized strings — which silently ran
+    // the wrong action for any translation that rendered two labels the same
+    // (the CAB dispatches by item id for the same reason).
     private fun showActionDialog(
         actions: List<Pair<String, () -> Unit>>,
         titleRes: Int? = null,
         cancellable: Boolean = false,
         onChosen: () -> Unit = {},
     ) {
-        AlertDialog.Builder(this)
-            .apply { if (titleRes != null) setTitle(titleRes) }
-            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+        showDialog {
+            if (titleRes != null) setTitle(titleRes)
+            setItems(actions.map { it.first }.toTypedArray()) { _, which ->
                 actions[which].second()
                 onChosen()
             }
-            .apply { if (cancellable) setNegativeButton(android.R.string.cancel, null) }
-            .show().tracked()
+            if (cancellable) setNegativeButton(android.R.string.cancel, null)
+        }
     }
 
     private fun showMessageActions(msg: MessageRow) {
@@ -2549,12 +2533,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     Toast.makeText(this, R.string.reactions_unavailable, Toast.LENGTH_SHORT).show()
                     return@runOnUiThread
                 }
-                AlertDialog.Builder(this)
-                    .setTitle(R.string.reactions)
-                    .setItems(lines.toTypedArray()) { _, which ->
+                showDialog {
+                    setTitle(R.string.reactions)
+                    setItems(lines.toTypedArray()) { _, which ->
                         openReactorChat(reactions[which].first, who[which])
                     }
-                    .show().tracked()
+                }
             }
         }
     }
@@ -2584,10 +2568,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         row.gravity = android.view.Gravity.CENTER
         val pad = (14 * resources.displayMetrics.density).toInt()
         row.setPadding(pad, pad, pad, pad)
-        val dialog = AlertDialog.Builder(this)
-            .setView(row)
-            .setNeutralButton(R.string.remove_reaction) { _, _ -> Bridge.sendReaction(msg, "") }
-            .create()
+        var dialog: AlertDialog? = null
         for (emoji in listOf("👍", "❤️", "😂", "😮", "😢", "🙏")) {
             val tv = android.widget.TextView(this)
             tv.text = emoji
@@ -2595,12 +2576,14 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             tv.setPadding(pad / 2, 0, pad / 2, 0)
             tv.setOnClickListener {
                 Bridge.sendReaction(msg, emoji)
-                dialog.dismiss()
+                dialog?.dismiss()
             }
             row.addView(tv)
         }
-        dialog.show()
-        dialog.tracked()
+        dialog = showDialog {
+            setView(row)
+            setNeutralButton(R.string.remove_reaction) { _, _ -> Bridge.sendReaction(msg, "") }
+        }
     }
 
     private fun startReply(msg: MessageRow) {
@@ -2660,13 +2643,42 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (!hasFocus && ownDialogs == 0) captureRecordingAsPending()
     }
 
-    // How many dialogs/popups this screen has open (see onWindowFocusChanged).
     private var ownDialogs = 0
 
+    // While one of our own windows is up the check above is skipped, so an
+    // outside window that stole the focus behind it (the call banner again) left
+    // the mic running: nothing re-checked, and onPause only comes if the user
+    // answers. Re-check once our window is gone — delayed, because the focus
+    // returns a few frames after the dismiss listener runs, and reading it right
+    // away would stop the mic on every ordinary dialog.
+    private val recheckFocus = Runnable {
+        if (ownDialogs == 0 && !hasWindowFocus()) captureRecordingAsPending()
+    }
+
+    private fun ownWindowClosed() {
+        ownDialogs--
+        if (recorder == null) return
+        main.removeCallbacks(recheckFocus)
+        main.postDelayed(recheckFocus, FOCUS_RECHECK_MS)
+    }
+
+    // Every dialog and popup of this screen must go through showDialog/showPopup
+    // (or, for one built elsewhere, tracked()): they take the window focus just
+    // like an outside app does, and one that skipped the count would stop the mic
+    // mid-recording.
     private fun <D : android.app.Dialog> D.tracked(): D {
         ownDialogs++
-        setOnDismissListener { ownDialogs-- }
+        setOnDismissListener { ownWindowClosed() }
         return this
+    }
+
+    private fun showDialog(build: AlertDialog.Builder.() -> Unit): AlertDialog =
+        AlertDialog.Builder(this).apply(build).show().tracked()
+
+    private fun showPopup(popup: android.widget.PopupMenu) {
+        popup.setOnDismissListener { ownWindowClosed() }
+        popup.show()
+        ownDialogs++
     }
 
     private fun showKeyboard(target: android.view.View = input) {
