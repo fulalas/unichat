@@ -15,6 +15,7 @@ data class ChatRow(
     val lastFromMe: Boolean = false,
     val lastRead: Boolean = false,
     val lastFailed: Boolean = false,
+    val lastPending: Boolean = false,
     val muted: Boolean = false,
     val transientState: String = "",
     val online: Boolean = false,
@@ -40,6 +41,7 @@ data class MessageRow(
     val played: Boolean = false,
     val forwarded: Boolean = false,
     val sendFailed: Boolean = false,
+    val sendPending: Boolean = false,
     val reactions: String = "",
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
@@ -119,7 +121,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
 
     private val ctx: Context = context.applicationContext
 
@@ -236,6 +238,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
                 "sender_name TEXT NOT NULL DEFAULT ''," +
                 "played INTEGER NOT NULL DEFAULT 0," +
                 "send_failed INTEGER NOT NULL DEFAULT 0," +
+                "send_pending INTEGER NOT NULL DEFAULT 0," +
                 "forwarded INTEGER NOT NULL DEFAULT 0," +
                 "latitude REAL NOT NULL DEFAULT 0, longitude REAL NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(chat_id, id))"
@@ -404,6 +407,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
         }
         if (oldVersion < 30) {
             db.execSQL(CREATE_SCROLL)
+        }
+        if (oldVersion < 31) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN send_pending INTEGER NOT NULL DEFAULT 0")
         }
     }
 
@@ -707,7 +713,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
     // how a played state read from the server goes missing without a trace.
     fun setPlayed(chatId: String, msgId: String): Int =
         writableDatabase.compileStatement(
-            "UPDATE messages SET played=1, send_failed=0 WHERE chat_id=? AND id=?"
+            "UPDATE messages SET played=1, send_failed=0, send_pending=0 WHERE chat_id=? AND id=?"
         ).use {
             it.bindString(1, chatId)
             it.bindString(2, msgId)
@@ -824,7 +830,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
     // the red marker for good, and tapping it sent them a second copy.
     fun markMessageRead(chatId: String, msgId: String) {
         writableDatabase.execSQL(
-            "UPDATE messages SET is_read=1, send_failed=0 WHERE chat_id=? AND id=?",
+            "UPDATE messages SET is_read=1, send_failed=0, send_pending=0 WHERE chat_id=? AND id=?",
             arrayOf(chatId, msgId)
         )
     }
@@ -875,7 +881,82 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
 
     fun setSendFailed(chatId: String, msgId: String) {
         writableDatabase.execSQL(
-            "UPDATE messages SET send_failed=1 WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+            "UPDATE messages SET send_failed=1, send_pending=0 WHERE chat_id=? AND id=?",
+            arrayOf(chatId, msgId)
+        )
+    }
+
+    // The row the user sees the instant they hit send, before any transport has
+    // been asked anything. Not filtered through suppressed(): a chat the user
+    // deleted and is now typing into is a chat they want back, and the send
+    // would otherwise vanish without a trace.
+    fun stageOutgoing(m: MessageRow) {
+        deletedChats.remove(m.chatId)
+        writableDatabase.transact {
+            execSQL("DELETE FROM deleted_chats WHERE id=?", arrayOf(m.chatId))
+            execSQL("INSERT OR IGNORE INTO chats(id) VALUES(?)", arrayOf(m.chatId))
+            execSQL(
+                "REPLACE INTO messages(chat_id, id, sender_id, text, from_me, time_sent, is_read, " +
+                    "msg_type, file_id, file_path, file_status, quoted_id, quoted_text, quoted_type, " +
+                    "latitude, longitude, send_pending) VALUES(?,?,?,?,1,?,0,?,'',?,?,?,?,?,?,?,1)",
+                arrayOf(
+                    m.chatId, m.id, m.senderId, m.text, m.timeSent, m.msgType, m.filePath,
+                    m.fileStatus, m.quotedId, m.quotedText, m.quotedType, m.latitude, m.longitude
+                )
+            )
+        }
+    }
+
+    fun setSendPending(chatId: String, msgId: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET send_pending=1, send_failed=0 WHERE chat_id=? AND id=?",
+            arrayOf(chatId, msgId)
+        )
+    }
+
+    fun clearSendPending(chatId: String, msgId: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET send_pending=0 WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+        )
+    }
+
+    // Telegram assigns the id itself, so the staged row is re-keyed to whatever
+    // TDLib answered with. Reactions move with it or they would be orphaned.
+    //
+    // A row already under the new id means the protocol's own copy got here
+    // first — it is the authoritative one, so the staged row is dropped instead
+    // of overwriting it, which would have replaced a sent message with a row
+    // still marked unsent.
+    fun renameMessage(chatId: String, oldId: String, newId: String) = writableDatabase.transact {
+        val taken = queryFirst(
+            "SELECT 1 FROM messages WHERE chat_id=? AND id=? LIMIT 1", arrayOf(chatId, newId)
+        ) { true } ?: false
+        if (taken) {
+            execSQL("DELETE FROM messages WHERE chat_id=? AND id=?", arrayOf(chatId, oldId))
+            execSQL("DELETE FROM reactions WHERE chat_id=? AND msg_id=?", arrayOf(chatId, oldId))
+            return@transact
+        }
+        execSQL(
+            "UPDATE messages SET id=? WHERE chat_id=? AND id=?", arrayOf(newId, chatId, oldId)
+        )
+        execSQL(
+            "UPDATE reactions SET msg_id=? WHERE chat_id=? AND msg_id=?",
+            arrayOf(newId, chatId, oldId)
+        )
+    }
+
+    // A send in flight cannot survive the process: nothing is left to report its
+    // outcome, so it becomes the user's to retry rather than a bubble stuck
+    // ticking forever.
+    //
+    // Except a Telegram message TDLib has already accepted — its send queue
+    // outlives this process and it will deliver and report on the next start, so
+    // flagging those offered a retry that sent the peer a second copy. A row
+    // still under its staged id never reached TDLib and is ours to fail.
+    fun failStalePending() {
+        writableDatabase.execSQL(
+            "UPDATE messages SET send_pending=0, send_failed=1 WHERE send_pending=1 " +
+                "AND NOT (chat_id LIKE 'tg:%' AND id NOT LIKE 'local:%')"
         )
     }
 
@@ -910,6 +991,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
             "COALESCE(lm.from_me,0) AS last_from_me," +
             "COALESCE(lm.is_read,0) AS last_read," +
             "COALESCE(lm.send_failed,0) AS last_failed," +
+            "COALESCE(lm.send_pending,0) AS last_pending," +
             "c.muted " +
             "FROM chats c LEFT JOIN contacts ct ON ct.id=c.id " +
             "LEFT JOIN messages lm ON lm.rowid=(" +
@@ -932,7 +1014,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
             lastFromMe = it.getInt(8) != 0 && it.getString(4).isNullOrEmpty(),
             lastRead = it.getInt(9) != 0,
             lastFailed = it.getInt(10) != 0,
-            muted = it.getInt(11) != 0
+            lastPending = it.getInt(11) != 0,
+            muted = it.getInt(12) != 0
         )
     })
 
@@ -951,7 +1034,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
     private fun messageColumns(src: String) =
         "SELECT id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, " +
             "file_status, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
-            "latitude, longitude, send_failed," +
+            "latitude, longitude, send_failed, send_pending," +
             "(SELECT GROUP_CONCAT(emoji) FROM reactions r " +
             "WHERE r.chat_id=$src.chat_id AND r.msg_id=$src.id) AS reactions "
 
@@ -967,7 +1050,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
         forwarded = it.getInt(15) != 0, quotedType = it.getString(16),
         latitude = it.getDouble(17), longitude = it.getDouble(18),
         sendFailed = it.getInt(19) != 0,
-        reactions = it.getString(20) ?: ""
+        sendPending = it.getInt(20) != 0,
+        reactions = it.getString(21) ?: ""
     )
 
     fun messagesByIds(chatId: String, ids: Collection<String>): List<MessageRow> {

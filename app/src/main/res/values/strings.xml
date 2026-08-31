@@ -275,6 +275,7 @@
     <string name="share_failed">Could not read the shared file</string>
     <string name="send_failed">Send failed</string>
     <string name="resend_not_possible">This message can\'t be sent again</string>
+    <string name="resend">Send again</string>
     <string name="service_notification">Connected</string>
     <string name="about">About</string>
     <string name="about_message">Version %1$s (build %2$d)\n\nA minimal native Android messenger for Telegram, Signal and WhatsApp in one chat list.\n\nhttps://github.com/fulalas/unichat</string>

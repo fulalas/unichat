@@ -430,15 +430,22 @@ object Tg {
             "updateMessageSendSucceeded" -> {
                 val msg = obj.getJSONObject("message")
                 val oldId = obj.getLong("old_message_id")
-                Bridge.db.deleteMessage(idFor(msg.getLong("chat_id")), oldId.toString())
+                val chatId = idFor(msg.getLong("chat_id"))
+                // Telegram only queues on sendMessage, so this is the first
+                // word that the message actually left — the row the app staged
+                // has been marked unsent since the user typed it.
+                Bridge.onMessageSendOk(chatId, oldId.toString())
+                Bridge.db.deleteMessage(chatId, oldId.toString())
                 storeMessage(msg)
             }
             "updateMessageSendFailed" -> {
                 val msg = obj.getJSONObject("message")
+                // No toast here: onMessageSendFailed raises one for the first
+                // failure only, and this one fired again for each of the
+                // automatic retries behind it.
                 Bridge.onMessageSendFailed(
                     idFor(msg.getLong("chat_id")), obj.getLong("old_message_id").toString()
                 )
-                Bridge.toastUi(R.string.send_failed)
             }
             "updateDeleteMessages" -> {
                 // is_permanent=false events are cache drops, not real deletions
@@ -756,6 +763,17 @@ object Tg {
     private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
         val parsed = parseMessage(msg) ?: return
         val row = parsed.row
+        // TDLib files its own copy of a message it has not sent yet and reports
+        // it here, which would sit beside the row the app staged when the user
+        // hit send. The staged row is re-keyed to TDLib's id as soon as
+        // sendMessage answers, so "no row under this id" means that answer has
+        // not landed yet and this update is the duplicate, not the original.
+        if (row.fromMe && msg.optJSONObject("sending_state")
+                ?.optString("@type") == "messageSendingStatePending" &&
+            !Bridge.db.hasMessage(row.chatId, row.id)
+        ) {
+            return
+        }
         Bridge.ingestMessage(
             row,
             notify = notify,
@@ -1031,18 +1049,24 @@ object Tg {
             JSONObject().put("@type", "inputMessageReplyToMessage").put("message_id", it)
         }
 
-    private fun sendMessage(chatId: String, content: JSONObject, quotedId: String = ""): Boolean {
+    // Returns the id TDLib filed the message under, or "" if the request itself
+    // failed. TDLib mints its own ids and takes none, so the app's staged row is
+    // re-keyed to this one; the message is not sent yet — that is
+    // updateMessageSendSucceeded.
+    private fun sendMessage(chatId: String, content: JSONObject, quotedId: String = ""): String {
         // A share sheet can start this process and reach a send before TDLib has
         // opened its database; until then every request is answered
         // "Unauthorized", and the shared file was dropped on the floor. Bounded
         // well under the 20s default: sends are dispatched on Bridge's single
         // send thread, so this wait holds up every other chat's sends too.
-        if (!awaitReady(6_000)) return false
+        if (!awaitReady(6_000)) return ""
         val req = JSONObject().put("@type", "sendMessage")
             .put("chat_id", chatIdOf(chatId))
             .put("input_message_content", content)
         replyTo(quotedId)?.let { req.put("reply_to", it) }
-        return request(req) != null
+        val sent = request(req) ?: return ""
+        val id = sent.optLong("id")
+        return if (id != 0L) id.toString() else ""
     }
 
     // Telegram keeps bold/italic in entities beside the text, WhatsApp keeps
@@ -1177,7 +1201,7 @@ object Tg {
     fun sendText(
         chatId: String, text: String, quotedId: String = "",
         mentions: List<Mention> = emptyList(),
-    ): Boolean = sendMessage(
+    ): String = sendMessage(
         chatId,
         JSONObject().put("@type", "inputMessageText")
             .put("text", formattedText(text, mentions)),
@@ -1201,7 +1225,7 @@ object Tg {
     fun sendImage(
         chatId: String, path: String, caption: String, quotedId: String = "",
         viewOnce: Boolean = false,
-    ): Boolean =
+    ): String =
         sendMessage(
             chatId,
             selfDestruct(
@@ -1219,7 +1243,7 @@ object Tg {
     fun sendVideo(
         chatId: String, path: String, caption: String, quotedId: String = "",
         viewOnce: Boolean = false,
-    ): Boolean =
+    ): String =
         sendMessage(
             chatId,
             selfDestruct(
@@ -1236,7 +1260,7 @@ object Tg {
             quotedId,
         )
 
-    fun sendAudio(chatId: String, path: String, durationSeconds: Int, quotedId: String = "", waveform: ByteArray = ByteArray(0)): Boolean =
+    fun sendAudio(chatId: String, path: String, durationSeconds: Int, quotedId: String = "", waveform: ByteArray = ByteArray(0)): String =
         sendMessage(
             chatId,
             JSONObject().put("@type", "inputMessageVoiceNote")
@@ -1258,7 +1282,7 @@ object Tg {
     // that internal name. The link/copy made here lives in a per-send directory
     // that Bridge.cleanStaleCache reclaims by age — the upload continues after
     // this call returns, so it cannot be deleted here.
-    fun sendDocument(chatId: String, path: String, fileName: String = "", quotedId: String = ""): Boolean {
+    fun sendDocument(chatId: String, path: String, fileName: String = "", quotedId: String = ""): String {
         val src = java.io.File(path)
         val safe = safeDisplayFileName(fileName.ifEmpty { src.name })
         val sendPath = if (safe == src.name) path else namedCopy(src, safe) ?: path
@@ -1291,7 +1315,7 @@ object Tg {
         }
     }
 
-    fun sendLocation(chatId: String, lat: Double, lng: Double): Boolean = sendMessage(
+    fun sendLocation(chatId: String, lat: Double, lng: Double): String = sendMessage(
         chatId,
         JSONObject().put("@type", "inputMessageLocation")
             .put(
@@ -1303,7 +1327,7 @@ object Tg {
     // TDLib takes the card's fields directly, so only the first number travels
     // as the contact's own — the rest ride along in the vCard, which is what
     // Telegram itself does with a multi-number card.
-    fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean {
+    fun sendContact(chatId: String, name: String, numbers: List<String>): String {
         val parts = name.trim().split(" ", limit = 2)
         return sendMessage(
             chatId,
@@ -1739,6 +1763,7 @@ object Tg {
         var changed = false
         var from = 0L
         var round = 0
+        var reachedEnd = false
         while (remaining.isNotEmpty() && round < LISTENED_PAGES) {
             round++
             val res = request(
@@ -1752,7 +1777,7 @@ object Tg {
                     .put("from_message_id", from).put("offset", 0).put("limit", 100)
             ) ?: break
             val msgs = res.optJSONArray("messages") ?: break
-            if (msgs.length() == 0) break
+            if (msgs.length() == 0) { reachedEnd = true; break }
             var last = 0L
             for (i in 0 until msgs.length()) {
                 val m = msgs.optJSONObject(i) ?: continue
@@ -1763,15 +1788,18 @@ object Tg {
                 if (m.optJSONObject("content")?.optBoolean("is_listened") != true) continue
                 if (Bridge.db.setPlayed(chatId, msgId) > 0) changed = true
             }
-            if (last == 0L || last <= oldest) break
+            if (last == 0L || last <= oldest) { reachedEnd = true; break }
             // The answer's own cursor: from_message_id is inclusive at offset 0,
             // so reusing the last id re-read one message per page and a page of
             // exactly that message could never advance.
             from = res.optLong("next_from_message_id").takeIf { it != 0L } ?: last
         }
-        // Only a completed walk counts: a timed-out one used to disable the
-        // repair for this chat for the rest of the run.
-        if (remaining.isEmpty() || round < LISTENED_PAGES) listenedSwept.add(chatId)
+        // Only a walk that reached the end of the chat counts, which is what
+        // [reachedEnd] records. Reading it off the round counter instead marked
+        // the chat swept when a request timed out or came back malformed on the
+        // FIRST page — disabling the repair for the rest of the run, the very
+        // thing the check was there to prevent.
+        if (remaining.isEmpty() || reachedEnd) listenedSwept.add(chatId)
         return changed
     }
 

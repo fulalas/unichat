@@ -108,6 +108,7 @@ object Bridge : EventListener {
     }
 
     @Volatile private var warmingUp = false
+    private var pendingSwept = false
 
     @Synchronized
     fun init(context: Context): Boolean {
@@ -118,6 +119,13 @@ object Bridge : EventListener {
         Notifications.ensureChannel(appContext)
         db = Db(appContext)
         db.clearStaleDownloads()
+        // Once per process. init() re-runs its whole body on every caller while
+        // the WhatsApp store refuses to open, and a second sweep would flag a
+        // Signal or Telegram send that is in flight right now.
+        if (!pendingSwept) {
+            pendingSwept = true
+            db.failStalePending()
+        }
         Tg.init(appContext)
         val dataDir = appContext.filesDir.absolutePath + "/wm"
         connId = Wmbridge.init(dataDir, this)
@@ -182,25 +190,44 @@ object Bridge : EventListener {
 
     private fun isTg(chatId: String) = Tg.isTgId(chatId)
 
+    /**
+     * Every send takes the id its row was already staged under and answers with
+     * the id the message ended up carrying, or "" if it never left. They differ
+     * only where the protocol mints ids itself (Telegram), and then the row is
+     * re-keyed — see [runSend].
+     */
     private interface Protocol {
         fun sendText(
-            chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
-        ): Boolean
+            chatId: String, msgId: String, text: String, quoted: MessageRow?,
+            mentions: List<Mention>,
+        ): String
         fun sendImage(
-            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
-        ): Boolean
-        fun sendVideo(
-            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
-        ): Boolean
-        fun sendAudio(
-            chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
             viewOnce: Boolean,
-        ): Boolean
+        ): String
+        fun sendVideo(
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
+            viewOnce: Boolean,
+        ): String
+        fun sendAudio(
+            chatId: String, msgId: String, path: String, seconds: Int, quoted: MessageRow?,
+            waveform: ByteArray, viewOnce: Boolean,
+        ): String
         fun sendDocument(
-            chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
-        ): Boolean
-        fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean
-        fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean
+            chatId: String, msgId: String, path: String, name: String, mime: String,
+            quoted: MessageRow?,
+        ): String
+        fun sendLocation(chatId: String, msgId: String, latitude: Double, longitude: Double): String
+        fun sendContact(chatId: String, msgId: String, name: String, numbers: List<String>): String
+
+        /** "" when the protocol will not take an id of ours; [runSend] then
+         *  re-keys the row to whatever the send answered with. */
+        fun newMessageId(): String
+
+        /** True when a send returning means the server took it. Telegram only
+         *  queues at that point and confirms later, via
+         *  updateMessageSendSucceeded. */
+        val ackOnSend: Boolean
 
         fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean
         val editWindowSeconds: Long
@@ -264,35 +291,58 @@ object Bridge : EventListener {
     // deliberate no-ops, so a chat degrades instead of failing.
     private object SgTransport : Protocol {
         override fun sendText(
-            chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
-        ): Boolean = Signal.sendText(chatId, text, quoted)
+            chatId: String, msgId: String, text: String, quoted: MessageRow?,
+            mentions: List<Mention>,
+        ): String = Signal.sendText(chatId, msgId, text, quoted)
 
         // Signal has no view-once, and quoting is not wired up yet, so both are
         // ignored rather than refused: sending without the decoration beats
         // dropping the message.
         override fun sendImage(
-            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
-        ): Boolean = Signal.sendAttachment(chatId, path, caption, mimeOfPath(path, "image/jpeg"))
-        override fun sendVideo(
-            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
-        ): Boolean = Signal.sendAttachment(chatId, path, caption, mimeOfPath(path, "video/mp4"))
-        override fun sendAudio(
-            chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
             viewOnce: Boolean,
-        ): Boolean = Signal.sendAttachment(
-            chatId, path, "", mimeOfPath(path, "audio/aac"), voiceNote = true
+        ): String =
+            Signal.sendAttachment(chatId, msgId, path, caption, mimeOfPath(path, "image/jpeg"))
+        override fun sendVideo(
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
+            viewOnce: Boolean,
+        ): String =
+            Signal.sendAttachment(chatId, msgId, path, caption, mimeOfPath(path, "video/mp4"))
+        override fun sendAudio(
+            chatId: String, msgId: String, path: String, seconds: Int, quoted: MessageRow?,
+            waveform: ByteArray, viewOnce: Boolean,
+        ): String = Signal.sendAttachment(
+            chatId, msgId, path, "", mimeOfPath(path, "audio/aac"), voiceNote = true
         )
         override fun sendDocument(
-            chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
-        ): Boolean = Signal.sendAttachment(chatId, path, "", mime.ifEmpty { "application/octet-stream" })
+            chatId: String, msgId: String, path: String, name: String, mime: String,
+            quoted: MessageRow?,
+        ): String = Signal.sendAttachment(
+            chatId, msgId, path, "", mime.ifEmpty { "application/octet-stream" }
+        )
         // Signal carries no location message, so it goes as the map link the
         // Signal app itself falls back to, in the one form signal.go parses
         // back into coordinates.
-        override fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
-            Signal.sendLocation(chatId, latitude, longitude)
+        override fun sendLocation(
+            chatId: String, msgId: String, latitude: Double, longitude: Double,
+        ): String = Signal.sendLocation(chatId, msgId, latitude, longitude)
 
-        override fun sendContact(chatId: String, name: String, numbers: List<String>) =
-            Signal.sendContact(chatId, name, numbers)
+        override fun sendContact(
+            chatId: String, msgId: String, name: String, numbers: List<String>,
+        ): String = Signal.sendContact(chatId, msgId, name, numbers)
+
+        // A Signal message IS its send timestamp, so the id has to be one no
+        // other message can claim; two sends inside the same millisecond would
+        // otherwise share a row.
+        override fun newMessageId(): String {
+            while (true) {
+                val prev = sgLastStamp.get()
+                val next = maxOf(System.currentTimeMillis(), prev + 1)
+                if (sgLastStamp.compareAndSet(prev, next)) return next.toString()
+            }
+        }
+
+        override val ackOnSend = true
 
         override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long) =
             Signal.edit(chatId, msgId, newText)
@@ -376,62 +426,75 @@ object Bridge : EventListener {
 
     private object WaTransport : Protocol {
         override fun sendText(
-            chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
-        ): Boolean {
+            chatId: String, msgId: String, text: String, quoted: MessageRow?,
+            mentions: List<Mention>,
+        ): String {
             val (body, jids) = waMentionText(text, mentions)
             val mentioned = jids.joinToString(",")
             if (quoted == null) {
-                return Wmbridge.sendTextMessage(connId, chatId, body, mentioned).isNotEmpty()
+                return Wmbridge.sendTextMessage(connId, chatId, msgId, body, mentioned)
             }
             return Wmbridge.sendTextReply(
-                connId, chatId, body, quoted.id, quotedPreview(quoted), quoted.senderId, mentioned
-            ).isNotEmpty()
+                connId, chatId, msgId, body, quoted.id, quotedPreview(quoted), quoted.senderId,
+                mentioned
+            )
         }
 
         override fun sendImage(
-            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
-        ): Boolean {
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
+            viewOnce: Boolean,
+        ): String {
             val (qid, qtext, qsender) = quoteArgs(quoted)
             return Wmbridge.sendImageMessage(
-                connId, chatId, path, caption, qid, qtext, qsender, viewOnce
-            ).isNotEmpty()
+                connId, chatId, msgId, path, caption, qid, qtext, qsender, viewOnce
+            )
         }
 
         override fun sendVideo(
-            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
-        ): Boolean {
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
+            viewOnce: Boolean,
+        ): String {
             val (qid, qtext, qsender) = quoteArgs(quoted)
             return Wmbridge.sendVideoMessage(
-                connId, chatId, path, caption, qid, qtext, qsender, viewOnce
-            ).isNotEmpty()
+                connId, chatId, msgId, path, caption, qid, qtext, qsender, viewOnce
+            )
         }
 
         override fun sendAudio(
-            chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
-            viewOnce: Boolean,
-        ): Boolean {
+            chatId: String, msgId: String, path: String, seconds: Int, quoted: MessageRow?,
+            waveform: ByteArray, viewOnce: Boolean,
+        ): String {
             val (qid, qtext, qsender) = quoteArgs(quoted)
             return Wmbridge.sendAudioMessage(
-                connId, chatId, path, seconds.toLong(), qid, qtext, qsender, waveform, viewOnce
-            ).isNotEmpty()
+                connId, chatId, msgId, path, seconds.toLong(), qid, qtext, qsender, waveform,
+                viewOnce
+            )
         }
 
         override fun sendDocument(
-            chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
-        ): Boolean {
+            chatId: String, msgId: String, path: String, name: String, mime: String,
+            quoted: MessageRow?,
+        ): String {
             val (qid, qtext, qsender) = quoteArgs(quoted)
             return Wmbridge.sendDocumentMessage(
-                connId, chatId, path, name, mime, qid, qtext, qsender
-            ).isNotEmpty()
+                connId, chatId, msgId, path, name, mime, qid, qtext, qsender
+            )
         }
 
-        override fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
-            Wmbridge.sendLocation(connId, chatId, latitude, longitude).isNotEmpty()
+        override fun sendLocation(
+            chatId: String, msgId: String, latitude: Double, longitude: Double,
+        ): String = Wmbridge.sendLocation(connId, chatId, msgId, latitude, longitude)
 
-        override fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean =
-            Wmbridge.sendContactMessage(
-                connId, chatId, name, PhoneBook.vcard(name, numbers)
-            ).isNotEmpty()
+        override fun sendContact(
+            chatId: String, msgId: String, name: String, numbers: List<String>,
+        ): String = Wmbridge.sendContactMessage(
+            connId, chatId, msgId, name, PhoneBook.vcard(name, numbers)
+        )
+
+        override fun newMessageId(): String =
+            if (connId < 0) "" else Wmbridge.newMessageId(connId)
+
+        override val ackOnSend = true
 
         override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean =
             Wmbridge.editMessage(connId, chatId, msgId, newText, origTimeSent)
@@ -541,33 +604,42 @@ object Bridge : EventListener {
 
     private object TgTransport : Protocol {
         override fun sendText(
-            chatId: String, text: String, quoted: MessageRow?, mentions: List<Mention>,
-        ): Boolean = Tg.sendText(chatId, text, quoted?.id ?: "", mentions)
+            chatId: String, msgId: String, text: String, quoted: MessageRow?,
+            mentions: List<Mention>,
+        ): String = Tg.sendText(chatId, text, quoted?.id ?: "", mentions)
 
         override fun sendImage(
-            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
-        ): Boolean = Tg.sendImage(chatId, path, caption, quoted?.id ?: "", viewOnce)
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
+            viewOnce: Boolean,
+        ): String = Tg.sendImage(chatId, path, caption, quoted?.id ?: "", viewOnce)
 
         override fun sendVideo(
-            chatId: String, path: String, caption: String, quoted: MessageRow?, viewOnce: Boolean,
-        ): Boolean = Tg.sendVideo(chatId, path, caption, quoted?.id ?: "", viewOnce)
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
+            viewOnce: Boolean,
+        ): String = Tg.sendVideo(chatId, path, caption, quoted?.id ?: "", viewOnce)
 
         // viewOnce ignored: TDLib takes a self-destruct only on photo and video,
         // so viewOnceSupported never offers it for a Telegram voice note
         override fun sendAudio(
-            chatId: String, path: String, seconds: Int, quoted: MessageRow?, waveform: ByteArray,
-            viewOnce: Boolean,
-        ): Boolean = Tg.sendAudio(chatId, path, seconds, quoted?.id ?: "", waveform)
+            chatId: String, msgId: String, path: String, seconds: Int, quoted: MessageRow?,
+            waveform: ByteArray, viewOnce: Boolean,
+        ): String = Tg.sendAudio(chatId, path, seconds, quoted?.id ?: "", waveform)
 
         override fun sendDocument(
-            chatId: String, path: String, name: String, mime: String, quoted: MessageRow?,
-        ): Boolean = Tg.sendDocument(chatId, path, name, quoted?.id ?: "")
+            chatId: String, msgId: String, path: String, name: String, mime: String,
+            quoted: MessageRow?,
+        ): String = Tg.sendDocument(chatId, path, name, quoted?.id ?: "")
 
-        override fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
-            Tg.sendLocation(chatId, latitude, longitude)
+        override fun sendLocation(
+            chatId: String, msgId: String, latitude: Double, longitude: Double,
+        ): String = Tg.sendLocation(chatId, latitude, longitude)
 
-        override fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean =
-            Tg.sendContact(chatId, name, numbers)
+        override fun sendContact(
+            chatId: String, msgId: String, name: String, numbers: List<String>,
+        ): String = Tg.sendContact(chatId, name, numbers)
+
+        override fun newMessageId(): String = ""
+        override val ackOnSend = false
 
         override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean =
             Tg.editMessageText(chatId, msgId, newText)
@@ -671,16 +743,108 @@ object Bridge : EventListener {
         Wmbridge.requestPairCode(connId, phone)
     }.start()
 
+    // Its own thread, and never a transport's: the whole point of staging is
+    // that the bubble appears before anything can block. A protocol's send
+    // executor is single-threaded, so one send stuck offline for its full
+    // timeout used to hold up the NEXT message's echo for just as long.
+    private val stageExecutor = Executors.newSingleThreadExecutor()
+    private val sgLastStamp = java.util.concurrent.atomic.AtomicLong()
+    private val localIdSeq = java.util.concurrent.atomic.AtomicLong()
+
+    // Only for a protocol that will not take an id of ours, and for a WhatsApp
+    // send with no session to mint one: the row still needs a key now, and
+    // [runSend] re-keys it to the real id afterwards.
+    private const val LOCAL_ID = "local:"
+
+    // The counter restarts at 1 every process, so the run stamp is what keeps
+    // two runs' local ids apart: staging REPLACEs by (chat, id), and a plain
+    // counter handed a new send the same key as a leftover unsent row from the
+    // last run — silently deleting the message the user still had on screen.
+    private val localIdRun = java.lang.Long.toString(System.currentTimeMillis(), 36)
+
+    private fun mintId(chatId: String): String = proto(chatId).newMessageId()
+        .ifEmpty { LOCAL_ID + localIdRun + "-" + localIdSeq.incrementAndGet() }
+
+    private fun wireId(msgId: String) = if (msgId.startsWith(LOCAL_ID)) "" else msgId
+
+    // A Signal message IS its send timestamp in milliseconds, so the row's time
+    // has to be read off the id rather than taken from the clock a moment later.
+    private fun stagedTime(chatId: String, msgId: String): Long =
+        if (Signal.isSgId(chatId)) (msgId.toLongOrNull() ?: 0L) / 1000
+        else System.currentTimeMillis() / 1000
+
+    private fun stage(
+        chatId: String, msgId: String, text: String, msgType: String = "",
+        filePath: String = "", quoted: MessageRow? = null,
+        latitude: Double = 0.0, longitude: Double = 0.0,
+    ): MessageRow {
+        val row = MessageRow(
+            id = msgId, chatId = chatId, senderId = selfIdOf(chatId), text = text,
+            fromMe = true, timeSent = stagedTime(chatId, msgId), isRead = false,
+            msgType = msgType, filePath = filePath,
+            // The bytes are already on this device, so the bubble must never
+            // offer to download what it is looking at.
+            fileStatus = if (filePath.isEmpty()) 0 else 2,
+            quotedId = quoted?.id ?: "", quotedText = quoted?.let { quotedPreview(it) } ?: "",
+            quotedType = quoted?.msgType ?: "",
+            latitude = latitude, longitude = longitude, sendPending = true,
+        )
+        db.stageOutgoing(row)
+        // Without this the chat keeps its old last_time and the message the user
+        // just sent leaves the chat list ordered as if nothing had happened.
+        db.bumpChat(chatId, row.timeSent)
+        notifyChat(chatId)
+        notifyChatsChanged()
+        return row
+    }
+
+    private fun runSend(row: MessageRow, send: (String) -> String): Boolean {
+        val resultId = try {
+            send(wireId(row.id))
+        } catch (e: Exception) {
+            Log.w(TAG, "send threw for ${row.chatId}", e)
+            ""
+        }
+        if (resultId.isEmpty()) {
+            onMessageSendFailed(row.chatId, row.id)
+            return false
+        }
+        if (resultId != row.id) {
+            // The protocol settled this send before its own answer got back
+            // here, so its copy of the row is already stored under a later id;
+            // re-keying to the one it has finished with would leave a duplicate
+            // marked unsent that nothing would ever clear.
+            if (settledBeforeRekey == row.chatId + KEY_SEP + resultId) {
+                settledBeforeRekey = ""
+                forgetRetry(row.chatId, row.id)
+                db.deleteMessage(row.chatId, row.id)
+                notifyChat(row.chatId)
+                return true
+            }
+            db.renameMessage(row.chatId, row.id, resultId)
+            moveRetryKey(row.chatId, row.id, resultId)
+        }
+        // Telegram has only queued the message at this point; its
+        // updateMessageSendSucceeded is what clears the mark.
+        if (proto(row.chatId).ackOnSend) onMessageSendOk(row.chatId, resultId)
+        notifyChat(row.chatId)
+        return true
+    }
+
     fun sendText(chatId: String, text: String, mentions: List<Mention> = emptyList()) =
-        protoExecutor(chatId).execute {
-            if (!proto(chatId).sendText(chatId, text, null, mentions)) onSendFailed("text", chatId)
+        stageExecutor.execute {
+            val row = stage(chatId, mintId(chatId), text)
+            protoExecutor(chatId).execute {
+                runSend(row) { id -> proto(chatId).sendText(chatId, id, text, null, mentions) }
+            }
         }
 
     fun sendReply(
         chatId: String, text: String, quoted: MessageRow, mentions: List<Mention> = emptyList(),
-    ) = protoExecutor(chatId).execute {
-        if (!proto(chatId).sendText(chatId, text, quoted, mentions)) {
-            Log.w(TAG, "reply failed for chat $chatId")
+    ) = stageExecutor.execute {
+        val row = stage(chatId, mintId(chatId), text, quoted = quoted)
+        protoExecutor(chatId).execute {
+            runSend(row) { id -> proto(chatId).sendText(chatId, id, text, quoted, mentions) }
         }
     }
 
@@ -725,12 +889,14 @@ object Bridge : EventListener {
     }
 
     fun deleteForMe(chatId: String, msgId: String) = protoExecutor(chatId).execute {
+        forgetRetry(chatId, msgId)
         proto(chatId).deleteForMe(chatId, msgId)
         db.deleteMessage(chatId, msgId)
         notifyChat(chatId)
     }
 
     fun deleteChat(chatId: String, deleteMedia: Boolean) = executor.execute {
+        forgetChatRetries(chatId)
         val mediaPaths = if (deleteMedia) db.chatMediaPaths(chatId) else emptyList()
         db.deleteChat(chatId)
         db.clearScroll(chatId)
@@ -818,34 +984,40 @@ object Bridge : EventListener {
     private fun quoteArgs(q: MessageRow?): Triple<String, String, String> =
         Triple(q?.id ?: "", q?.let { quotedPreview(it) } ?: "", q?.senderId ?: "")
 
-    private fun sendMediaBlocking(
-        kind: String, chatId: String, filePath: String, send: (Protocol) -> Boolean,
-    ) {
-        val p = proto(chatId)
-        val ok = send(p)
-        if (!ok) onSendFailed(kind, chatId)
+    private fun sendMediaBlocking(row: MessageRow, send: (Protocol, String) -> String): Boolean {
+        val p = proto(row.chatId)
+        val ok = runSend(row) { id -> send(p, id) }
         // Only ever inside cacheDir — forwards re-send straight from the
         // permanent media dir, which must survive. Kept when the send failed:
         // the row now stays on screen as retryable, and deleting the file under
         // it left a bubble that could never be sent again.
-        if (ok && p.consumesStagingInput && isStagingPath(filePath)) java.io.File(filePath).delete()
+        if (ok && p.consumesStagingInput && isStagingPath(row.filePath)) {
+            java.io.File(row.filePath).delete()
+        }
+        return ok
     }
 
     fun sendAudio(
         chatId: String, filePath: String, durationSeconds: Int,
         quoted: MessageRow? = null, waveform: ByteArray = ByteArray(0),
         viewOnce: Boolean = false,
-    ) = mediaExecutor.execute {
-        sendMediaBlocking("audio", chatId, filePath) {
-            it.sendAudio(chatId, filePath, durationSeconds, quoted, waveform, viewOnce)
+    ) = stageExecutor.execute {
+        val row = stage(
+            chatId, mintId(chatId), TimeFormat.mmss(durationSeconds), "audio", filePath, quoted
+        )
+        mediaExecutor.execute {
+            sendMediaBlocking(row) { p, id ->
+                p.sendAudio(chatId, id, filePath, durationSeconds, quoted, waveform, viewOnce)
+            }
         }
     }
 
     fun sendFile(
         chatId: String, filePath: String, fileName: String, mimeType: String,
         caption: String = "", quoted: MessageRow? = null, viewOnce: Boolean = false,
-    ) = mediaExecutor.execute {
-        sendFileBlocking(chatId, filePath, fileName, mimeType, caption, quoted, viewOnce)
+    ) = stageExecutor.execute {
+        val row = stageFile(chatId, filePath, fileName, mimeType, caption, quoted)
+        mediaExecutor.execute { sendFileBlocking(row, fileName, mimeType, caption, quoted, viewOnce) }
     }
 
     // On [batchExecutor], not mediaExecutor's two workers, where a small file
@@ -854,27 +1026,40 @@ object Bridge : EventListener {
     fun sendFileInOrder(
         chatId: String, filePath: String, fileName: String, mimeType: String,
         quoted: MessageRow? = null, viewOnce: Boolean = false,
-    ) = batchExecutor.execute {
-        sendFileBlocking(chatId, filePath, fileName, mimeType, "", quoted, viewOnce)
+    ) = stageExecutor.execute {
+        val row = stageFile(chatId, filePath, fileName, mimeType, "", quoted)
+        batchExecutor.execute { sendFileBlocking(row, fileName, mimeType, "", quoted, viewOnce) }
+    }
+
+    // The staged text has to be the one the bubble reads back: a document's row
+    // text IS its file name, and a caption is the picture's body.
+    private fun stageFile(
+        chatId: String, filePath: String, fileName: String, mimeType: String,
+        caption: String, quoted: MessageRow?,
+    ): MessageRow = when {
+        mimeType.startsWith("image/") ->
+            stage(chatId, mintId(chatId), caption, "image", filePath, quoted)
+        mimeType.startsWith("video/") ->
+            stage(chatId, mintId(chatId), caption, "video", filePath, quoted)
+        else -> stage(chatId, mintId(chatId), fileName, "document", filePath, quoted)
     }
 
     private fun sendFileBlocking(
-        chatId: String, filePath: String, fileName: String, mimeType: String,
+        row: MessageRow, fileName: String, mimeType: String,
         caption: String, quoted: MessageRow?, viewOnce: Boolean,
     ) {
-        when {
-            mimeType.startsWith("image/") ->
-                sendMediaBlocking("image", chatId, filePath) {
-                    it.sendImage(chatId, filePath, caption, quoted, viewOnce)
-                }
-            mimeType.startsWith("video/") ->
-                sendMediaBlocking("video", chatId, filePath) {
-                    it.sendVideo(chatId, filePath, caption, quoted, viewOnce)
-                }
-            else ->
-                sendMediaBlocking("document", chatId, filePath) {
-                    it.sendDocument(chatId, filePath, fileName, mimeType, quoted)
-                }
+        val chatId = row.chatId
+        val filePath = row.filePath
+        when (row.msgType) {
+            "image" -> sendMediaBlocking(row) { p, id ->
+                p.sendImage(chatId, id, filePath, caption, quoted, viewOnce)
+            }
+            "video" -> sendMediaBlocking(row) { p, id ->
+                p.sendVideo(chatId, id, filePath, caption, quoted, viewOnce)
+            }
+            else -> sendMediaBlocking(row) { p, id ->
+                p.sendDocument(chatId, id, filePath, fileName, mimeType, quoted)
+            }
         }
     }
 
@@ -896,72 +1081,137 @@ object Bridge : EventListener {
     fun reactionsOf(msg: MessageRow): List<Pair<String, String>> =
         proto(msg.chatId).reactionSenders(msg) ?: db.reactionsOf(msg.chatId, msg.id)
 
-    // Retries as a NEW message: a protocol keys a message by the timestamp it
-    // stamps on it, so a retry can never reuse the old row. False for what the
-    // row cannot rebuild — media whose local file is gone, or a contact card
-    // with no number left in its body.
+    // The row keeps its id and is re-sent in place: every protocol here either
+    // takes the id it was staged under or hands back a new one that the row is
+    // re-keyed to. False for what the row cannot rebuild — media whose local
+    // file is gone, or a contact card with no number left in its body.
     fun retrySend(msg: MessageRow): Boolean {
-        val card = msg.text.lines().filter { it.isNotBlank() }
+        if (!canResend(msg)) return false
+        // A tap is the user asking for it now, so the armed wait is dropped and
+        // the ten attempts start over from two seconds.
+        forgetRetry(msg.chatId, msg.id)
+        resend(msg.chatId, msg.id)
+        return true
+    }
+
+    private fun canResend(msg: MessageRow): Boolean {
         if (msg.msgType in NEEDS_LOCAL_FILE && !fileOnDisk(msg)) return false
         // Filtered, not raw: a body of blank lines passed a raw size check and
         // then threw on first() inside the executor, killing the process.
-        if (msg.msgType == "contact" && card.size < 2) return false
+        if (msg.msgType == "contact" && msg.text.lines().count { it.isNotBlank() } < 2) return false
+        return true
+    }
+
+    private fun resend(chatId: String, msgId: String) {
         // Two taps land on the same adapter row before it is refreshed, and the
         // second cannot see the first: without this the peer got it twice.
-        if (!retrying.add(msg.chatId + KEY_SEP + msg.id)) return true
-        batchExecutor.execute {
+        if (!retrying.add(chatId + KEY_SEP + msgId)) return
+        // Its own worker, not batchExecutor: that one carries forwards and
+        // ordered multi-file shares, and a chat's worth of failed messages
+        // retrying against a dead transport would hold every one of them up for
+        // the full send timeout, one after another.
+        retryWorker.execute {
             try {
-                // A second tap reaches here while the first one's refresh is
-                // still in flight; the row being gone is what says it is done.
-                if (!db.hasMessage(msg.chatId, msg.id)) return@execute
-                retryEchoed = false
-                retryRowId = msg.id
-                retryChat = msg.chatId
-                val ok = if (msg.msgType == "contact") {
-                    proto(msg.chatId).sendContact(msg.chatId, card.first(), card.drop(1))
-                } else {
-                    // The same dispatch a forward uses, so a retried sticker,
-                    // voice note or document keeps its type, duration and name.
-                    val quoted = msg.quotedId.takeIf { it.isNotEmpty() }
-                        ?.let { db.messagesByIds(msg.chatId, listOf(it)).firstOrNull() }
-                    val mentions = storedMentions(msg.text) { db.contactName(it) != null }
-                    forwardOneBlocking(msg.chatId, msg, quoted, mentions)
+                val msg = db.messagesByIds(chatId, listOf(msgId)).firstOrNull() ?: return@execute
+                // An attempt already in flight, or a receipt that settled it
+                // while this one waited its turn.
+                if (msg.sendPending || !msg.sendFailed) return@execute
+                if (!canResend(msg)) {
+                    retryAttempts.remove(chatId + KEY_SEP + msgId)
+                    return@execute
                 }
-                // The old row goes only once THIS retry's echo has replaced it.
-                // Deleted up front, a retry that failed before its transport
-                // wrote an echo (an offline upload, an unlinked account) took
-                // the user's message with it and left nothing but a toast; and
-                // asking the store for any own message since a second-resolution
-                // timestamp instead matched a message the user had just sent by
-                // hand, so a retry tapped in that same second deleted the unsent
-                // one with nothing to replace it.
-                if (ok || retryEchoed) db.deleteMessage(msg.chatId, msg.id)
-                if (ok && proto(msg.chatId).consumesStagingInput && isStagingPath(msg.filePath)) {
-                    java.io.File(msg.filePath).delete()
-                }
-                notifyChat(msg.chatId)
+                db.setSendPending(chatId, msgId)
+                notifyChat(chatId)
+                val quoted = msg.quotedId.takeIf { it.isNotEmpty() }
+                    ?.let { db.messagesByIds(chatId, listOf(it)).firstOrNull() }
+                val mentions = storedMentions(msg.text) { db.contactName(it) != null }
+                sendMediaBlocking(msg) { p, id -> sendRow(p, chatId, id, msg, quoted, mentions) }
             } finally {
-                retryChat = ""
-                retrying.remove(msg.chatId + KEY_SEP + msg.id)
+                retrying.remove(chatId + KEY_SEP + msgId)
             }
         }
-        return true
+    }
+
+    // The same dispatch a forward uses, so a re-sent sticker, voice note or
+    // document keeps its type, duration and name.
+    private fun sendRow(
+        p: Protocol, target: String, msgId: String, m: MessageRow, quoted: MessageRow?,
+        mentions: List<Mention>,
+    ): String = when (m.msgType) {
+        "image", "sticker" -> p.sendImage(target, msgId, m.filePath, m.text, quoted, false)
+        "video" -> p.sendVideo(target, msgId, m.filePath, m.text, quoted, false)
+        "audio" -> p.sendAudio(
+            target, msgId, m.filePath, TimeFormat.parseSeconds(m.text), quoted, ByteArray(0), false
+        )
+        // the stored text IS the document's file name; its MIME type is
+        // recovered from the extension rather than sent empty (which the
+        // bridge downgrades to application/octet-stream, leaving the
+        // recipient a generic unopenable attachment)
+        "document" -> p.sendDocument(
+            target, msgId, m.filePath, m.text, mimeOfPath(m.filePath), quoted
+        )
+        "location" -> p.sendLocation(target, msgId, m.latitude, m.longitude)
+        "contact" -> {
+            val card = m.text.lines().filter { it.isNotBlank() }
+            p.sendContact(target, msgId, card.first(), card.drop(1))
+        }
+        else -> p.sendText(target, msgId, m.text, quoted, mentions)
     }
 
     private val retrying = ConcurrentHashMap.newKeySet<String>()
 
-    // [batchExecutor] is single-threaded, so at most one retry watches at a time.
-    @Volatile private var retryChat = ""
-    @Volatile private var retryRowId = ""
-    @Volatile private var retryEchoed = false
-
     private val NEEDS_LOCAL_FILE = PICTURE_TYPES + setOf("video", "audio", "document")
 
-    // A failed media send is otherwise invisible outside logcat: the share flow
-    // has already finished by the time the upload runs.
-    private fun onSendFailed(kind: String, chatId: String) {
-        Log.w(TAG, "$kind send failed for chat $chatId")
-        toastUi(R.string.send_failed)
+    // Doubling, then held at a minute: ten attempts spread over about six
+    // minutes, which outlasts a lift, a tunnel or a wifi handover without
+    // hammering a transport that is plainly down.
+    private val RETRY_DELAYS_SECONDS = longArrayOf(2, 4, 8, 16, 32, 64, 64, 64, 64, 64)
+    private val retryScheduler = Executors.newSingleThreadScheduledExecutor()
+    private val retryWorker = Executors.newSingleThreadExecutor()
+    private val retryAttempts = ConcurrentHashMap<String, Int>()
+    private val retryTasks = ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<*>>()
+
+    private fun scheduleRetry(chatId: String, msgId: String) {
+        val key = chatId + KEY_SEP + msgId
+        // WhatsApp and Signal report one failure twice — the bridge's own event
+        // and then the empty answer the send returns — and counting both spent
+        // two rungs of the ladder per attempt: ten attempts became five, and the
+        // 2s, 8s and 32s waits were never used at all.
+        if (retryTasks.containsKey(key)) return
+        val attempt = (retryAttempts[key] ?: 0) + 1
+        retryAttempts[key] = attempt
+        // Out of attempts: the marker stays, and a tap starts the ten over.
+        if (attempt > RETRY_DELAYS_SECONDS.size) return
+        retryTasks[key] = retryScheduler.schedule(
+            { retryTasks.remove(key); resend(chatId, msgId) },
+            RETRY_DELAYS_SECONDS[attempt - 1], java.util.concurrent.TimeUnit.SECONDS
+        )
+    }
+
+    private fun cancelRetry(chatId: String, msgId: String) {
+        retryTasks.remove(chatId + KEY_SEP + msgId)?.cancel(false)
+    }
+
+    private fun forgetRetry(chatId: String, msgId: String) {
+        cancelRetry(chatId, msgId)
+        retryAttempts.remove(chatId + KEY_SEP + msgId)
+    }
+
+    // Both maps outlive the row otherwise: a deleted message left an armed wait
+    // that fired into nothing, and its attempt count behind for the whole run.
+    private fun forgetChatRetries(chatId: String) {
+        val prefix = chatId + KEY_SEP
+        retryTasks.keys.filter { it.startsWith(prefix) }
+            .forEach { retryTasks.remove(it)?.cancel(false) }
+        retryAttempts.keys.removeAll { it.startsWith(prefix) }
+    }
+
+    // Telegram re-keys the row on every attempt, so the attempt count has to
+    // follow it or each retry would look like the first.
+    private fun moveRetryKey(chatId: String, oldId: String, newId: String) {
+        val old = chatId + KEY_SEP + oldId
+        retryTasks.remove(old)?.cancel(false)
+        retryAttempts.remove(old)?.let { retryAttempts[chatId + KEY_SEP + newId] = it }
     }
 
     fun isStagingPath(filePath: String): Boolean {
@@ -1013,15 +1263,25 @@ object Bridge : EventListener {
     // place on the network — on the shared executor that stalled every WhatsApp
     // and Telegram operation queued behind them (see sgExecutor).
     fun sendLocation(chatId: String, latitude: Double, longitude: Double) =
-        protoExecutor(chatId).execute {
-            if (!proto(chatId).sendLocation(chatId, latitude, longitude)) {
-                Log.w(TAG, "location send failed for chat $chatId")
+        stageExecutor.execute {
+            val row = stage(
+                chatId, mintId(chatId), "", "location",
+                latitude = latitude, longitude = longitude
+            )
+            protoExecutor(chatId).execute {
+                runSend(row) { id -> proto(chatId).sendLocation(chatId, id, latitude, longitude) }
             }
         }
 
     fun sendContact(chatId: String, name: String, numbers: List<String>) =
-        protoExecutor(chatId).execute {
-            if (!proto(chatId).sendContact(chatId, name, numbers)) onSendFailed("contact", chatId)
+        stageExecutor.execute {
+            // Must stay the "name\nnumber…" shape the contact card is read back
+            // from (sgContactText writes the same one on the Signal side).
+            val body = (listOf(name) + numbers).joinToString("\n")
+            val row = stage(chatId, mintId(chatId), body, "contact")
+            protoExecutor(chatId).execute {
+                runSend(row) { id -> proto(chatId).sendContact(chatId, id, name, numbers) }
+            }
         }
 
     // Each message (its upload included) is sent to completion before the next
@@ -1045,26 +1305,15 @@ object Bridge : EventListener {
     private fun forwardOneBlocking(
         target: String, m: MessageRow, quoted: MessageRow?, mentions: List<Mention> = emptyList(),
     ): Boolean {
+        // Staged inline rather than on stageExecutor: a batch has to reach the
+        // target in the order it was picked, and each send is what holds the
+        // next one back.
+        val row = stage(
+            target, mintId(target), m.text, m.msgType, m.filePath, quoted, m.latitude, m.longitude
+        )
         // cross-protocol forwards work because every send re-uploads the local
         // file, so a Telegram target takes the same paths a WhatsApp one does
-        val p = proto(target)
-        val ok = when (m.msgType) {
-            "image", "sticker" -> p.sendImage(target, m.filePath, m.text, quoted, false)
-            "video" -> p.sendVideo(target, m.filePath, m.text, quoted, false)
-            "audio" ->
-                p.sendAudio(
-                    target, m.filePath, TimeFormat.parseSeconds(m.text), quoted, ByteArray(0), false
-                )
-            // the stored text IS the document's file name; its MIME type is
-            // recovered from the extension rather than sent empty (which the
-            // bridge downgrades to application/octet-stream, leaving the
-            // recipient a generic unopenable attachment)
-            "document" -> p.sendDocument(target, m.filePath, m.text, mimeOfPath(m.filePath), quoted)
-            "location" -> p.sendLocation(target, m.latitude, m.longitude)
-            else -> p.sendText(target, m.text, quoted, mentions)
-        }
-        if (!ok) onSendFailed(m.msgType.ifEmpty { "text" }, target)
-        return ok
+        return sendMediaBlocking(row) { p, id -> sendRow(p, target, id, m, quoted, mentions) }
     }
 
     // The chat list asks per visible row, so without this memo a scroll
@@ -1971,9 +2220,6 @@ object Bridge : EventListener {
         // would create a row that can never be matched to a real message
         if (row.id.isEmpty()) { Log.w(TAG, "message with empty id for ${row.chatId}"); return }
         db.upsertMessage(row)
-        // Every protocol's own echo comes through here, which is what lets
-        // [retrySend] tell its replacement apart from any other own message.
-        if (row.fromMe && row.chatId == retryChat && row.id != retryRowId) retryEchoed = true
         afterStore()
         if (bump) db.bumpChat(row.chatId, row.timeSent)
         // A row that already carries a path has its bytes: Telegram hands one
@@ -2138,7 +2384,28 @@ object Bridge : EventListener {
         if (wiping) return
         db.setSendFailed(chatId, msgId)
         notifyChatRow(chatId, msgId)
+        val first = retryAttempts[chatId + KEY_SEP + msgId] == null
+        scheduleRetry(chatId, msgId)
+        // Once per message, not once per attempt: a send off the share sheet is
+        // otherwise invisible (that screen is gone by the time the upload runs),
+        // and ten toasts for the ten retries would be worse than none.
+        if (first && chatId != activeChatId) toastUi(R.string.send_failed)
     }
+
+    fun onMessageSendOk(chatId: String, msgId: String) {
+        if (wiping) return
+        // No row under the id the protocol just settled means the staged row has
+        // not been re-keyed to it yet: Telegram reports on its own thread and can
+        // in principle beat the sendMessage answer [runSend] is still waiting
+        // for. One field is enough — Telegram sends go out on a single thread,
+        // so only ever one of them is waiting to be re-keyed.
+        if (!db.hasMessage(chatId, msgId)) settledBeforeRekey = chatId + KEY_SEP + msgId
+        forgetRetry(chatId, msgId)
+        db.clearSendPending(chatId, msgId)
+        notifyChatRow(chatId, msgId)
+    }
+
+    @Volatile private var settledBeforeRekey = ""
 
     override fun onChatReadSelf(chatId: String, msgId: String) {
         if (wiping) return

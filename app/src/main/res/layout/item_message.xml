@@ -411,6 +411,18 @@
             </LinearLayout>
         </LinearLayout>
     </LinearLayout>
+
+    <ImageView
+        android:id="@+id/sendFailedBadge"
+        android:layout_width="26dp"
+        android:layout_height="26dp"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="-2dp"
+        android:layout_marginEnd="-2dp"
+        android:padding="4dp"
+        android:src="@drawable/ic_send_failed_badge"
+        android:contentDescription="@string/resend"
+        android:visibility="gone" />
     </FrameLayout>
 
     <TextView

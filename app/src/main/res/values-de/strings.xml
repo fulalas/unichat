@@ -269,6 +269,7 @@
     <string name="share_failed">Die geteilte Datei konnte nicht gelesen werden</string>
     <string name="send_failed">Senden fehlgeschlagen</string>
     <string name="resend_not_possible">Diese Nachricht kann nicht noch mal gesendet werden</string>
+    <string name="resend">Erneut senden</string>
     <string name="service_notification">Verbunden</string>
     <string name="about">Über</string>
     <string name="about_message">Version %1$s (Build %2$d)\n\nEin schlanker nativer Android-Messenger für Telegram, Signal und WhatsApp in einer Chat-Liste.\n\nhttps://github.com/fulalas/unichat</string>

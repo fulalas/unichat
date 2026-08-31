@@ -269,6 +269,7 @@
     <string name="share_failed">Het gedeelde bestand kon niet worden gelezen</string>
     <string name="send_failed">Versturen mislukt</string>
     <string name="resend_not_possible">Dit bericht kan niet nog een keer worden verstuurd</string>
+    <string name="resend">Opnieuw verzenden</string>
     <string name="service_notification">Verbonden</string>
     <string name="about">Over</string>
     <string name="about_message">Versie %1$s (build %2$d)\n\nEen kale, native Android-messenger voor Telegram, Signal en WhatsApp in één chatlijst.\n\nhttps://github.com/fulalas/unichat</string>

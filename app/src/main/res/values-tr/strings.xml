@@ -269,6 +269,7 @@
     <string name="share_failed">Paylaşılan dosya okunamadı</string>
     <string name="send_failed">Gönderme başarısız</string>
     <string name="resend_not_possible">Bu mesaj yeniden gönderilemez</string>
+    <string name="resend">Yeniden gönder</string>
     <string name="service_notification">Bağlı</string>
     <string name="about">Hakkında</string>
     <string name="about_message">Sürüm %1$s (yapı %2$d)\n\nTelegram, Signal ve WhatsApp\'ı tek bir sohbet listesinde toplayan sade, yerel bir Android mesajlaşma uygulaması.\n\nhttps://github.com/fulalas/unichat</string>

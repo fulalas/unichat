@@ -717,9 +717,15 @@ func GetSelfId(connId int) string {
 	return strFromJid(*client.Store.ID)
 }
 
-func sendWithEcho(c *conn, chatJid types.JID, message *waE2E.Message, what string) string {
-	msgID := c.getClient().GenerateMessageID()
-	echoLocal(c, chatJid, msgID, message)
+// The app stages its own row before this is reached, under an id minted by
+// NewMessageId, so the send carries that id rather than generating one here:
+// a receipt, a reaction or an edit that lands before the send returns must have
+// something to attach to, and there is exactly one row per message for its
+// whole life.
+func sendWithEcho(c *conn, chatJid types.JID, msgID string, message *waE2E.Message, what string) string {
+	if msgID == "" {
+		msgID = c.getClient().GenerateMessageID()
+	}
 	resp, err := c.getClient().SendMessage(context.Background(), chatJid, message,
 		whatsmeow.SendRequestExtra{ID: msgID})
 	if err != nil {
@@ -731,7 +737,15 @@ func sendWithEcho(c *conn, chatJid types.JID, message *waE2E.Message, what strin
 	return resp.ID
 }
 
-func SendTextMessage(connId int, chatId string, text string, mentionedIds string) string {
+func NewMessageId(connId int) string {
+	c := getConn(connId)
+	if c == nil {
+		return ""
+	}
+	return c.getClient().GenerateMessageID()
+}
+
+func SendTextMessage(connId int, chatId string, msgId string, text string, mentionedIds string) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -751,7 +765,7 @@ func SendTextMessage(connId int, chatId string, text string, mentionedIds string
 			ContextInfo: &waE2E.ContextInfo{MentionedJID: mentions},
 		}}
 	}
-	return sendWithEcho(c, chatJid, message, "send")
+	return sendWithEcho(c, chatJid, msgId, message, "send")
 }
 
 func splitIds(ids string) []string {
@@ -799,7 +813,7 @@ func GetGroupMembers(connId int, chatId string) string {
 	return b.String()
 }
 
-func SendLocation(connId int, chatId string, latitude float64, longitude float64) string {
+func SendLocation(connId int, chatId string, msgId string, latitude float64, longitude float64) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -813,10 +827,10 @@ func SendLocation(connId int, chatId string, latitude float64, longitude float64
 		DegreesLatitude:  proto.Float64(latitude),
 		DegreesLongitude: proto.Float64(longitude),
 	}}
-	return sendWithEcho(c, chatJid, &message, "send location")
+	return sendWithEcho(c, chatJid, msgId, &message, "send location")
 }
 
-func SendContactMessage(connId int, chatId string, displayName string, vcard string) string {
+func SendContactMessage(connId int, chatId string, msgId string, displayName string, vcard string) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -830,10 +844,10 @@ func SendContactMessage(connId int, chatId string, displayName string, vcard str
 		DisplayName: proto.String(displayName),
 		Vcard:       proto.String(vcard),
 	}}
-	return sendWithEcho(c, chatJid, &message, "send contact")
+	return sendWithEcho(c, chatJid, msgId, &message, "send contact")
 }
 
-func SendTextReply(connId int, chatId string, text string, quotedId string, quotedText string, quotedSender string, mentionedIds string) string {
+func SendTextReply(connId int, chatId string, msgId string, text string, quotedId string, quotedText string, quotedSender string, mentionedIds string) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -855,7 +869,7 @@ func SendTextReply(connId int, chatId string, text string, quotedId string, quot
 			ContextInfo: ctxInfo,
 		},
 	}
-	return sendWithEcho(c, chatJid, &message, "send reply")
+	return sendWithEcho(c, chatJid, msgId, &message, "send reply")
 }
 
 func SendReaction(connId int, chatId string, msgId string, msgSenderId string, msgFromMe bool, emoji string) bool {
@@ -950,10 +964,6 @@ func echoSentMessage(c *conn, chatJid types.JID, resp whatsmeow.SendResponse, me
 	echoMessage(c, chatJid, resp.ID, resp.Timestamp, message)
 }
 
-func echoLocal(c *conn, chatJid types.JID, msgID string, message *waE2E.Message) {
-	echoMessage(c, chatJid, msgID, time.Now(), message)
-}
-
 func echoMessage(c *conn, chatJid types.JID, msgID string, ts time.Time, message *waE2E.Message) {
 	var messageInfo types.MessageInfo
 	messageInfo.Chat = chatJid
@@ -964,20 +974,6 @@ func echoMessage(c *conn, chatJid types.JID, msgID string, ts time.Time, message
 	messageInfo.ID = msgID
 	messageInfo.Timestamp = ts
 	handleMessageFull(c, messageInfo, message, false, false, false, false, true)
-}
-
-func echoLocalMedia(c *conn, chatJid types.JID, msgID string, text string, msgType string,
-	localPath string, quotedId string, quotedText string) {
-	chatId := getChatId(c.getClient(), &chatJid, nil)
-	senderId := ""
-	if c.getClient().Store.ID != nil {
-		senderId = strFromJid(*c.getClient().Store.ID)
-	}
-	c.listener.OnMessage(chatId, msgID, senderId, text, true, time.Now().Unix(), c.isSelfChat(chatId),
-		msgType, "", 0, 0, false, false, quotedId, quotedText, "", "", false)
-	if localPath != "" {
-		c.listener.OnFileDownloaded(chatId, msgID, localPath, 2)
-	}
 }
 
 // The echo is kept and flagged rather than deleted: a send that failed used to
@@ -998,8 +994,8 @@ func buildQuoteContext(quotedId string, quotedText string, quotedSender string) 
 	}
 }
 
-func sendMedia(c *conn, chatId string, filePath string, echoText string, msgType string,
-	quotedId string, quotedText string, mediaType whatsmeow.MediaType,
+func sendMedia(c *conn, chatId string, msgID string, filePath string, msgType string,
+	mediaType whatsmeow.MediaType,
 	build func(uploaded whatsmeow.UploadResponse) (*waE2E.Message, string)) string {
 	client := c.getClient()
 	chatJid, err := types.ParseJID(chatId)
@@ -1007,8 +1003,9 @@ func sendMedia(c *conn, chatId string, filePath string, echoText string, msgType
 		c.log(LogWarning, fmt.Sprintf("jid error %v", err))
 		return ""
 	}
-	msgID := client.GenerateMessageID()
-	echoLocalMedia(c, chatJid, msgID, echoText, msgType, filePath, quotedId, quotedText)
+	if msgID == "" {
+		msgID = client.GenerateMessageID()
+	}
 
 	uploaded, err := uploadFile(c, client, msgID, filePath, mediaType)
 	if err != nil {
@@ -1074,12 +1071,12 @@ func wrapViewOnce(msg *waE2E.Message, extension bool) *waE2E.Message {
 	return &waE2E.Message{ViewOnceMessageV2: &waE2E.FutureProofMessage{Message: msg}}
 }
 
-func SendImageMessage(connId int, chatId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string, viewOnce bool) string {
+func SendImageMessage(connId int, chatId string, msgId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string, viewOnce bool) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
 	}
-	return sendMedia(c, chatId, filePath, caption, "image", quotedId, quotedText, whatsmeow.MediaImage,
+	return sendMedia(c, chatId, msgId, filePath, "image", whatsmeow.MediaImage,
 		func(uploaded whatsmeow.UploadResponse) (*waE2E.Message, string) {
 			mimeType := "image/jpeg"
 			lower := strings.ToLower(filePath)
@@ -1112,12 +1109,12 @@ func SendImageMessage(connId int, chatId string, filePath string, caption string
 		})
 }
 
-func SendVideoMessage(connId int, chatId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string, viewOnce bool) string {
+func SendVideoMessage(connId int, chatId string, msgId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string, viewOnce bool) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
 	}
-	return sendMedia(c, chatId, filePath, caption, "video", quotedId, quotedText, whatsmeow.MediaVideo,
+	return sendMedia(c, chatId, msgId, filePath, "video", whatsmeow.MediaVideo,
 		func(uploaded whatsmeow.UploadResponse) (*waE2E.Message, string) {
 			mimeType := "video/mp4"
 			if strings.HasSuffix(strings.ToLower(filePath), ".3gp") {
@@ -1160,12 +1157,12 @@ func finishMediaSend(c *conn, chatJid types.JID, msgId string, ext string, srcPa
 	}
 }
 
-func SendAudioMessage(connId int, chatId string, filePath string, durationSeconds int, quotedId string, quotedText string, quotedSender string, waveform []byte, viewOnce bool) string {
+func SendAudioMessage(connId int, chatId string, msgId string, filePath string, durationSeconds int, quotedId string, quotedText string, quotedSender string, waveform []byte, viewOnce bool) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
 	}
-	return sendMedia(c, chatId, filePath, formatDuration(durationSeconds), "audio", quotedId, quotedText, whatsmeow.MediaAudio,
+	return sendMedia(c, chatId, msgId, filePath, "audio", whatsmeow.MediaAudio,
 		func(uploaded whatsmeow.UploadResponse) (*waE2E.Message, string) {
 			audioMessage := waE2E.AudioMessage{
 				URL:           proto.String(uploaded.URL),
@@ -1193,7 +1190,7 @@ func SendAudioMessage(connId int, chatId string, filePath string, durationSecond
 		})
 }
 
-func SendDocumentMessage(connId int, chatId string, filePath string, fileName string, mimeType string, quotedId string, quotedText string, quotedSender string) string {
+func SendDocumentMessage(connId int, chatId string, msgId string, filePath string, fileName string, mimeType string, quotedId string, quotedText string, quotedSender string) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -1204,7 +1201,7 @@ func SendDocumentMessage(connId int, chatId string, filePath string, fileName st
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
-	return sendMedia(c, chatId, filePath, fileName, "document", quotedId, quotedText, whatsmeow.MediaDocument,
+	return sendMedia(c, chatId, msgId, filePath, "document", whatsmeow.MediaDocument,
 		func(uploaded whatsmeow.UploadResponse) (*waE2E.Message, string) {
 			documentMessage := waE2E.DocumentMessage{
 				URL:           proto.String(uploaded.URL),

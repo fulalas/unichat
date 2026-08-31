@@ -269,6 +269,7 @@
     <string name="share_failed">Impossible de lire le fichier partagé</string>
     <string name="send_failed">Envoi échoué</string>
     <string name="resend_not_possible">Ce message ne peut pas être renvoyé</string>
+    <string name="resend">Renvoyer</string>
     <string name="service_notification">Connecté</string>
     <string name="about">À propos</string>
     <string name="about_message">Version %1$s (build %2$d)\n\nUne messagerie Android native et minimale pour Telegram, Signal et WhatsApp dans une seule liste de discussions.\n\nhttps://github.com/fulalas/unichat</string>

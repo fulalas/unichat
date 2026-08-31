@@ -506,16 +506,16 @@ func SignalLogout() {
 	sgMu.Unlock()
 }
 
-func SignalSendTextQuoted(chatId, text, styles, quotedId, quotedText, quotedSender string) string {
+func SignalSendTextQuoted(chatId, msgId, text, styles, quotedId, quotedText, quotedSender string) string {
 	c, client, device := sgActive()
 	if client == nil || device == nil {
 		return ""
 	}
 	_ = c
 
-	// Signal identifies a message by the timestamp the sender stamped on it;
-	// there is no separate server-assigned id to report back.
-	timestamp := uint64(time.Now().UnixMilli())
+	// Signal identifies a message by the timestamp the sender stamped on it, so
+	// the id the app staged its row under IS the timestamp this must go out with.
+	timestamp := sgTimestamp(msgId)
 	ranges := sgStyleRanges(styles)
 	dm := &signalpb.DataMessage{
 		Body:       proto.String(text),
@@ -533,11 +533,6 @@ func SignalSendTextQuoted(chatId, text, styles, quotedId, quotedText, quotedSend
 	}
 	msg := signalmeow.WrapDataMessage(dm)
 	msgID := fmt.Sprintf("%d", timestamp)
-	// Echoed BEFORE the send: the peer can read the message and its receipt can
-	// arrive before a slow send returns, and with no row written yet there was
-	// nothing for the tick to land on. Stored with its markers, or the sender's
-	// own bubble would be the only place the formatting is missing.
-	sgEchoOwn(c, chatId, msgID, sgWithMarkers(text, ranges), "", "", int64(timestamp/1000), quotedId, quotedText)
 	if err := sgSend(c, client, chatId, msg); err != nil {
 		c.log(LogError, "send failed: "+err.Error())
 		c.listener.OnMessageSendFailed(chatId, msgID)
@@ -1240,6 +1235,16 @@ func isWordUnit(u uint16) bool {
 // message goes to the account's OTHER devices only. Without this the bubble
 // never appeared and the chat looked like nothing had been sent. WhatsApp does
 // the same thing (see echoLocalMedia).
+// A Signal message id is the millisecond timestamp it was stamped with, so the
+// app can mint one before any send and the two must agree exactly — a mismatch
+// makes every receipt, reaction and edit for that message unmatchable.
+func sgTimestamp(msgId string) uint64 {
+	if ts, err := strconv.ParseUint(msgId, 10, 64); err == nil && ts > 0 {
+		return ts
+	}
+	return uint64(time.Now().UnixMilli())
+}
+
 func sgEchoOwn(c *sgConn, chatId, msgID, text, msgType, fileID string, timeSent int64, quotedId, quotedText string) {
 	c.listener.OnMessage(
 		chatId, msgID, SignalSelfID(), text, true, timeSent, false,
@@ -1285,22 +1290,15 @@ func sgParseFileID(fileID string) (*signalpb.AttachmentPointer, error) {
 const sgMaxAttachmentBytes = 100 << 20
 
 func SignalSendAttachment(
-	chatId string, path string, caption string, mime string, voiceNote bool,
+	chatId string, msgId string, path string, caption string, mime string, voiceNote bool,
 ) string {
 	c, client, _ := sgActive()
 	if client == nil {
 		return ""
 	}
 
-	// Echoed before the upload, the way the WhatsApp path does it: an upload
-	// that fails offline is the common failure, and echoing after it left the
-	// user's photo nowhere at all.
-	timestamp := uint64(time.Now().UnixMilli())
+	timestamp := sgTimestamp(msgId)
 	msgID := fmt.Sprintf("%d", timestamp)
-	sgEchoOwn(c, chatId, msgID, caption, sgAttachmentKind(mime, voiceNote), "", int64(timestamp/1000), "", "")
-	// The file is already on this device, so hand the local copy straight over
-	// rather than making the bubble fetch back what we just uploaded.
-	c.listener.OnFileDownloaded(chatId, msgID, path, 2)
 
 	// Refuse before the allocation: UploadAttachment only takes the whole file
 	// as one []byte in this process's heap, so an unbounded read could OOM-kill
@@ -1806,21 +1804,16 @@ func sgContactName(card *signalpb.DataMessage_Contact) string {
 // Going through SignalSendTextQuoted instead left the sender looking at a raw
 // URL while the recipient saw a card — and a later forward of that row took the
 // plain-text path.
-func SignalSendLocation(chatId string, latitude float64, longitude float64) string {
+func SignalSendLocation(chatId string, msgId string, latitude float64, longitude float64) string {
 	c, client, _ := sgActive()
 	if client == nil {
 		return ""
 	}
 	// Must match Bridge.mapLink and sgParseMapLink exactly, in both directions.
 	text := fmt.Sprintf("%s%.6f,%.6f", sgMapLinkPrefix, latitude, longitude)
-	timestamp := uint64(time.Now().UnixMilli())
+	timestamp := sgTimestamp(msgId)
 	dm := &signalpb.DataMessage{Body: proto.String(text), Timestamp: &timestamp}
 	msgID := fmt.Sprintf("%d", timestamp)
-	c.listener.OnMessage(
-		chatId, msgID, SignalSelfID(), "", true, int64(timestamp/1000), false,
-		"location", "", latitude, longitude, false, false, "", "", "", "", false,
-	)
-	c.listener.OnChat(chatId, "", 0, false, int64(timestamp/1000))
 	if err := sgSend(c, client, chatId, signalmeow.WrapDataMessage(dm)); err != nil {
 		c.log(LogError, "location send failed: "+err.Error())
 		c.listener.OnMessageSendFailed(chatId, msgID)
@@ -1829,7 +1822,7 @@ func SignalSendLocation(chatId string, latitude float64, longitude float64) stri
 	return msgID
 }
 
-func SignalSendContact(chatId string, name string, numbers string) string {
+func SignalSendContact(chatId string, msgId string, name string, numbers string) string {
 	c, client, _ := sgActive()
 	if client == nil {
 		return ""
@@ -1853,7 +1846,7 @@ func SignalSendContact(chatId string, name string, numbers string) string {
 
 	// The whole display name goes in givenName: the app carries one name string,
 	// and splitting it on whitespace would guess wrong for most of the world.
-	timestamp := uint64(time.Now().UnixMilli())
+	timestamp := sgTimestamp(msgId)
 	dm := &signalpb.DataMessage{
 		Timestamp: &timestamp,
 		Contact: []*signalpb.DataMessage_Contact{{
@@ -1862,9 +1855,6 @@ func SignalSendContact(chatId string, name string, numbers string) string {
 		}},
 	}
 	msgID := fmt.Sprintf("%d", timestamp)
-	// Must stay the "name\nnumber…" shape sgContactText writes.
-	body := name + "\n" + strings.ReplaceAll(numbers, ",", "\n")
-	sgEchoOwn(c, chatId, msgID, body, "contact", "", int64(timestamp/1000), "", "")
 	if err := sgSend(c, client, chatId, signalmeow.WrapDataMessage(dm)); err != nil {
 		c.log(LogError, "contact send failed: "+err.Error())
 		c.listener.OnMessageSendFailed(chatId, msgID)

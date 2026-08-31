@@ -386,6 +386,7 @@ class MessageAdapter(
         val linkDescription: TextView = view.findViewById(R.id.linkDescription)
         val linkImage: ImageView = view.findViewById(R.id.linkImage)
         val reactionPill: TextView = view.findViewById(R.id.reactionPill)
+        val sendFailedBadge: ImageView = view.findViewById(R.id.sendFailedBadge)
         var flashFade: Runnable? = null
         var current: MessageRow? = null
         // one instance per holder, so a touch on another row can't clobber this
@@ -468,6 +469,10 @@ class MessageAdapter(
                 return null
             }
             return m
+        }
+        holder.sendFailedBadge.setOnClickListener {
+            val m = holder.current ?: return@setOnClickListener
+            if (selectionMode) toggleSelection(m) else onRetrySend(m)
         }
         val openActions = View.OnClickListener {
             tappedRow(retryIfFailed = false)?.let(onMessageActions)
@@ -795,11 +800,12 @@ class MessageAdapter(
         timeView.text = if (msg.fromMe) {
             Ticks.timeWithTick(
                 ctx, timeStr, msg.isRead, timeView.textSize, tickFirst = false,
-                failed = msg.sendFailed,
+                pending = msg.sendPending || msg.sendFailed,
             )
         } else {
             timeStr
         }
+        holder.sendFailedBadge.visibility = if (msg.sendFailed) View.VISIBLE else View.GONE
 
         val params = holder.bubble.layoutParams as FrameLayout.LayoutParams
         val gravity: Int

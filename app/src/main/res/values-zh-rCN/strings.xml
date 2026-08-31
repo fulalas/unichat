@@ -269,6 +269,7 @@
     <string name="share_failed">无法读取分享过来的文件</string>
     <string name="send_failed">发送失败</string>
     <string name="resend_not_possible">这条消息无法重新发送</string>
+    <string name="resend">重新发送</string>
     <string name="service_notification">已连接</string>
     <string name="about">关于</string>
     <string name="about_message">版本 %1$s（构建 %2$d）\n\n一个精简的 Android 原生即时通讯应用，把 Telegram、Signal 和 WhatsApp 放进同一个聊天列表。\n\nhttps://github.com/fulalas/unichat</string>

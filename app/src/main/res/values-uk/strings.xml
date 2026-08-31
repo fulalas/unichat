@@ -269,6 +269,7 @@
     <string name="share_failed">Не вдалося прочитати надісланий файл</string>
     <string name="send_failed">Не вдалося надіслати</string>
     <string name="resend_not_possible">Це повідомлення не можна надіслати ще раз</string>
+    <string name="resend">Надіслати знову</string>
     <string name="service_notification">На зв\'язку</string>
     <string name="about">Про програму</string>
     <string name="about_message">Версія %1$s (збірка %2$d)\n\nПростий нативний месенджер для Android: Telegram, Signal і WhatsApp в одному списку чатів.\n\nhttps://github.com/fulalas/unichat</string>

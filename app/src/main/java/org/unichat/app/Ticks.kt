@@ -45,7 +45,12 @@ object Ticks {
         tickFirst: Boolean,
         readTint: Int? = null,
         failed: Boolean = false,
+        pending: Boolean = false,
     ): CharSequence {
+        // Nothing has confirmed the message left the device, so it carries no
+        // mark at all: a single tick here would claim a delivery that has not
+        // happened, and the failure marker rides on the bubble, not the clock.
+        if (pending) return time
         val h = (textSizePx * 0.9f).toInt().coerceAtLeast(1)
         val state = when {
             failed -> FAILED

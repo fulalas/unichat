@@ -308,15 +308,15 @@ object Signal : EventListener {
         Bridge.runOnUi { onDone(err) }
     }
 
-    fun sendLocation(chatId: String, latitude: Double, longitude: Double): Boolean =
-        Wmbridge.signalSendLocation(chatId, latitude, longitude).isNotEmpty()
+    fun sendLocation(chatId: String, msgId: String, latitude: Double, longitude: Double): String =
+        Wmbridge.signalSendLocation(chatId, msgId, latitude, longitude)
 
-    fun sendText(chatId: String, text: String, quoted: MessageRow?): Boolean {
+    fun sendText(chatId: String, msgId: String, text: String, quoted: MessageRow?): String {
         val (body, styles) = styled(text)
         return Wmbridge.signalSendTextQuoted(
-            chatId, body, styles,
+            chatId, msgId, body, styles,
             quoted?.id.orEmpty(), quoted?.text.orEmpty(), quoted?.senderId.orEmpty()
-        ).isNotEmpty()
+        )
     }
 
     /**
@@ -356,12 +356,12 @@ object Signal : EventListener {
         ops { Wmbridge.signalSetTyping(chatId, typing) }
 
     fun sendAttachment(
-        chatId: String, path: String, caption: String, mime: String,
+        chatId: String, msgId: String, path: String, caption: String, mime: String,
         voiceNote: Boolean = false,
-    ): Boolean = Wmbridge.signalSendAttachment(chatId, path, caption, mime, voiceNote).isNotEmpty()
+    ): String = Wmbridge.signalSendAttachment(chatId, msgId, path, caption, mime, voiceNote)
 
-    fun sendContact(chatId: String, name: String, numbers: List<String>): Boolean =
-        Wmbridge.signalSendContact(chatId, name, numbers.joinToString(",")).isNotEmpty()
+    fun sendContact(chatId: String, msgId: String, name: String, numbers: List<String>): String =
+        Wmbridge.signalSendContact(chatId, msgId, name, numbers.joinToString(","))
 
     /**
      * Blocking; worker threads only.

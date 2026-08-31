@@ -269,6 +269,7 @@
     <string name="share_failed">Nie udało się odczytać udostępnionego pliku</string>
     <string name="send_failed">Wysyłanie nie powiodło się</string>
     <string name="resend_not_possible">Tej wiadomości nie da się wysłać jeszcze raz</string>
+    <string name="resend">Wyślij ponownie</string>
     <string name="service_notification">Połączono</string>
     <string name="about">O aplikacji</string>
     <string name="about_message">Wersja %1$s (kompilacja %2$d)\n\nProsty natywny komunikator na Androida: Telegram, Signal i WhatsApp na jednej liście czatów.\n\nhttps://github.com/fulalas/unichat</string>
