@@ -633,7 +633,7 @@ class MessageAdapter(
             val end = idx + q.length
             sp.setSpan(android.text.style.BackgroundColorSpan(bg), idx, end,
                 Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
-            sp.setSpan(ForegroundColorSpan(0xFFFFFFFF.toInt()), idx, end,
+            sp.setSpan(HighlightSpan(), idx, end,
                 Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
             idx = Search.indexOf(full, q, end)
         }
@@ -965,6 +965,13 @@ class MessageAdapter(
         val linkable = holder.text.visibility == View.VISIBLE && mayContainUrl(holder.text.text)
         if (linkable) {
             android.text.util.Linkify.addLinks(holder.text, android.text.util.Linkify.WEB_URLS)
+            val sp = holder.text.text as? Spannable
+            if (sp != null) for (s in sp.getSpans(0, sp.length, HighlightSpan::class.java)) {
+                val start = sp.getSpanStart(s)
+                val end = sp.getSpanEnd(s)
+                sp.removeSpan(s)
+                sp.setSpan(s, start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
         }
         bindLinkPreview(holder, msg, linkable)
     }
@@ -1049,6 +1056,8 @@ class MessageAdapter(
         return false
     }
 }
+
+internal class HighlightSpan : ForegroundColorSpan(0xFFFFFFFF.toInt())
 
 // autoLink must stay off in the layout: TextView's autoLink path re-installs
 // the stock movement method on every setText.

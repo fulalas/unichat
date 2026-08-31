@@ -19,7 +19,7 @@ class DragSelectTouchListener(
     private var lastX = 0f
     private var lastY = 0f
     private var rv: RecyclerView? = null
-    private var velocity = 0 // px/frame, signed; 0 = not in an edge hot zone
+    private var velocity = 0
     private var autoScrolling = false
     private var maxScrollPx = 0f
 

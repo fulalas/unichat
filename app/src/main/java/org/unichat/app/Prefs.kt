@@ -112,7 +112,6 @@ object Prefs {
     fun clearProtoEnabled(ctx: Context, proto: String) =
         prefs(ctx).edit().remove(KEY_PROTO_ENABLED + proto).apply()
 
-    // Mirrors the server-side account attribute, which registration sets true.
     fun sgDiscoverable(ctx: Context): Boolean =
         prefs(ctx).getBoolean(KEY_SG_DISCOVERABLE, true)
 

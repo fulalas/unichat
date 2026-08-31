@@ -641,8 +641,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 // growth: a full local window stays at the query LIMIT when a
                 // new message pushes the oldest row out. Older pages prepended
                 // by pagination keep the newest id and thus keep position.
-                val newestChanged = messages.isNotEmpty() &&
-                    messages.lastOrNull()?.id != adapter.messagesSnapshot().lastOrNull()?.id
+                val newest = messages.lastOrNull()
+                val newestChanged = newest != null &&
+                    newest.id != adapter.messagesSnapshot().lastOrNull()?.id
                 adapter.submit(messages, names, quoteNames) {
                     loadingMoreLocal = false
                     when {
@@ -656,8 +657,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                                     messageList.scrollToPosition(adapter.itemCount - 1)
                             }
                         }
+                        // Only our own send follows to the bottom. An arriving
+                        // message must not move the list a pixel, wherever it is
+                        // read from — it announces itself through the FAB dot.
                         newestChanged -> {
-                            if (atBottom) {
+                            if (atBottom && newest.fromMe) {
                                 messageList.scrollToPosition(adapter.itemCount - 1)
                             } else {
                                 hasNewBelow = true
@@ -956,8 +960,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     override fun onMessagesChanged(chatId: String, rowIds: Set<String>?) {
         if (chatId != this.chatId) return
         // while searching, the adapter holds a full-history snapshot the matches
-        // index into; don't reload it out from under the search (still mark read)
-        if (searchActive) {
+        // index into; don't reload it out from under the search (still mark read).
+        // windowMode too, and after the search is closed: that list is a server
+        // window the reload would replace, dropping the reader back to recent
+        // history the moment anyone messaged them.
+        if (searchActive || windowMode) {
             Bridge.markChatRead(chatId)
             // unless this IS the older history the search asked for — then the
             // window is meant to widen, and the scan re-runs over it
@@ -1044,11 +1051,23 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun closeSearch() {
         searchActive = false
-        main.removeCallbacks(searchDebounce)
+        // A query or a hit window still in flight is answered up to 30s later, and
+        // reopening the search puts searchActive back: without superseding them
+        // here, that answer jumped the list into a hit for text nobody typed.
+        searchSeq++
+        windowSeq++
+        // The list keeps the search window, which is wider than loadLimit. Left
+        // behind, the first scroll near the top read that as "the window is full"
+        // and reloaded a SMALLER one, deleting the rows being read.
+        loadLimit = maxOf(loadLimit, adapter.itemCount)
         stopDeepening()
         searchBar.visibility = android.view.View.GONE
         searchCoverageRow.visibility = android.view.View.GONE
         searchInput.setText("")
+        // After the setText, not before: clearing the box fires the text watcher,
+        // which posts the debounce again — it then ran runSearch("") 200ms later
+        // and reloaded the list out from under the position.
+        main.removeCallbacks(searchDebounce)
         adapter.highlightQuery = ""
         rebindVisible()
         searchMatches = emptyList()
@@ -1063,7 +1082,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchLimit = SEARCH_LOAD_LIMIT
         searchCount.text = ""
         hideKeyboard(searchInput)
-        reload()
     }
 
     // Coalesces keystrokes: runSearch rebinds rows and kicks off a scan, and it

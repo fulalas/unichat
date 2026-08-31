@@ -13,7 +13,6 @@ open class BaseActivity : AppCompatActivity() {
 
     // resolve runs on Io.lookup because it can block for up to 75s
     protected fun resolveThenOpen(progressRes: Int, resolve: () -> Any, open: (String) -> Unit) {
-        // 0 means say nothing
         if (progressRes != 0) {
             android.widget.Toast
                 .makeText(this, progressRes, android.widget.Toast.LENGTH_SHORT).show()

@@ -34,8 +34,6 @@ fun Activity.targetChoices(): Pair<List<String>, List<String>> {
     return labels to ids
 }
 
-// Returns the dialog so a caller can tell it is still up while one of its own
-// windows holds the focus (see ChatActivity.onWindowFocusChanged).
 fun Activity.showTargetPicker(
     titleRes: Int,
     labels: List<String>,

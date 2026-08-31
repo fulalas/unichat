@@ -21,7 +21,6 @@ object Ticks {
             READ -> readTint ?: context.themeColor(R.attr.chatAccent)
             else -> context.getColor(R.color.text_secondary)
         }
-        // pack tint (32b) | h (15b) | state (2b) into a Long with no overlap
         val key = ((tint.toLong() and 0xFFFFFFFFL) shl 17) or
             ((h.toLong() and 0x7FFF) shl 2) or state
         cache[key]?.let { return it }
