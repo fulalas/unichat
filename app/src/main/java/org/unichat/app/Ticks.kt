@@ -47,10 +47,11 @@ object Ticks {
         failed: Boolean = false,
         pending: Boolean = false,
     ): CharSequence {
-        // Nothing has confirmed the message left the device, so it carries no
-        // mark at all: a single tick here would claim a delivery that has not
-        // happened, and the failure marker rides on the bubble, not the clock.
-        if (pending) return time
+        // [failed] first: a message being retried carries [pending] too, and
+        // yielding to it left the chat-list row bare for the whole retry window.
+        // Unconfirmed means no mark at all — a tick would claim a delivery that
+        // has not happened.
+        if (!failed && pending) return time
         val h = (textSizePx * 0.9f).toInt().coerceAtLeast(1)
         val state = when {
             failed -> FAILED

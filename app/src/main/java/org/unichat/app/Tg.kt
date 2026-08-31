@@ -431,9 +431,6 @@ object Tg {
                 val msg = obj.getJSONObject("message")
                 val oldId = obj.getLong("old_message_id")
                 val chatId = idFor(msg.getLong("chat_id"))
-                // Telegram only queues on sendMessage, so this is the first
-                // word that the message actually left — the row the app staged
-                // has been marked unsent since the user typed it.
                 Bridge.onMessageSendOk(chatId, oldId.toString())
                 Bridge.db.deleteMessage(chatId, oldId.toString())
                 storeMessage(msg)
@@ -441,8 +438,7 @@ object Tg {
             "updateMessageSendFailed" -> {
                 val msg = obj.getJSONObject("message")
                 // No toast here: onMessageSendFailed raises one for the first
-                // failure only, and this one fired again for each of the
-                // automatic retries behind it.
+                // failure only, and this one fired again for every retry.
                 Bridge.onMessageSendFailed(
                     idFor(msg.getLong("chat_id")), obj.getLong("old_message_id").toString()
                 )
@@ -455,7 +451,9 @@ object Tg {
                     executor.execute {
                         refetchGen.incrementAndGet()
                         for (i in 0 until ids.length()) {
-                            Bridge.db.deleteMessage(chatId, ids.getLong(i).toString())
+                            val msgId = ids.getLong(i).toString()
+                            if (cancelledSends.remove("$chatId/$msgId")) continue
+                            Bridge.db.deleteMessage(chatId, msgId)
                         }
                         Bridge.notifyChat(chatId)
                     }
@@ -763,11 +761,10 @@ object Tg {
     private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
         val parsed = parseMessage(msg) ?: return
         val row = parsed.row
-        // TDLib files its own copy of a message it has not sent yet and reports
-        // it here, which would sit beside the row the app staged when the user
-        // hit send. The staged row is re-keyed to TDLib's id as soon as
-        // sendMessage answers, so "no row under this id" means that answer has
-        // not landed yet and this update is the duplicate, not the original.
+        // TDLib reports its own copy of a message it has not sent yet, which
+        // would sit beside the row the app staged. The staged row is re-keyed to
+        // TDLib's id as soon as sendMessage answers, so "no row under this id"
+        // means this update is the duplicate, not the original.
         if (row.fromMe && msg.optJSONObject("sending_state")
                 ?.optString("@type") == "messageSendingStatePending" &&
             !Bridge.db.hasMessage(row.chatId, row.id)
@@ -1049,9 +1046,8 @@ object Tg {
             JSONObject().put("@type", "inputMessageReplyToMessage").put("message_id", it)
         }
 
-    // Returns the id TDLib filed the message under, or "" if the request itself
-    // failed. TDLib mints its own ids and takes none, so the app's staged row is
-    // re-keyed to this one; the message is not sent yet — that is
+    // TDLib mints its own ids and takes none, so the staged row is re-keyed to
+    // the one returned here. The message is not sent yet — that is
     // updateMessageSendSucceeded.
     private fun sendMessage(chatId: String, content: JSONObject, quotedId: String = ""): String {
         // A share sheet can start this process and reach a send before TDLib has
@@ -1356,6 +1352,32 @@ object Tg {
         )
         return res != null
     }
+
+    // TDLib delivers its queued send whenever the network comes back, so a
+    // retry that just sends again hands the peer two copies; deleting the queued
+    // message cancels it. False means TDLib had already sent it and the caller
+    // must not send again — revoke=false would delete only the user's own copy
+    // of a message the peer keeps. Blocking, so the answer can gate that.
+    fun cancelQueuedSend(chatId: String, msgId: String): Boolean {
+        val mid = msgId.toLongOrNull() ?: return false
+        val msg = request(
+            JSONObject().put("@type", "getMessage")
+                .put("chat_id", chatIdOf(chatId)).put("message_id", mid)
+        ) ?: return true // TDLib has no such message: nothing queued, nothing sent
+        if (msg.optJSONObject("sending_state")?.optString("@type")
+            != "messageSendingStatePending"
+        ) {
+            return false
+        }
+        cancelledSends.add("$chatId/$msgId")
+        deleteMessages(chatId, listOf(msgId), revoke = false)
+        return true
+    }
+
+    // The cancel comes back as a permanent deletion, and letting that through
+    // dropped the row the retry was re-keying: the message disappeared from the
+    // chat with its resend already on the way.
+    private val cancelledSends: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     fun deleteMessages(chatId: String, msgIds: List<String>, revoke: Boolean) {
         val arr = JSONArray()
@@ -1794,11 +1816,9 @@ object Tg {
             // exactly that message could never advance.
             from = res.optLong("next_from_message_id").takeIf { it != 0L } ?: last
         }
-        // Only a walk that reached the end of the chat counts, which is what
-        // [reachedEnd] records. Reading it off the round counter instead marked
-        // the chat swept when a request timed out or came back malformed on the
-        // FIRST page — disabling the repair for the rest of the run, the very
-        // thing the check was there to prevent.
+        // Only a walk that reached the end of the chat counts. Read off the
+        // round counter instead, a request that timed out on the FIRST page
+        // marked the chat swept and disabled the repair for the whole run.
         if (remaining.isEmpty() || reachedEnd) listenedSwept.add(chatId)
         return changed
     }

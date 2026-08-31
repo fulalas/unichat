@@ -119,9 +119,9 @@ object Bridge : EventListener {
         Notifications.ensureChannel(appContext)
         db = Db(appContext)
         db.clearStaleDownloads()
-        // Once per process. init() re-runs its whole body on every caller while
+        // Once per process: init() re-runs its whole body on every caller while
         // the WhatsApp store refuses to open, and a second sweep would flag a
-        // Signal or Telegram send that is in flight right now.
+        // Signal or Telegram send in flight right then.
         if (!pendingSwept) {
             pendingSwept = true
             db.failStalePending()
@@ -190,12 +190,6 @@ object Bridge : EventListener {
 
     private fun isTg(chatId: String) = Tg.isTgId(chatId)
 
-    /**
-     * Every send takes the id its row was already staged under and answers with
-     * the id the message ended up carrying, or "" if it never left. They differ
-     * only where the protocol mints ids itself (Telegram), and then the row is
-     * re-keyed — see [runSend].
-     */
     private interface Protocol {
         fun sendText(
             chatId: String, msgId: String, text: String, quoted: MessageRow?,
@@ -220,14 +214,16 @@ object Bridge : EventListener {
         fun sendLocation(chatId: String, msgId: String, latitude: Double, longitude: Double): String
         fun sendContact(chatId: String, msgId: String, name: String, numbers: List<String>): String
 
-        /** "" when the protocol will not take an id of ours; [runSend] then
-         *  re-keys the row to whatever the send answered with. */
         fun newMessageId(): String
 
-        /** True when a send returning means the server took it. Telegram only
-         *  queues at that point and confirms later, via
-         *  updateMessageSendSucceeded. */
+        /** False where returning only means queued and the confirmation comes
+         *  later (Telegram's updateMessageSendSucceeded). */
         val ackOnSend: Boolean
+
+        /** whatsmeow sits on a send for its whole ack timeout and TDLib queues
+         *  one for as long as the phone is offline, so neither reports a send
+         *  that cannot possibly go out. */
+        val connected: Boolean
 
         fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean
         val editWindowSeconds: Long
@@ -331,9 +327,10 @@ object Bridge : EventListener {
             chatId: String, msgId: String, name: String, numbers: List<String>,
         ): String = Signal.sendContact(chatId, msgId, name, numbers)
 
-        // A Signal message IS its send timestamp, so the id has to be one no
-        // other message can claim; two sends inside the same millisecond would
-        // otherwise share a row.
+        override val connected get() = Signal.state != "disconnected"
+
+        // A Signal message IS its send timestamp, so two sends inside the same
+        // millisecond would share one row.
         override fun newMessageId(): String {
             while (true) {
                 val prev = sgLastStamp.get()
@@ -491,6 +488,8 @@ object Bridge : EventListener {
             connId, chatId, msgId, name, PhoneBook.vcard(name, numbers)
         )
 
+        override val connected get() = state != "disconnected"
+
         override fun newMessageId(): String =
             if (connId < 0) "" else Wmbridge.newMessageId(connId)
 
@@ -640,6 +639,9 @@ object Bridge : EventListener {
 
         override fun newMessageId(): String = ""
         override val ackOnSend = false
+        // "connecting" covers TDLib's connectionStateUpdating, which is where it
+        // sits for a while after every cold start with a perfectly good socket.
+        override val connected get() = Tg.state != "disconnected"
 
         override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean =
             Tg.editMessageText(chatId, msgId, newText)
@@ -743,23 +745,18 @@ object Bridge : EventListener {
         Wmbridge.requestPairCode(connId, phone)
     }.start()
 
-    // Its own thread, and never a transport's: the whole point of staging is
-    // that the bubble appears before anything can block. A protocol's send
-    // executor is single-threaded, so one send stuck offline for its full
-    // timeout used to hold up the NEXT message's echo for just as long.
+    // Never a transport's thread: a protocol's send executor is
+    // single-threaded, so one send stuck offline for its whole timeout held up
+    // the NEXT message's bubble for just as long.
     private val stageExecutor = Executors.newSingleThreadExecutor()
     private val sgLastStamp = java.util.concurrent.atomic.AtomicLong()
     private val localIdSeq = java.util.concurrent.atomic.AtomicLong()
 
-    // Only for a protocol that will not take an id of ours, and for a WhatsApp
-    // send with no session to mint one: the row still needs a key now, and
-    // [runSend] re-keys it to the real id afterwards.
     private const val LOCAL_ID = "local:"
 
-    // The counter restarts at 1 every process, so the run stamp is what keeps
-    // two runs' local ids apart: staging REPLACEs by (chat, id), and a plain
-    // counter handed a new send the same key as a leftover unsent row from the
-    // last run — silently deleting the message the user still had on screen.
+    // The run stamp keeps two runs' ids apart: the counter restarts at 1,
+    // staging REPLACEs by (chat, id), and a bare counter handed a new send the
+    // key of a leftover unsent row — deleting it off the screen.
     private val localIdRun = java.lang.Long.toString(System.currentTimeMillis(), 36)
 
     private fun mintId(chatId: String): String = proto(chatId).newMessageId()
@@ -767,8 +764,6 @@ object Bridge : EventListener {
 
     private fun wireId(msgId: String) = if (msgId.startsWith(LOCAL_ID)) "" else msgId
 
-    // A Signal message IS its send timestamp in milliseconds, so the row's time
-    // has to be read off the id rather than taken from the clock a moment later.
     private fun stagedTime(chatId: String, msgId: String): Long =
         if (Signal.isSgId(chatId)) (msgId.toLongOrNull() ?: 0L) / 1000
         else System.currentTimeMillis() / 1000
@@ -782,38 +777,82 @@ object Bridge : EventListener {
             id = msgId, chatId = chatId, senderId = selfIdOf(chatId), text = text,
             fromMe = true, timeSent = stagedTime(chatId, msgId), isRead = false,
             msgType = msgType, filePath = filePath,
-            // The bytes are already on this device, so the bubble must never
-            // offer to download what it is looking at.
             fileStatus = if (filePath.isEmpty()) 0 else 2,
             quotedId = quoted?.id ?: "", quotedText = quoted?.let { quotedPreview(it) } ?: "",
             quotedType = quoted?.msgType ?: "",
             latitude = latitude, longitude = longitude, sendPending = true,
         )
         db.stageOutgoing(row)
-        // Without this the chat keeps its old last_time and the message the user
-        // just sent leaves the chat list ordered as if nothing had happened.
+        // Without this the chat list stays ordered as if nothing was sent.
         db.bumpChat(chatId, row.timeSent)
+        sendQueued.add(chatId + KEY_SEP + msgId)
+        armSendWatchdog(row)
         notifyChat(chatId)
         notifyChatsChanged()
         return row
     }
 
+    // Nothing guarantees a transport reports back at all: whatsmeow waits out
+    // its ack timeout and TDLib holds a send for as long as the phone is
+    // offline, so an airplane-mode message sat there with no tick and no mark.
+    private const val SEND_WATCHDOG_MS = 5_000L
+    private const val MEDIA_WATCHDOG_MS = 60_000L
+    private val watchdogs = ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<*>>()
+
+    private fun armSendWatchdog(row: MessageRow) {
+        val key = row.chatId + KEY_SEP + row.id
+        val media = row.msgType in NEEDS_LOCAL_FILE
+        watchdogs.put(key, retryScheduler.schedule({
+            watchdogs.remove(key)
+            // No ladder for media: restarting a large upload every few seconds
+            // would keep it from ever finishing.
+            val key2 = row.chatId + KEY_SEP + row.id
+            if (db.isSendPending(row.chatId, row.id)) {
+                markSendFailed(
+                    row.chatId, row.id,
+                    retry = !media && !sendQueued.contains(key2) && !sendInFlight.contains(key2)
+                )
+            }
+        }, if (media) MEDIA_WATCHDOG_MS else SEND_WATCHDOG_MS,
+            java.util.concurrent.TimeUnit.MILLISECONDS))?.cancel(false)
+    }
+
+    private fun disarmSendWatchdog(chatId: String, msgId: String) {
+        watchdogs.remove(chatId + KEY_SEP + msgId)?.cancel(false)
+    }
+
+    // A retry fired while the transport still holds the first attempt puts a
+    // second copy of the same message on the wire beside it.
+    private val sendInFlight = ConcurrentHashMap.newKeySet<String>()
+
+    // Sends are dispatched one at a time per protocol, so a burst leaves later
+    // rows waiting seconds — and the watchdog firing on one of those re-sent a
+    // message whose first attempt had not started, reaching the peer twice.
+    private val sendQueued = ConcurrentHashMap.newKeySet<String>()
+
     private fun runSend(row: MessageRow, send: (String) -> String): Boolean {
+        val key = row.chatId + KEY_SEP + row.id
+        sendQueued.remove(key)
+        if (!proto(row.chatId).connected) {
+            onMessageSendFailed(row.chatId, row.id)
+            return false
+        }
+        sendInFlight.add(key)
         val resultId = try {
             send(wireId(row.id))
         } catch (e: Exception) {
             Log.w(TAG, "send threw for ${row.chatId}", e)
             ""
+        } finally {
+            sendInFlight.remove(key)
         }
         if (resultId.isEmpty()) {
             onMessageSendFailed(row.chatId, row.id)
             return false
         }
         if (resultId != row.id) {
-            // The protocol settled this send before its own answer got back
-            // here, so its copy of the row is already stored under a later id;
-            // re-keying to the one it has finished with would leave a duplicate
-            // marked unsent that nothing would ever clear.
+            // Re-keying to an id the protocol has already finished with left a
+            // duplicate row marked unsent that nothing ever cleared.
             if (settledBeforeRekey == row.chatId + KEY_SEP + resultId) {
                 settledBeforeRekey = ""
                 forgetRetry(row.chatId, row.id)
@@ -823,9 +862,11 @@ object Bridge : EventListener {
             }
             db.renameMessage(row.chatId, row.id, resultId)
             moveRetryKey(row.chatId, row.id, resultId)
+            // A watchdog left on the staged id finds no row, so it would pass a
+            // send that is still queued.
+            disarmSendWatchdog(row.chatId, row.id)
+            armSendWatchdog(row.copy(id = resultId))
         }
-        // Telegram has only queued the message at this point; its
-        // updateMessageSendSucceeded is what clears the mark.
         if (proto(row.chatId).ackOnSend) onMessageSendOk(row.chatId, resultId)
         notifyChat(row.chatId)
         return true
@@ -1031,8 +1072,7 @@ object Bridge : EventListener {
         batchExecutor.execute { sendFileBlocking(row, fileName, mimeType, "", quoted, viewOnce) }
     }
 
-    // The staged text has to be the one the bubble reads back: a document's row
-    // text IS its file name, and a caption is the picture's body.
+    // A document's row text IS its file name; the bubble reads it back.
     private fun stageFile(
         chatId: String, filePath: String, fileName: String, mimeType: String,
         caption: String, quoted: MessageRow?,
@@ -1081,14 +1121,11 @@ object Bridge : EventListener {
     fun reactionsOf(msg: MessageRow): List<Pair<String, String>> =
         proto(msg.chatId).reactionSenders(msg) ?: db.reactionsOf(msg.chatId, msg.id)
 
-    // The row keeps its id and is re-sent in place: every protocol here either
-    // takes the id it was staged under or hands back a new one that the row is
-    // re-keyed to. False for what the row cannot rebuild — media whose local
-    // file is gone, or a contact card with no number left in its body.
     fun retrySend(msg: MessageRow): Boolean {
         if (!canResend(msg)) return false
-        // A tap is the user asking for it now, so the armed wait is dropped and
-        // the ten attempts start over from two seconds.
+        // The previous attempt is still inside the transport; a second one now
+        // would race it onto the wire.
+        if (sendInFlight.contains(msg.chatId + KEY_SEP + msg.id)) return true
         forgetRetry(msg.chatId, msg.id)
         resend(msg.chatId, msg.id)
         return true
@@ -1106,21 +1143,27 @@ object Bridge : EventListener {
         // Two taps land on the same adapter row before it is refreshed, and the
         // second cannot see the first: without this the peer got it twice.
         if (!retrying.add(chatId + KEY_SEP + msgId)) return
-        // Its own worker, not batchExecutor: that one carries forwards and
-        // ordered multi-file shares, and a chat's worth of failed messages
-        // retrying against a dead transport would hold every one of them up for
-        // the full send timeout, one after another.
+        // Not batchExecutor: that one carries forwards and ordered multi-file
+        // shares, and a chat's worth of retries against a dead transport would
+        // hold every one of them up for a send timeout each.
         retryWorker.execute {
             try {
                 val msg = db.messagesByIds(chatId, listOf(msgId)).firstOrNull() ?: return@execute
-                // An attempt already in flight, or a receipt that settled it
-                // while this one waited its turn.
                 if (msg.sendPending || !msg.sendFailed) return@execute
                 if (!canResend(msg)) {
                     retryAttempts.remove(chatId + KEY_SEP + msgId)
                     return@execute
                 }
+                // TDLib still holds its own copy of this send; sending again
+                // without cancelling it delivers the message twice.
+                if (isTg(chatId) && !msgId.startsWith(LOCAL_ID) &&
+                    !Tg.cancelQueuedSend(chatId, msgId)
+                ) {
+                    // Already sent; its own update clears the mark.
+                    return@execute
+                }
                 db.setSendPending(chatId, msgId)
+                armSendWatchdog(msg)
                 notifyChat(chatId)
                 val quoted = msg.quotedId.takeIf { it.isNotEmpty() }
                     ?.let { db.messagesByIds(chatId, listOf(it)).firstOrNull() }
@@ -1132,8 +1175,6 @@ object Bridge : EventListener {
         }
     }
 
-    // The same dispatch a forward uses, so a re-sent sticker, voice note or
-    // document keeps its type, duration and name.
     private fun sendRow(
         p: Protocol, target: String, msgId: String, m: MessageRow, quoted: MessageRow?,
         mentions: List<Mention>,
@@ -1162,9 +1203,6 @@ object Bridge : EventListener {
 
     private val NEEDS_LOCAL_FILE = PICTURE_TYPES + setOf("video", "audio", "document")
 
-    // Doubling, then held at a minute: ten attempts spread over about six
-    // minutes, which outlasts a lift, a tunnel or a wifi handover without
-    // hammering a transport that is plainly down.
     private val RETRY_DELAYS_SECONDS = longArrayOf(2, 4, 8, 16, 32, 64, 64, 64, 64, 64)
     private val retryScheduler = Executors.newSingleThreadScheduledExecutor()
     private val retryWorker = Executors.newSingleThreadExecutor()
@@ -1173,14 +1211,12 @@ object Bridge : EventListener {
 
     private fun scheduleRetry(chatId: String, msgId: String) {
         val key = chatId + KEY_SEP + msgId
-        // WhatsApp and Signal report one failure twice — the bridge's own event
-        // and then the empty answer the send returns — and counting both spent
-        // two rungs of the ladder per attempt: ten attempts became five, and the
-        // 2s, 8s and 32s waits were never used at all.
+        // WhatsApp and Signal report one failure twice, as the bridge's event
+        // and then as the send's empty answer. Counting both spent two rungs
+        // per attempt: ten attempts became five.
         if (retryTasks.containsKey(key)) return
         val attempt = (retryAttempts[key] ?: 0) + 1
         retryAttempts[key] = attempt
-        // Out of attempts: the marker stays, and a tap starts the ten over.
         if (attempt > RETRY_DELAYS_SECONDS.size) return
         retryTasks[key] = retryScheduler.schedule(
             { retryTasks.remove(key); resend(chatId, msgId) },
@@ -1197,8 +1233,8 @@ object Bridge : EventListener {
         retryAttempts.remove(chatId + KEY_SEP + msgId)
     }
 
-    // Both maps outlive the row otherwise: a deleted message left an armed wait
-    // that fired into nothing, and its attempt count behind for the whole run.
+    // A deleted message left an armed wait firing into nothing, and its attempt
+    // count behind for the rest of the run.
     private fun forgetChatRetries(chatId: String) {
         val prefix = chatId + KEY_SEP
         retryTasks.keys.filter { it.startsWith(prefix) }
@@ -1305,9 +1341,8 @@ object Bridge : EventListener {
     private fun forwardOneBlocking(
         target: String, m: MessageRow, quoted: MessageRow?, mentions: List<Mention> = emptyList(),
     ): Boolean {
-        // Staged inline rather than on stageExecutor: a batch has to reach the
-        // target in the order it was picked, and each send is what holds the
-        // next one back.
+        // Staged inline, not on stageExecutor: a batch has to reach the target
+        // in the order it was picked.
         val row = stage(
             target, mintId(target), m.text, m.msgType, m.filePath, quoted, m.latitude, m.longitude
         )
@@ -2380,28 +2415,36 @@ object Bridge : EventListener {
         notifyChatRow(chatId, msgId)
     }
 
-    override fun onMessageSendFailed(chatId: String, msgId: String) {
+    override fun onMessageSendFailed(chatId: String, msgId: String) =
+        markSendFailed(chatId, msgId, retry = true)
+
+    private fun markSendFailed(chatId: String, msgId: String, retry: Boolean) {
         if (wiping) return
+        disarmSendWatchdog(chatId, msgId)
         db.setSendFailed(chatId, msgId)
         notifyChatRow(chatId, msgId)
+        if (!retry) return
+        // The mark goes up either way; the ladder waits for the attempt still
+        // inside the transport to answer and arm it itself.
+        if (sendInFlight.contains(chatId + KEY_SEP + msgId)) return
         val first = retryAttempts[chatId + KEY_SEP + msgId] == null
         scheduleRetry(chatId, msgId)
-        // Once per message, not once per attempt: a send off the share sheet is
-        // otherwise invisible (that screen is gone by the time the upload runs),
-        // and ten toasts for the ten retries would be worse than none.
+        // Once per message, not per attempt: a send off the share sheet is
+        // otherwise invisible, but ten toasts for the ten retries are worse
+        // than none.
         if (first && chatId != activeChatId) toastUi(R.string.send_failed)
     }
 
     fun onMessageSendOk(chatId: String, msgId: String) {
         if (wiping) return
-        // No row under the id the protocol just settled means the staged row has
-        // not been re-keyed to it yet: Telegram reports on its own thread and can
-        // in principle beat the sendMessage answer [runSend] is still waiting
-        // for. One field is enough — Telegram sends go out on a single thread,
-        // so only ever one of them is waiting to be re-keyed.
+        // No row under the settled id means the staged row has not been re-keyed
+        // yet: Telegram reports on its own thread and can beat the sendMessage
+        // answer [runSend] waits for. One field, because its sends go out on a
+        // single thread.
         if (!db.hasMessage(chatId, msgId)) settledBeforeRekey = chatId + KEY_SEP + msgId
+        disarmSendWatchdog(chatId, msgId)
         forgetRetry(chatId, msgId)
-        db.clearSendPending(chatId, msgId)
+        db.clearSendMarks(chatId, msgId)
         notifyChatRow(chatId, msgId)
     }
 

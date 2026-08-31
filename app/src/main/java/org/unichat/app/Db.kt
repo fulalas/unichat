@@ -155,10 +155,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
         private const val CREATE_TIME_INDEX =
             "CREATE INDEX IF NOT EXISTS idx_msg_time ON messages(chat_id, time_sent)"
 
-        // The chat's reading position. In the database rather than in prefs so it
-        // is on disk the moment the scroll stops: a force stop, a kill or a flat
-        // battery never runs onStop, and that is exactly when the position of
-        // the chat the user was reading is the one worth keeping.
+        // In the database, not prefs: a force stop or a kill never runs onStop,
+        // which is exactly when the reading position is worth keeping.
         private const val CREATE_SCROLL =
             "CREATE TABLE IF NOT EXISTS scroll (chat_id TEXT PRIMARY KEY, " +
                 "msg_id TEXT NOT NULL, offset INTEGER NOT NULL)"
@@ -886,10 +884,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
         )
     }
 
-    // The row the user sees the instant they hit send, before any transport has
-    // been asked anything. Not filtered through suppressed(): a chat the user
-    // deleted and is now typing into is a chat they want back, and the send
-    // would otherwise vanish without a trace.
+    // Not filtered through suppressed(): a chat the user deleted and is now
+    // typing into is one they want back, and the send vanished without a trace.
     fun stageOutgoing(m: MessageRow) {
         deletedChats.remove(m.chatId)
         writableDatabase.transact {
@@ -907,26 +903,32 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
         }
     }
 
+    fun isSendPending(chatId: String, msgId: String): Boolean = queryFirst(
+        "SELECT send_pending FROM messages WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+    ) { it.getInt(0) != 0 } ?: false
+
+    // send_failed is deliberately left standing: the mark stays until the
+    // message is really sent, so a retry in progress must not clear it and leave
+    // the row with no mark and no tick.
     fun setSendPending(chatId: String, msgId: String) {
         writableDatabase.execSQL(
-            "UPDATE messages SET send_pending=1, send_failed=0 WHERE chat_id=? AND id=?",
+            "UPDATE messages SET send_pending=1 WHERE chat_id=? AND id=?",
             arrayOf(chatId, msgId)
         )
     }
 
-    fun clearSendPending(chatId: String, msgId: String) {
+    // Both marks: a send the watchdog gave up on can still land, and a red mark
+    // left on a delivered message makes tapping it send a second copy.
+    fun clearSendMarks(chatId: String, msgId: String) {
         writableDatabase.execSQL(
-            "UPDATE messages SET send_pending=0 WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+            "UPDATE messages SET send_pending=0, send_failed=0 WHERE chat_id=? AND id=?",
+            arrayOf(chatId, msgId)
         )
     }
 
-    // Telegram assigns the id itself, so the staged row is re-keyed to whatever
-    // TDLib answered with. Reactions move with it or they would be orphaned.
-    //
-    // A row already under the new id means the protocol's own copy got here
-    // first — it is the authoritative one, so the staged row is dropped instead
-    // of overwriting it, which would have replaced a sent message with a row
-    // still marked unsent.
+    // Reactions move with the row or they are orphaned. A row already under the
+    // new id means the protocol's own copy got here first, so the staged one is
+    // dropped rather than overwriting a sent message with an unsent row.
     fun renameMessage(chatId: String, oldId: String, newId: String) = writableDatabase.transact {
         val taken = queryFirst(
             "SELECT 1 FROM messages WHERE chat_id=? AND id=? LIMIT 1", arrayOf(chatId, newId)
@@ -945,14 +947,11 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
         )
     }
 
-    // A send in flight cannot survive the process: nothing is left to report its
-    // outcome, so it becomes the user's to retry rather than a bubble stuck
-    // ticking forever.
-    //
-    // Except a Telegram message TDLib has already accepted — its send queue
-    // outlives this process and it will deliver and report on the next start, so
-    // flagging those offered a retry that sent the peer a second copy. A row
-    // still under its staged id never reached TDLib and is ours to fail.
+    // A send in flight cannot survive the process: nothing is left to report
+    // its outcome. Except a Telegram message TDLib accepted — its send queue
+    // outlives the process and it reports on the next start, so flagging those
+    // offered a retry that sent the peer a second copy. A row still under its
+    // staged id never reached TDLib and is ours to fail.
     fun failStalePending() {
         writableDatabase.execSQL(
             "UPDATE messages SET send_pending=0, send_failed=1 WHERE send_pending=1 " +

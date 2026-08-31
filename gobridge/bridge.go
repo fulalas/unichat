@@ -717,17 +717,20 @@ func GetSelfId(connId int) string {
 	return strFromJid(*client.Store.ID)
 }
 
-// The app stages its own row before this is reached, under an id minted by
-// NewMessageId, so the send carries that id rather than generating one here:
-// a receipt, a reaction or an edit that lands before the send returns must have
-// something to attach to, and there is exactly one row per message for its
-// whole life.
+// The id comes from the app, which staged its row under it before calling: a
+// receipt, reaction or edit landing before the send returns needs a row to
+// attach to.
+// whatsmeow's default is 75s, and nothing is known about the message until the
+// ack arrives — a minute of silence with no mark and no retry. Retrying early is
+// safe: it goes out under the same message id, which the server deduplicates.
+const sendAckTimeout = 8 * time.Second
+
 func sendWithEcho(c *conn, chatJid types.JID, msgID string, message *waE2E.Message, what string) string {
 	if msgID == "" {
 		msgID = c.getClient().GenerateMessageID()
 	}
 	resp, err := c.getClient().SendMessage(context.Background(), chatJid, message,
-		whatsmeow.SendRequestExtra{ID: msgID})
+		whatsmeow.SendRequestExtra{ID: msgID, Timeout: sendAckTimeout})
 	if err != nil {
 		c.log(LogWarning, fmt.Sprintf("%s error %v", what, err))
 		failEcho(c, chatJid, msgID)
@@ -1014,6 +1017,9 @@ func sendMedia(c *conn, chatId string, msgID string, filePath string, msgType st
 		return ""
 	}
 	message, ext := build(uploaded)
+	// Default ack timeout, not the short one the text path uses: a media send
+	// that times out skips finishMediaSend, leaving the row on the cacheDir
+	// staging copy that gets swept — no bytes behind a message the peer has.
 	resp, err := client.SendMessage(context.Background(), chatJid, message,
 		whatsmeow.SendRequestExtra{ID: msgID})
 	if err != nil {

@@ -513,8 +513,6 @@ func SignalSendTextQuoted(chatId, msgId, text, styles, quotedId, quotedText, quo
 	}
 	_ = c
 
-	// Signal identifies a message by the timestamp the sender stamped on it, so
-	// the id the app staged its row under IS the timestamp this must go out with.
 	timestamp := sgTimestamp(msgId)
 	ranges := sgStyleRanges(styles)
 	dm := &signalpb.DataMessage{
@@ -1235,9 +1233,9 @@ func isWordUnit(u uint16) bool {
 // message goes to the account's OTHER devices only. Without this the bubble
 // never appeared and the chat looked like nothing had been sent. WhatsApp does
 // the same thing (see echoLocalMedia).
-// A Signal message id is the millisecond timestamp it was stamped with, so the
-// app can mint one before any send and the two must agree exactly — a mismatch
-// makes every receipt, reaction and edit for that message unmatchable.
+// A Signal message id IS the millisecond timestamp it was stamped with, and the
+// two must agree exactly: a mismatch makes every receipt, reaction and edit for
+// that message unmatchable.
 func sgTimestamp(msgId string) uint64 {
 	if ts, err := strconv.ParseUint(msgId, 10, 64); err == nil && ts > 0 {
 		return ts
