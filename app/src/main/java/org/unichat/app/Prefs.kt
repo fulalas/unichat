@@ -9,7 +9,6 @@ object Prefs {
     private const val KEY_FONT = "font_scale"
     private const val KEY_TG_LINKED = "tg_linked"
     private const val KEY_TG_SELF = "tg_self_id"
-    private const val KEY_SCROLL = "scroll_"
     private const val KEY_COMPLETE = "hist_done_"
     private const val KEY_DRAFT = "draft_"
     private const val KEY_PROTO_ENABLED = "proto_enabled_"
@@ -35,24 +34,6 @@ object Prefs {
     fun setFontScale(ctx: Context, scale: Float) =
         prefs(ctx).edit().putFloat(KEY_FONT, scale.coerceIn(FONT_MIN, FONT_MAX)).apply()
 
-    // A message id plus pixel offset, not the layout manager's saved state:
-    // adapter positions are meaningless in a fresh process, where the loaded
-    // window is rebuilt from scratch.
-    fun scrollAnchor(ctx: Context, chatId: String): Pair<String, Int>? {
-        val raw = prefs(ctx).getString(KEY_SCROLL + chatId, null) ?: return null
-        val at = raw.lastIndexOf(':')
-        if (at <= 0) return null
-        val offset = raw.substring(at + 1).toIntOrNull() ?: return null
-        return raw.substring(0, at) to offset
-    }
-
-    fun setScrollAnchor(ctx: Context, chatId: String, msgId: String?, offset: Int) {
-        val e = prefs(ctx).edit()
-        if (msgId.isNullOrEmpty()) e.remove(KEY_SCROLL + chatId)
-        else e.putString(KEY_SCROLL + chatId, "$msgId:$offset")
-        e.apply()
-    }
-
     // Persisted, unlike Bridge's in-memory copy, because search uses it to tell
     // you it really did read everything — an answer that must survive a
     // restart.
@@ -77,7 +58,7 @@ object Prefs {
         val p = prefs(ctx)
         val e = p.edit()
         for (key in p.all.keys) {
-            for (prefix in arrayOf(KEY_COMPLETE, KEY_DRAFT, KEY_SCROLL)) {
+            for (prefix in arrayOf(KEY_COMPLETE, KEY_DRAFT)) {
                 if (key.startsWith(prefix) && matches(key.removePrefix(prefix))) e.remove(key)
             }
         }

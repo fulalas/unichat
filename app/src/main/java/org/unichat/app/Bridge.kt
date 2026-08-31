@@ -733,7 +733,7 @@ object Bridge : EventListener {
     fun deleteChat(chatId: String, deleteMedia: Boolean) = executor.execute {
         val mediaPaths = if (deleteMedia) db.chatMediaPaths(chatId) else emptyList()
         db.deleteChat(chatId)
-        appContext?.let { Prefs.setScrollAnchor(it, chatId, null, 0) }
+        db.clearScroll(chatId)
         // drop this chat's pagination state so a later re-sync starts clean —
         // including the persisted "searched everything" claim, which a re-synced
         // chat has not earned again

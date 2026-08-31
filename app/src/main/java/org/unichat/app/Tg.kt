@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicLong
 object Tg {
 
     private const val TAG = "UniChatTg"
+    private const val LISTENED_PAGES = 12
 
     private const val MEMBER_PAGE = 200
     private const val REACTION_PAGE = 50
@@ -123,6 +124,11 @@ object Tg {
                 .getPackageInfo(context.packageName, 0).versionName ?: appVersion
         }
         clientId = TdJson.createClientId()
+        // Errors only. TDLib's default dumps every query, every message body and
+        // every contact into logcat: thousands of lines a second, which costs
+        // real CPU, leaks the address book to any log reader, and evicts the
+        // app's own lines from the buffer within seconds.
+        send(JSONObject().put("@type", "setLogVerbosityLevel").put("new_verbosity_level", 1))
         Thread({ receiveLoop() }, "tg-receive").start()
         send(JSONObject().put("@type", "getOption").put("name", "version"))
     }
@@ -252,6 +258,7 @@ object Tg {
                 historyExhausted.clear()
                 historyBusy.clear()
                 repairAttempted.clear()
+                listenedSwept.clear()
                 avatarPaths.clear()
                 syncAllChat = null
                 exportChatId = null
@@ -737,6 +744,10 @@ object Tg {
                 quotedText = quotedText, quotedType = quotedType,
                 senderName = senderName,
                 forwarded = msg.optJSONObject("forward_info") != null,
+                // Carried on the row, not only applied to the stored one: a
+                // search window renders messages the database never held, and
+                // without this every voice note in it drew the unplayed dot.
+                played = listened,
             ),
             listened,
         )
@@ -1471,7 +1482,7 @@ object Tg {
                 // leaving the user stuck at the top edge with no new page
                 historyBusy.remove(chatId)
             }
-            syncPlayedState(chatId)
+            io.execute { syncPlayedState(chatId) }
         }
     }
 
@@ -1512,10 +1523,12 @@ object Tg {
                 ) {
                     Bridge.notifyChat(chatId)
                 }
-                syncPlayedState(chatId)
             } finally {
                 historyBusy.remove(chatId)
             }
+            // On [io], not this thread: the sweep is a dozen blocking requests,
+            // and pager is the single thread every history page is fetched on.
+            io.execute { syncPlayedState(chatId) }
         }
     }
 
@@ -1659,6 +1672,15 @@ object Tg {
     // its recipient listened would keep its dot for good. Run on every chat open
     // and every page, so it converges as you scroll.
     private fun syncPlayedState(chatId: String) {
+        // Every request below is answered "Unauthorized" until TDLib comes up,
+        // and this runs from the chat's onCreate — on a cold start the whole
+        // sweep used to no-op with nothing logged, leaving the repair to
+        // whenever the user next paged history.
+        if (!awaitReady()) return
+        // Ahead of the getMessages sweep, not after it: that one reads TDLib's
+        // own store, so it cannot repair what the store itself has wrong, and
+        // its early returns used to skip this entirely.
+        var changed = refreshOwnListened(chatId)
         // Two repairs share one round-trip because TDLib caps getMessages at
         // 100; the budget is split so placeholders can never starve the contact
         // repair.
@@ -1666,16 +1688,13 @@ object Tg {
             Bridge.db.emptyContactSenders(chatId, 10).map { it.first })
             .filter { repairAttempted.add("$chatId/$it") }
         val ids = LinkedHashSet(Bridge.db.unplayedAudioIds(chatId, 60)) + stale
-        if (ids.isEmpty()) return
         val wanted = JSONArray()
         for (id in ids) id.toLongOrNull()?.let { wanted.put(it) }
-        if (wanted.length() == 0) return
-        val res = request(
+        val res = if (wanted.length() == 0) null else request(
             JSONObject().put("@type", "getMessages")
                 .put("chat_id", chatIdOf(chatId)).put("message_ids", wanted)
-        ) ?: return
-        val msgs = res.optJSONArray("messages") ?: return
-        var changed = false
+        )
+        val msgs = res?.optJSONArray("messages") ?: JSONArray()
         for (i in 0 until msgs.length()) {
             // a message the server no longer has comes back as a null entry
             val m = msgs.optJSONObject(i) ?: continue
@@ -1684,8 +1703,7 @@ object Tg {
             if (content.optString("@type") == "messageVoiceNote" &&
                 content.optBoolean("is_listened")
             ) {
-                Bridge.db.setPlayed(chatId, msgId)
-                changed = true
+                if (Bridge.db.setPlayed(chatId, msgId) > 0) changed = true
             }
             if (msgId in stale) {
                 Bridge.db.deleteMessage(chatId, msgId)
@@ -1694,6 +1712,67 @@ object Tg {
             }
         }
         if (changed) Bridge.notifyChat(chatId)
+    }
+
+    // getMessages above answers from TDLib's own store, which never learns that
+    // the other side listened to a voice note WE sent: the server's update is
+    // dropped outright unless that message happens to be loaded in memory at the
+    // time (MessagesManager::read_message_content_from_updates), so a chat the
+    // app had not opened kept is_listened false for good. searchChatMessages is
+    // the way back to the server — passing a sender is what makes TDLib skip its
+    // message database. Our own messages are picked out here rather than with
+    // searchChatMessages' sender_id: Telegram answers INPUT_FILTER_INVALID for a
+    // sender combined with a filter outside a group.
+    // Once per chat per run: the walk costs a server round trip per page, and a
+    // note the other side never listened to keeps the list non-empty forever.
+    private val listenedSwept: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    private fun refreshOwnListened(chatId: String): Boolean {
+        val pending = Bridge.db.unplayedOwnAudioIds(chatId, 200).toHashSet()
+        if (pending.isEmpty() || chatId in listenedSwept) return false
+        val remaining = pending.toMutableSet()
+        // The oldest pending id decides how far back to page: the answer comes
+        // newest first, so once a page ends below it every one has been seen.
+        // A single page only reached the newest 100 messages we sent, which for
+        // a busy chat is a few days and never the notes further back.
+        val oldest = pending.mapNotNull { it.toLongOrNull() }.minOrNull() ?: return false
+        var changed = false
+        var from = 0L
+        var round = 0
+        while (remaining.isNotEmpty() && round < LISTENED_PAGES) {
+            round++
+            val res = request(
+                JSONObject().put("@type", "searchChatMessages")
+                    .put("chat_id", chatIdOf(chatId))
+                    .put("query", "")
+                    .put(
+                        "sender_id",
+                        JSONObject().put("@type", "messageSenderUser").put("user_id", myId)
+                    )
+                    .put("from_message_id", from).put("offset", 0).put("limit", 100)
+            ) ?: break
+            val msgs = res.optJSONArray("messages") ?: break
+            if (msgs.length() == 0) break
+            var last = 0L
+            for (i in 0 until msgs.length()) {
+                val m = msgs.optJSONObject(i) ?: continue
+                val id = m.optLong("id")
+                if (id > 0) last = id
+                val msgId = id.toString()
+                if (!remaining.remove(msgId)) continue
+                if (m.optJSONObject("content")?.optBoolean("is_listened") != true) continue
+                if (Bridge.db.setPlayed(chatId, msgId) > 0) changed = true
+            }
+            if (last == 0L || last <= oldest) break
+            // The answer's own cursor: from_message_id is inclusive at offset 0,
+            // so reusing the last id re-read one message per page and a page of
+            // exactly that message could never advance.
+            from = res.optLong("next_from_message_id").takeIf { it != 0L } ?: last
+        }
+        // Only a completed walk counts: a timed-out one used to disable the
+        // repair for this chat for the rest of the run.
+        if (remaining.isEmpty() || round < LISTENED_PAGES) listenedSwept.add(chatId)
+        return changed
     }
 
     @Volatile private var syncAllChat: String? = null

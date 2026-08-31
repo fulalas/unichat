@@ -119,7 +119,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 30) {
 
     private val ctx: Context = context.applicationContext
 
@@ -153,6 +153,13 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         private const val CREATE_TIME_INDEX =
             "CREATE INDEX IF NOT EXISTS idx_msg_time ON messages(chat_id, time_sent)"
 
+        // The chat's reading position. In the database rather than in prefs so it
+        // is on disk the moment the scroll stops: a force stop, a kill or a flat
+        // battery never runs onStop, and that is exactly when the position of
+        // the chat the user was reading is the one worth keeping.
+        private const val CREATE_SCROLL =
+            "CREATE TABLE IF NOT EXISTS scroll (chat_id TEXT PRIMARY KEY, " +
+                "msg_id TEXT NOT NULL, offset INTEGER NOT NULL)"
         // messageChat looks a message up by id, which the (chat_id, id) primary key
         // cannot serve — it full-scanned the largest table, on the media
         // download path (every download whose first setFileState matched 0 rows).
@@ -233,6 +240,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
                 "latitude REAL NOT NULL DEFAULT 0, longitude REAL NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(chat_id, id))"
         )
+        db.execSQL(CREATE_SCROLL)
         db.execSQL(CREATE_TIME_INDEX)
         db.execSQL(CREATE_UNREAD_INDEX)
         db.execSQL(CREATE_ID_INDEX)
@@ -393,6 +401,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         }
         if (oldVersion < 29) {
             db.execSQL("ALTER TABLE messages ADD COLUMN send_failed INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 30) {
+            db.execSQL(CREATE_SCROLL)
         }
     }
 
@@ -651,6 +662,31 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         arrayOf(chatId, limit.toString())
     ) { it.getString(0) }
 
+    // msgId "" means the chat was at the bottom, which is not the same as having
+    // no position: the chat then opens on whatever arrived since.
+    fun setScroll(chatId: String, msgId: String, offset: Int) {
+        writableDatabase.execSQL(
+            "INSERT INTO scroll(chat_id, msg_id, offset) VALUES(?,?,?) " +
+                "ON CONFLICT(chat_id) DO UPDATE SET msg_id=excluded.msg_id, offset=excluded.offset",
+            arrayOf(chatId, msgId, offset)
+        )
+    }
+
+    fun clearScroll(chatId: String) {
+        writableDatabase.execSQL("DELETE FROM scroll WHERE chat_id=?", arrayOf(chatId))
+    }
+
+    fun scroll(chatId: String): Pair<String, Int>? = queryFirst(
+        "SELECT msg_id, offset FROM scroll WHERE chat_id=?",
+        arrayOf(chatId)
+    ) { it.getString(0) to it.getInt(1) }
+
+    fun unplayedOwnAudioIds(chatId: String, limit: Int): List<String> = queryList(
+        "SELECT id FROM messages WHERE chat_id=? AND msg_type='audio' AND played=0 AND from_me=1 " +
+            "ORDER BY time_sent DESC LIMIT ?",
+        arrayOf(chatId, limit.toString())
+    ) { it.getString(0) }
+
     fun placeholderMessageIds(chatId: String, limit: Int): List<String> = queryList(
         "SELECT id FROM messages WHERE chat_id=? AND msg_type='' AND file_id='' " +
             "AND text LIKE '[%]' ORDER BY time_sent DESC LIMIT ?",
@@ -667,12 +703,16 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         arrayOf(chatId, limit.toString())
     ) { Pair(it.getString(0), it.getString(1)) }
 
-    fun setPlayed(chatId: String, msgId: String) {
-        writableDatabase.execSQL(
-            "UPDATE messages SET played=1, send_failed=0 WHERE chat_id=? AND id=?",
-            arrayOf(chatId, msgId)
-        )
-    }
+    // Returns the rows updated, like setFileState: an id that matches nothing is
+    // how a played state read from the server goes missing without a trace.
+    fun setPlayed(chatId: String, msgId: String): Int =
+        writableDatabase.compileStatement(
+            "UPDATE messages SET played=1, send_failed=0 WHERE chat_id=? AND id=?"
+        ).use {
+            it.bindString(1, chatId)
+            it.bindString(2, msgId)
+            it.executeUpdateDelete()
+        }
 
     // Keyed by id, not by file path: Telegram serves a single file for every
     // copy of the same voice note, so a path can belong to several rows.
@@ -735,6 +775,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 29) {
         execSQL("DELETE FROM chats WHERE ${predicate("id")}")
         execSQL("DELETE FROM contacts WHERE ${predicate("id")}")
         execSQL("DELETE FROM deleted_chats WHERE ${predicate("id")}")
+        execSQL("DELETE FROM scroll WHERE ${predicate("chat_id")}")
     }
 
     fun clearSignalData() = clearProtocolData { "$it LIKE 'sg:%'" }

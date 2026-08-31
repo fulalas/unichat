@@ -102,7 +102,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private var hasNewBelow = false
     private var pendingVideoOpen: String? = null
     private val quoteJumpReturns = ArrayDeque<String>()
-    private var loadLimit = LOCAL_PAGE
+    @Volatile private var loadLimit = LOCAL_PAGE
     private var loadingMoreLocal = false
 
     private var seekQuotedId: String? = null
@@ -354,6 +354,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         messageList.itemAnimator = null
 
         scrollFab.setOnClickListener {
+            // A restore holds its position for a few layout passes, and only a
+            // finger drag used to call this off — so the hold pulled the list
+            // straight back and the chevron did nothing.
+            cancelHold()
             val lastVisible = lm.findLastVisibleItemPosition()
             var returnId: String? = null
             while (quoteJumpReturns.isNotEmpty()) {
@@ -365,6 +369,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             } else {
                 hasNewBelow = false
                 messageList.scrollToPosition(adapter.itemCount - 1)
+                // scrollToPosition dispatches no scroll-state change, so the idle
+                // hook never runs and the chat reopened at the old position.
+                messageList.post { saveScrollAnchor(isAtBottom()) }
             }
             updateScrollFab()
         }
@@ -383,6 +390,14 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             }
             override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) cancelHold()
+                // Written on every scroll stop, not only in onStop: a force stop
+                // (or any kill) never runs onStop, so the position of the chat
+                // that was open was the one position never saved.
+                if (newState == RecyclerView.SCROLL_STATE_IDLE && restoredScroll &&
+                    !searchActive && !windowMode
+                ) {
+                    saveScrollAnchor(isAtBottom())
+                }
             }
         })
 
@@ -598,6 +613,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun reload(markRead: Boolean = false) {
         windowMode = false
         io.execute {
+            if (!restoredScroll) widenForSavedAnchor()
             val messages = Bridge.db.messages(chatId, loadLimit)
             val names = contactNames()
             val quoteNames = quoteNamesFor(messages, names)
@@ -615,13 +631,20 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             } else {
                 null
             }
+            // Against the rows just read, not the adapter's: on a cold start the
+            // adapter is still empty, so this always read "no saved position" and
+            // the first-unread jump cancelled the restore it was meant to yield to.
+            val hasStored = storedScroll?.first?.let { id -> messages.any { it.id == id } } == true
             runOnUiThread {
                 // Guarded like every other async callback here: this one commits
                 // a list, restores the layout manager's state and can register a
                 // ViewTreeObserver listener, none of which may run on a screen
                 // the user has already left.
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                if (unreadJump != null && !restoredScroll && pendingJumpId == null) {
+                // A stored reading position wins: the jump runs after the restore
+                // below, so letting both through put the user at the first unread
+                // instead of where they left off.
+                if (unreadJump != null && !restoredScroll && pendingJumpId == null && !hasStored) {
                     pendingJumpId = unreadJump
                 }
                 pendingVideoOpen?.let { id ->
@@ -646,7 +669,15 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     newest.id != adapter.messagesSnapshot().lastOrNull()?.id
                 adapter.submit(messages, names, quoteNames) {
                     loadingMoreLocal = false
+                    val pinned = pendingAnchor
+                    pendingAnchor = null
                     when {
+                        pinned != null && adapter.indexOfMessage(pinned.first) >= 0 -> {
+                            restoredScroll = true
+                            holdScrollToAnchor(
+                                pinned.first, adapter.indexOfMessage(pinned.first), pinned.second
+                            )
+                        }
                         !restoredScroll -> {
                             restoredScroll = true
                             val saved = scrollStates[chatId]
@@ -940,10 +971,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // go blank (it was querying an id that no longer has any messages)
         if (fromId != this.chatId) return
         scrollStates.remove(fromId)?.let { scrollStates[toId] = it }
-        Prefs.scrollAnchor(this, fromId)?.let { (id, off) ->
-            Prefs.setScrollAnchor(this, toId, id, off)
-            Prefs.setScrollAnchor(this, fromId, null, 0)
-        }
+        Bridge.db.scroll(fromId)?.let { (id, off) -> Bridge.db.setScroll(toId, id, off) }
+        Bridge.db.clearScroll(fromId)
         pendingRecordings.remove(fromId)?.let { pendingRecordings[toId] = it }
         chatId = toId
         Bridge.openChat(toId, owner = this) // re-route active-chat / notification suppression
@@ -1082,6 +1111,21 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchLimit = SEARCH_LOAD_LIMIT
         searchCount.text = ""
         hideKeyboard(searchInput)
+        // Back to the chat's own history: windowMode is cleared by reload alone,
+        // and left set the screen kept a server window that no new message could
+        // reach. The position is pinned across it so the list does not move.
+        pendingAnchor = visibleAnchor()
+        reload()
+    }
+
+    private var pendingAnchor: Pair<String, Int>? = null
+
+    private fun visibleAnchor(): Pair<String, Int>? {
+        val pos = lm.findFirstVisibleItemPosition()
+        if (pos < 0) return null
+        val id = adapter.messageIdAt(pos)
+        if (id.isEmpty()) return null
+        return id to (lm.findViewByPosition(pos)?.top ?: 0)
     }
 
     // Coalesces keystrokes: runSearch rebinds rows and kicks off a scan, and it
@@ -1468,24 +1512,85 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // rebuilt between runs. Nothing is stored while at the bottom — that chat
     // should open on whatever arrived since.
     private fun saveScrollAnchor(atBottom: Boolean) {
+        val id: String
+        val offset: Int
         if (atBottom) {
-            Prefs.setScrollAnchor(this, chatId, null, 0)
-            return
+            id = ""
+            offset = 0
+        } else {
+            val pos = lm.findFirstVisibleItemPosition()
+            if (pos < 0) return
+            id = adapter.messageIdAt(pos)
+            if (id.isEmpty()) return
+            offset = lm.findViewByPosition(pos)?.top ?: 0
         }
-        val pos = lm.findFirstVisibleItemPosition()
-        if (pos < 0) return
-        val id = adapter.messageIdAt(pos)
-        if (id.isEmpty()) return
-        val offset = lm.findViewByPosition(pos)?.top ?: 0
-        Prefs.setScrollAnchor(this, chatId, id, offset)
+        if (id == savedAnchorId && offset == savedAnchorOffset) return
+        savedAnchorId = id
+        savedAnchorOffset = offset
+        // Written here, not queued on a worker: a queued task is exactly what a
+        // force stop throws away. One row on a WAL database.
+        Bridge.db.setScroll(chatId, id, offset)
     }
 
+    private var savedAnchorId: String? = null
+    private var savedAnchorOffset = 0
+
+    // In a fresh process the window is rebuilt at LOCAL_PAGE rows, so a position
+    // saved further back than that was not in the list and the chat opened at
+    // the bottom. Load down to it before the first query rather than after.
+    private fun widenForSavedAnchor() {
+        val stored = Bridge.db.scroll(chatId)
+        storedScroll = stored
+        val msgId = stored?.first.orEmpty()
+        if (msgId.isEmpty()) return
+        val depth = Bridge.db.messageDepth(chatId, msgId)
+        val need = depth + SEEK_CONTEXT_ROWS
+        if (depth > 0 && need > loadLimit && need <= SEARCH_LOAD_LIMIT) loadLimit = need
+    }
+
+    private var storedScroll: Pair<String, Int>? = null
+
     private fun restoreScrollAnchor(): Boolean {
-        val (msgId, offset) = Prefs.scrollAnchor(this, chatId) ?: return false
+        val (msgId, offset) = storedScroll ?: return false
+        if (msgId.isEmpty()) return false
         val pos = adapter.indexOfMessage(msgId)
         if (pos < 0) return false
-        lm.scrollToPositionWithOffset(pos, offset)
+        holdScrollToAnchor(msgId, pos, offset)
         return true
+    }
+
+    // A single scrollToPositionWithOffset does not survive the images: they
+    // decode over the next few layout passes, and with stackFromEnd the list
+    // re-anchors on its bottom child, so every late row height pushed the
+    // restored position off screen. Same reason holdScrollToMessage exists.
+    private fun holdScrollToAnchor(msgId: String, index: Int, offset: Int) {
+        lm.scrollToPositionWithOffset(index, offset)
+        cancelHold()
+        val start = SystemClock.uptimeMillis()
+        var targetIndex = index
+        var lastAdjust = start
+        var lastTop: Int? = null
+        val listener = object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                val now = SystemClock.uptimeMillis()
+                if (now - start > HOLD_MAX_MS) { cancelHold(); return }
+                if (targetIndex >= adapter.itemCount) {
+                    targetIndex = adapter.indexOfMessage(msgId)
+                    if (targetIndex < 0) { cancelHold(); return }
+                }
+                val view = lm.findViewByPosition(targetIndex)
+                val top = view?.top
+                if (top != null && top == lastTop) {
+                    if (now - lastAdjust > SETTLE_QUIET_MS) cancelHold()
+                    return
+                }
+                lastTop = top
+                lm.scrollToPositionWithOffset(targetIndex, offset)
+                lastAdjust = now
+            }
+        }
+        holdListener = listener
+        messageList.viewTreeObserver.addOnGlobalLayoutListener(listener)
     }
 
     private fun stepMatch(delta: Int) {
