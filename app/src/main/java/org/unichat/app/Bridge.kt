@@ -238,6 +238,7 @@ object Bridge : EventListener {
 
         fun setMuted(chatId: String, muted: Boolean)
         fun markChatRead(chatId: String)
+        fun reportVisible(chatId: String, msgIds: List<String>) {}
         fun markVoicePlayed(msg: MessageRow)
         fun openChat(chatId: String) {}
         fun closeChat(chatId: String) {}
@@ -685,6 +686,8 @@ object Bridge : EventListener {
 
         override fun setMuted(chatId: String, muted: Boolean) = Tg.setMuted(chatId, muted)
         override fun markChatRead(chatId: String) = Tg.markChatRead(chatId)
+        override fun reportVisible(chatId: String, msgIds: List<String>) =
+            Tg.reportVisible(chatId, msgIds)
         override fun markVoicePlayed(msg: MessageRow) = Tg.markVoicePlayed(msg.chatId, msg.id)
         override fun openChat(chatId: String) = Tg.openChat(chatId)
         override fun closeChat(chatId: String) = Tg.closeChat(chatId)
@@ -1851,6 +1854,9 @@ object Bridge : EventListener {
     }
 
     fun markChatRead(chatId: String) = proto(chatId).markChatRead(chatId)
+
+    fun reportVisible(chatId: String, msgIds: List<String>) =
+        proto(chatId).reportVisible(chatId, msgIds)
 
     private fun markChatReadWa(chatId: String) = executor.execute {
         val latest = db.latestUnread(chatId) ?: return@execute

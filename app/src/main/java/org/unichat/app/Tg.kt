@@ -18,6 +18,7 @@ object Tg {
 
     private const val MEMBER_PAGE = 200
     private const val REACTION_PAGE = 50
+private const val UNREAD_REACTION_PAGE = 100
 
     const val PREFIX = "tg:"
 
@@ -542,6 +543,11 @@ object Tg {
             }
             "updateFile" -> onFile(obj.getJSONObject("file"))
             "updateMessageInteractionInfo" -> onInteractionInfo(obj)
+            "updateChatUnreadReactionCount" -> {
+                if (obj.optInt("unread_reaction_count") > 0) {
+                    fetchUnreadReactions(idFor(obj.getLong("chat_id")))
+                }
+            }
             "updateChatNotificationSettings" -> {
                 val raw = obj.getLong("chat_id")
                 val muted = obj.getJSONObject("notification_settings").optInt("mute_for") > 0
@@ -587,6 +593,10 @@ object Tg {
         val muted = chat.optJSONObject("notification_settings")?.optInt("mute_for", 0) ?: 0
         Bridge.db.setMuted(id, muted > 0)
         last?.let { storeMessage(it) }
+        // The count only arrives as an update when it CHANGES; the value that
+        // was already there when the app was last killed ships here instead, so
+        // reading it only from the update missed the whole point of the sweep.
+        if (chat.optInt("unread_reaction_count") > 0) fetchUnreadReactions(id)
         val type = chat.optJSONObject("type")?.optString("@type") ?: ""
         if (type == "chatTypeBasicGroup" || type == "chatTypeSupergroup") {
             Bridge.db.upsertContact(id, title, "", isSelf = false, isGroup = true, isSaved = false)
@@ -864,11 +874,45 @@ object Tg {
         return file
     }
 
+    // The only reaction catch-up that reaches a private chat: TDLib refuses to
+    // poll reactions there (need_poll_dialog_message_reactions), and the count
+    // arrives on connect, so this is what recovers a reaction added while the
+    // app was dead — including on messages far older than any page we re-read.
+    private fun fetchUnreadReactions(chatId: String) = io.execute {
+        val answer = request(
+            JSONObject().put("@type", "searchChatMessages")
+                .put("chat_id", chatIdOf(chatId)).put("query", "")
+                .put("from_message_id", 0).put("offset", 0)
+                .put("limit", UNREAD_REACTION_PAGE)
+                .put(
+                    "filter",
+                    JSONObject().put("@type", "searchMessagesFilterUnreadReaction")
+                )
+        ) ?: return@execute
+        val arr = answer.optJSONArray("messages") ?: return@execute
+        var changed = false
+        for (i in 0 until arr.length()) {
+            val m = arr.optJSONObject(i) ?: continue
+            val msgId = m.optLong("id").toString()
+            // Skipped, never stored: requestHistoryPage anchors the next page on
+            // the OLDEST row held, so inserting a message from years back moves
+            // the anchor past everything between and the gap can never be paged
+            // in again.
+            if (!Bridge.db.hasMessage(chatId, msgId)) continue
+            val info = m.optJSONObject("interaction_info") ?: continue
+            if (applyReactions(chatId, msgId, info, preview = false)) changed = true
+        }
+        if (changed) Bridge.notifyChat(chatId)
+    }
+
     private fun onInteractionInfo(obj: JSONObject) {
         val chatId = idFor(obj.getLong("chat_id"))
         val msgId = obj.getLong("message_id").toString()
-        applyReactions(chatId, msgId, obj.optJSONObject("interaction_info"), preview = true)
-        Bridge.notifyChatRow(chatId, msgId)
+        // Gated: view and forward counts land in this update too, and the app
+        // stores neither, so rebinding for them is a query and a bind for nothing.
+        if (applyReactions(chatId, msgId, obj.optJSONObject("interaction_info"), preview = true)) {
+            Bridge.notifyChatRow(chatId, msgId)
+        }
     }
 
     // Called both for the live update AND when a message is stored: a message
@@ -877,9 +921,9 @@ object Tg {
     // this session stayed invisible.
     private fun applyReactions(
         chatId: String, msgId: String, info: JSONObject?, preview: Boolean,
-    ) {
-        Bridge.db.clearReactions(chatId, msgId)
+    ): Boolean {
         val arr = info?.optJSONObject("reactions")?.optJSONArray("reactions")
+        val wanted = LinkedHashMap<String, String>()
         for (i in 0 until (arr?.length() ?: 0)) {
             val r = arr!!.getJSONObject(i)
             val emoji = r.getJSONObject("type").optString("emoji")
@@ -890,12 +934,15 @@ object Tg {
             // thousands of inserts on the single thread that dispatches every
             // update and delivers every blocking response.
             val count = r.optInt("total_count", 1)
-            val label = if (count > 1) "$emoji$count" else emoji
-            Bridge.db.upsertReaction(chatId, msgId, "tg:r:$emoji", label)
+            wanted["tg:r:$emoji"] = if (count > 1) "$emoji$count" else emoji
         }
+        if (Bridge.db.reactionsOf(chatId, msgId).toMap() == wanted) return false
+        Bridge.db.clearReactions(chatId, msgId)
+        for ((sender, label) in wanted) Bridge.db.upsertReaction(chatId, msgId, sender, label)
         // Only the live update is a fresh event; replaying history must not
         // rewrite the chat's preview line with an old reaction.
         if (preview) Bridge.notifyChatsChanged()
+        return true
     }
 
     // Asked of the server: the Db rows for a Telegram message are one per
@@ -1525,6 +1572,19 @@ object Tg {
         )
     }
 
+    fun reportVisible(chatId: String, msgIds: List<String>) = executor.execute {
+        if (msgIds.isEmpty()) return@execute
+        val ids = JSONArray()
+        for (id in msgIds) id.toLongOrNull()?.let { ids.put(it) }
+        if (ids.length() == 0) return@execute
+        send(
+            JSONObject().put("@type", "viewMessages")
+                .put("chat_id", chatIdOf(chatId))
+                .put("message_ids", ids)
+                .put("force_read", false)
+        )
+    }
+
     fun markChatRead(chatId: String) = executor.execute {
         val latest = Bridge.db.latestUnread(chatId) ?: return@execute
         val mid = latest.id.toLongOrNull() ?: return@execute
@@ -1613,22 +1673,27 @@ object Tg {
     }
 
     fun requestInitialHistory(chatId: String) {
-        if (!historyBusy.add(chatId)) return
         // messageCount too: this is called from ChatActivity.onCreate, on the
         // main thread
-        pager.execute {
-            try {
-                if (Bridge.db.messageCount(chatId) < 60 &&
-                    fetchHistory(chatId, 0, 60) > 0
-                ) {
-                    Bridge.notifyChat(chatId)
+        io.execute {
+            // Only a chat with nothing to show is filled on `pager` under the
+            // busy slot. The refresh of an already-filled chat runs here
+            // instead: on `pager` it blocked the next "load older" behind a
+            // 30s request, and under the slot that page was dropped outright.
+            if (Bridge.db.messageCount(chatId) < 60) {
+                if (historyBusy.add(chatId)) {
+                    pager.execute {
+                        try {
+                            if (fetchHistory(chatId, 0, 60) > 0) Bridge.notifyChat(chatId)
+                        } finally {
+                            historyBusy.remove(chatId)
+                        }
+                    }
                 }
-            } finally {
-                historyBusy.remove(chatId)
+            } else if (fetchHistory(chatId, 0, 60) > 0) {
+                Bridge.notifyChat(chatId)
             }
-            // On [io], not this thread: the sweep is a dozen blocking requests,
-            // and pager is the single thread every history page is fetched on.
-            io.execute { syncPlayedState(chatId) }
+            syncPlayedState(chatId)
         }
     }
 

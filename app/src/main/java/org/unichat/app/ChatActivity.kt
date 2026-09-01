@@ -390,6 +390,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             }
             override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) cancelHold()
+                if (newState == RecyclerView.SCROLL_STATE_IDLE) reportVisible()
                 // Written on every scroll stop, not only in onStop: a force stop
                 // (or any kill) never runs onStop, so the position of the chat
                 // that was open was the one position never saved.
@@ -461,6 +462,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         super.onStart()
         Bridge.addListener(this)
         Bridge.openChat(chatId, owner = this)
+        // onStop closed the chat and TDLib dropped what it was told was on
+        // screen, so the same ids have to count as a new report.
+        reportedVisible = emptyList()
         val hook = {
             runOnUiThread {
                 // the earpiece fallback moves playback to the call stream, so
@@ -704,6 +708,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     // left looking at
                     consumePendingJump()
                     if (seekQuotedId != null) driveSeek()
+                    reportVisibleAfterLayout()
                 }
             }
             if (markRead) Bridge.markChatRead(chatId)
@@ -1131,6 +1136,34 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // Coalesces keystrokes: runSearch rebinds rows and kicks off a scan, and it
     // ran on every character typed, next to the keyboard's own frame budget.
     private val searchDebounce = Runnable { runSearch(searchInput.text?.toString().orEmpty()) }
+
+    private var reportedVisible: List<String> = emptyList()
+
+    // Pre-draw, not post(): the rows submitted just above are laid out later in
+    // the same frame, and asking before that read NO_POSITION and reported
+    // nothing at all for a chat opened and left without scrolling.
+    private fun reportVisibleAfterLayout() {
+        messageList.viewTreeObserver.addOnPreDrawListener(
+            object : android.view.ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    messageList.viewTreeObserver.removeOnPreDrawListener(this)
+                    reportVisible()
+                    return true
+                }
+            }
+        )
+    }
+
+    private fun reportVisible() {
+        val first = lm.findFirstVisibleItemPosition()
+        val last = lm.findLastVisibleItemPosition()
+        if (first < 0 || last < first) return
+        val ids = ArrayList<String>(last - first + 1)
+        for (pos in first..last) adapter.messageIdAt(pos).takeIf { it.isNotEmpty() }?.let(ids::add)
+        if (ids == reportedVisible) return
+        reportedVisible = ids
+        Bridge.reportVisible(chatId, ids)
+    }
 
     // notifyDataSetChanged() rebound the ENTIRE adapter — in search mode that
     // window holds up to SEARCH_LOAD_LIMIT (5000) rows, each bind re-running
