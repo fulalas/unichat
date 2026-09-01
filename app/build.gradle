@@ -56,8 +56,8 @@ android {
         applicationId "org.unichat.app"
         minSdk 29
         targetSdk 35
-        versionCode 269
-        versionName "0.50.9"
+        versionCode 275
+        versionName "0.51.5"
         // Without this, appcompat/material drag in ~70 locales UniChat has no
         // strings for, so an unlisted system language showed translated stock
         // dialog buttons next to an untranslated app.

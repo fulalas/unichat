@@ -224,6 +224,7 @@
     <string name="delete_chat_title">Delete this chat?</string>
     <string name="delete_chat_media">Also delete downloaded media</string>
     <string name="delete_chat">Delete chat</string>
+    <string name="delete_chat_failed">Deleted here only — the other devices could not be told</string>
     <string name="delete_for_everyone">Delete for everyone</string>
     <string name="delete_for_me">Delete for me</string>
     <string name="online">online</string>

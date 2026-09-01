@@ -37,6 +37,8 @@ object Tg {
     @Volatile private var myPhone: String = ""
     @Volatile private var appVersion: String = "1.0"
 
+    private val listed = ConcurrentHashMap.newKeySet<Long>()
+
     private val executor = Executors.newSingleThreadExecutor()
     // Unbounded paging work — export, sync-all, seek, the initial chat-list
     // load. These occupy a thread for minutes at a time, so they must not sit
@@ -400,6 +402,9 @@ object Tg {
             }
             "updateChatLastMessage" -> {
                 obj.optJSONObject("last_message")?.let { storeMessage(it) }
+                val raw = obj.getLong("chat_id")
+                if (obj.optJSONArray("positions")?.length() == 0) checkChatGone(raw)
+                else listed.add(raw)
             }
             "updateNewMessage" -> {
                 val msg = obj.getJSONObject("message")
@@ -520,9 +525,16 @@ object Tg {
                 val p = obj.getJSONObject("position")
                 // order is int64, which TDLib's JSON interface encodes as a string
                 val present = p.optString("order", "0") != "0"
+                if (present) listed.add(obj.getLong("chat_id"))
                 val archived = when (p.getJSONObject("list").optString("@type")) {
                     "chatListArchive" -> present
-                    "chatListMain" -> if (present) false else return
+                    // Leaving the main list is also how a chat looks while it is
+                    // being archived, so the archive position that follows has
+                    // to be ruled out before calling it a deletion.
+                    "chatListMain" -> if (present) false else {
+                        checkChatGone(obj.getLong("chat_id"))
+                        return
+                    }
                     else -> return
                 }
                 Bridge.db.setArchived(idFor(obj.getLong("chat_id")), archived)
@@ -539,12 +551,28 @@ object Tg {
         }
     }
 
+    // The initial load reports every chat with no positions before it places
+    // them, so without the `listed` gate every startup ran this for the whole
+    // chat list and one transient empty answer wiped a live chat and its media.
+    private fun checkChatGone(raw: Long) {
+        if (raw !in listed) return
+        val id = idFor(raw)
+        pager.execute {
+            val chat = request(JSONObject().put("@type", "getChat").put("chat_id", raw))
+                ?: return@execute
+            if ((chat.optJSONArray("positions")?.length() ?: 0) > 0) return@execute
+            listed.remove(raw)
+            Bridge.onChatDeletedRemotely(id, deleteMedia = true)
+        }
+    }
+
     private fun onNewChat(chat: JSONObject) {
         val raw = chat.getLong("id")
         val id = idFor(raw)
         val title = chat.optString("title")
         var archived = false
         chat.optJSONArray("positions")?.let { positions ->
+            if (positions.length() > 0) listed.add(raw)
             for (i in 0 until positions.length()) {
                 val p = positions.getJSONObject(i)
                 if (p.getJSONObject("list").optString("@type") == "chatListArchive") archived = true
@@ -1387,6 +1415,32 @@ object Tg {
             JSONObject().put("@type", "deleteMessages")
                 .put("chat_id", chatIdOf(chatId)).put("message_ids", arr).put("revoke", revoke)
         )
+    }
+
+    // A supergroup or channel refuses deleteChatHistory while you are a member
+    // (both can_be_deleted_* are false), so leaving is what removes it.
+    fun deleteChatAsync(chatId: String) = pager.execute {
+        if (!deleteChat(chatId)) Bridge.toastUi(R.string.delete_chat_failed)
+    }
+
+    private fun deleteChat(chatId: String): Boolean {
+        val raw = chatIdOf(chatId)
+        val chat = request(JSONObject().put("@type", "getChat").put("chat_id", raw))
+        // request() returns null for a 15s timeout as much as for a refusal.
+        // Reading that as "not deletable" dropped the user out of a group.
+        if (chat == null) {
+            Log.w(TAG, "delete chat: getChat failed")
+            return false
+        }
+        if (!chat.optBoolean("can_be_deleted_only_for_self") &&
+            !chat.optBoolean("can_be_deleted_for_all_users")
+        ) {
+            request(JSONObject().put("@type", "leaveChat").put("chat_id", raw)) ?: return false
+        }
+        return request(
+            JSONObject().put("@type", "deleteChatHistory").put("chat_id", raw)
+                .put("remove_from_chat_list", true).put("revoke", false)
+        ) != null
     }
 
     fun sendReaction(chatId: String, msgId: String, emoji: String) {

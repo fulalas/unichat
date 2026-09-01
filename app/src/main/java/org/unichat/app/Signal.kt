@@ -339,6 +339,13 @@ object Signal : EventListener {
     fun delete(chatId: String, msgId: String) =
         ops { Wmbridge.signalDelete(chatId, msgId) }
 
+    fun deleteChat(chatId: String, recent: List<MessageRow>) = ops {
+        val encoded = recent.joinToString("\n") { "${it.senderId}|${it.id}" }
+        if (!Wmbridge.signalDeleteChat(chatId, encoded)) {
+            Bridge.toastUi(R.string.delete_chat_failed)
+        }
+    }
+
     fun edit(chatId: String, msgId: String, newText: String): Boolean {
         val (body, styles) = styled(newText)
         return Wmbridge.signalEdit(chatId, msgId, body, styles)
@@ -555,6 +562,9 @@ object Signal : EventListener {
         val target = Bridge.db.messageChat(msgId, PREFIX, fromMe = false) ?: return
         Bridge.onChatReadSelf(target, msgId)
     }
+    override fun onChatDeleted(chatId: String, deleteMedia: Boolean) =
+        Bridge.onChatDeletedRemotely(chatId, deleteMedia)
+
     // No-ops: part of the shared WhatsApp-shaped interface, never raised by
     // Signal.
     override fun onMute(chatId: String, muted: Boolean) {}

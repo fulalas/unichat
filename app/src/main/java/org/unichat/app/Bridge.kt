@@ -231,6 +231,9 @@ object Bridge : EventListener {
 
         fun deleteForEveryone(chatId: String, msgId: String)
         fun deleteForMe(chatId: String, msgId: String)
+        /** recent must be read before the local rows go: Signal identifies the
+         *  conversation to its other devices by the messages it ended with. */
+        fun deleteChat(chatId: String, deleteMedia: Boolean, recent: List<MessageRow>)
         fun react(msg: MessageRow, emoji: String)
 
         fun setMuted(chatId: String, muted: Boolean)
@@ -351,6 +354,9 @@ object Bridge : EventListener {
         override fun deleteForEveryone(chatId: String, msgId: String) = Signal.delete(chatId, msgId)
         // No remote call: dropping the local row is the whole of "delete for me".
         override fun deleteForMe(chatId: String, msgId: String) {}
+
+        override fun deleteChat(chatId: String, deleteMedia: Boolean, recent: List<MessageRow>) =
+            Signal.deleteChat(chatId, recent)
         override fun react(msg: MessageRow, emoji: String) = Signal.react(msg, emoji)
 
         // Signal has no server-side mute, but the flag still has to be written:
@@ -509,6 +515,18 @@ object Bridge : EventListener {
 
         override fun deleteForMe(chatId: String, msgId: String) {}
 
+        override fun deleteChat(chatId: String, deleteMedia: Boolean, recent: List<MessageRow>) {
+            val last = recent.firstOrNull()
+            if (!Wmbridge.deleteChat(
+                    connId, chatId, last?.id ?: "", last?.fromMe ?: false,
+                    last?.senderId ?: "", last?.timeSent ?: 0L, deleteMedia
+                )
+            ) {
+                Log.w(TAG, "delete chat failed")
+                toastUi(R.string.delete_chat_failed)
+            }
+        }
+
         override fun react(msg: MessageRow, emoji: String) {
             if (!Wmbridge.sendReaction(connId, msg.chatId, msg.id, msg.senderId, msg.fromMe, emoji)) {
                 Log.w(TAG, "reaction failed for chat ${msg.chatId}")
@@ -656,6 +674,10 @@ object Bridge : EventListener {
         // come back with the next history fetch
         override fun deleteForMe(chatId: String, msgId: String) =
             Tg.deleteMessages(chatId, listOf(msgId), revoke = false)
+
+        override fun deleteChat(chatId: String, deleteMedia: Boolean, recent: List<MessageRow>) {
+            Tg.deleteChatAsync(chatId)
+        }
 
         override fun react(msg: MessageRow, emoji: String) {
             Tg.sendReaction(msg.chatId, msg.id, emoji)
@@ -936,7 +958,22 @@ object Bridge : EventListener {
         notifyChat(chatId)
     }
 
-    fun deleteChat(chatId: String, deleteMedia: Boolean) = executor.execute {
+    fun deleteChat(chatId: String, deleteMedia: Boolean) = protoExecutor(chatId).execute {
+        val recent = db.recentMessages(chatId, 5)
+        proto(chatId).deleteChat(chatId, deleteMedia, recent)
+        executor.execute { forgetChat(chatId, deleteMedia) }
+    }
+
+    // The other device already dropped it, so no patch goes back out. WhatsApp
+    // echoes our own delete back as this event, so the media flag has to be the
+    // one the patch carried: hardcoding true here deleted the files of a user
+    // who had explicitly unticked the box, whenever the echo won the race.
+    fun onChatDeletedRemotely(chatId: String, deleteMedia: Boolean) = executor.execute {
+        if (wiping) return@execute
+        forgetChat(chatId, deleteMedia)
+    }
+
+    private fun forgetChat(chatId: String, deleteMedia: Boolean) {
         forgetChatRetries(chatId)
         val mediaPaths = if (deleteMedia) db.chatMediaPaths(chatId) else emptyList()
         db.deleteChat(chatId)
@@ -2475,6 +2512,9 @@ object Bridge : EventListener {
         db.setMuted(chatId, muted)
         notifyChatsChanged()
     }
+
+    override fun onChatDeleted(chatId: String, deleteMedia: Boolean) =
+        onChatDeletedRemotely(chatId, deleteMedia)
 
     // Written as an escape, NOT as a literal control character: two raw NUL
     // bytes in this file used to make grep classify the largest Kotlin source

@@ -571,6 +571,19 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
         execSQL("DELETE FROM reactions WHERE chat_id=? AND msg_id=?", arrayOf(chatId, msgId))
     }
 
+    fun recentMessages(chatId: String, limit: Int): List<MessageRow> = queryList(
+        // Staged sends are excluded: their ids are minted here and no other
+        // device has them, so a delete keyed by one is accepted and ignored.
+        "SELECT id, sender_id, from_me, time_sent FROM messages WHERE chat_id=? " +
+            "AND send_pending=0 AND send_failed=0 ORDER BY time_sent DESC, rowid DESC LIMIT $limit",
+        arrayOf(chatId)
+    ) {
+        MessageRow(
+            id = it.getString(0), chatId = chatId, senderId = it.getString(1), text = "",
+            fromMe = it.getInt(2) != 0, timeSent = it.getLong(3), isRead = false
+        )
+    }
+
     fun chatMediaPaths(chatId: String): List<String> = queryList(
         "SELECT file_path FROM messages WHERE chat_id=? AND file_path!=''",
         arrayOf(chatId)

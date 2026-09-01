@@ -55,6 +55,7 @@ type EventListener interface {
 	OnChatReadSelf(chatId string, msgId string)
 	OnMessageSendFailed(chatId string, msgId string)
 	OnMute(chatId string, muted bool)
+	OnChatDeleted(chatId string, deleteMedia bool)
 	OnChatState(chatId string, userId string, state string)
 	OnPresence(userId string, isOnline bool, lastSeen int64)
 	OnSyncProgress(progress int)
@@ -1978,6 +1979,53 @@ func SetMute(connId int, chatId string, muted bool) bool {
 	return true
 }
 
+// The phone matches a delete against the range it is told about, so a patch
+// with no last message key is accepted and then ignored: the chat stays on
+// every other device.
+func DeleteChat(
+	connId int, chatId string, lastMsgId string, lastMsgFromMe bool, lastMsgSenderId string,
+	lastMsgTime int64, deleteMedia bool,
+) bool {
+	c := getConn(connId)
+	if c == nil {
+		return false
+	}
+	jid, err := types.ParseJID(chatId)
+	if err != nil {
+		return false
+	}
+	ctx := context.TODO()
+	// Same LID indirection as SetMute: modern WhatsApp indexes a 1:1 chat under
+	// the LID, and a patch keyed by the phone number is dropped.
+	target := jid
+	if jid.Server == types.DefaultUserServer {
+		if lid, _ := c.getClient().Store.LIDs.GetLIDForPN(ctx, jid); !lid.IsEmpty() {
+			target = lid
+		}
+	}
+	var key *waCommon.MessageKey
+	var ts time.Time
+	if lastMsgId != "" {
+		ts = time.Unix(lastMsgTime, 0)
+		key = &waCommon.MessageKey{
+			RemoteJID: proto.String(target.String()),
+			FromMe:    proto.Bool(lastMsgFromMe),
+			ID:        proto.String(lastMsgId),
+		}
+		if target.Server == types.GroupServer && lastMsgSenderId != "" {
+			if sender, err := types.ParseJID(lastMsgSenderId); err == nil {
+				key.Participant = proto.String(sender.String())
+			}
+		}
+	}
+	patch := appstate.BuildDeleteChat(target, ts, key, deleteMedia)
+	if err := c.getClient().SendAppState(ctx, patch); err != nil {
+		c.log(LogWarning, fmt.Sprintf("delete chat error %v", err))
+		return false
+	}
+	return true
+}
+
 func contactName(info types.ContactInfo) string {
 	if info.FullName != "" {
 		return info.FullName
@@ -2290,6 +2338,14 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 	case *events.Mute:
 		chatId := getChatId(c.getClient(), &evt.JID, nil)
 		c.listener.OnMute(chatId, isMuteActive(evt.Action))
+
+	// Full-sync deletes are skipped: the initial app-state pull replays every
+	// delete the account ever made, which would wipe chats this device has
+	// since re-synced from history.
+	case *events.DeleteChat:
+		if !evt.FromFullSync {
+			c.listener.OnChatDeleted(getChatId(c.getClient(), &evt.JID, nil), evt.DeleteMedia)
+		}
 
 	case *events.Presence:
 		userId := getUserId(c.getClient(), nil, &evt.From)

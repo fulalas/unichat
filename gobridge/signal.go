@@ -624,6 +624,71 @@ func sgAsGroup(bare string) (types.GroupIdentifier, bool) {
 	return types.GroupIdentifier(bare), true
 }
 
+func sgConversationID(chatId string) (*signalpb.ConversationIdentifier, bool) {
+	bare := sgBareID(chatId)
+	if groupID, ok := sgAsGroup(bare); ok {
+		gid, err := groupID.Bytes()
+		if err != nil {
+			return nil, false
+		}
+		return &signalpb.ConversationIdentifier{
+			Identifier: &signalpb.ConversationIdentifier_ThreadGroupId{ThreadGroupId: gid[:]},
+		}, true
+	}
+	trimmed, isPNI := sgTrimPNI(bare)
+	parsed, err := uuid.Parse(trimmed)
+	if err != nil {
+		return nil, false
+	}
+	serviceID := libsignalgo.NewACIServiceID(parsed)
+	if isPNI {
+		serviceID = libsignalgo.NewPNIServiceID(parsed)
+	}
+	return &signalpb.ConversationIdentifier{
+		Identifier: &signalpb.ConversationIdentifier_ThreadServiceIdBinary{
+			ThreadServiceIdBinary: serviceID.Bytes(),
+		},
+	}, true
+}
+
+func sgChatIDFromConversation(cid *signalpb.ConversationIdentifier) (string, bool) {
+	switch ident := cid.GetIdentifier().(type) {
+	case *signalpb.ConversationIdentifier_ThreadServiceId:
+		serviceID, err := libsignalgo.ServiceIDFromString(ident.ThreadServiceId)
+		if err != nil {
+			return "", false
+		}
+		return sgRecipientID(serviceID.ToACIAndPNI()), true
+	case *signalpb.ConversationIdentifier_ThreadServiceIdBinary:
+		serviceID, err := libsignalgo.ServiceIDFromBytes(ident.ThreadServiceIdBinary)
+		if err != nil {
+			return "", false
+		}
+		return sgRecipientID(serviceID.ToACIAndPNI()), true
+	case *signalpb.ConversationIdentifier_ThreadGroupId:
+		if len(ident.ThreadGroupId) != libsignalgo.GroupIdentifierLength {
+			return "", false
+		}
+		raw := libsignalgo.GroupIdentifier(ident.ThreadGroupId)
+		return SgIDPrefix + types.BytesToGroupIdentifier(&raw).String(), true
+	}
+	return "", false
+}
+
+func (c *sgConn) handleDeleteForMe(evt *events.DeleteForMe) {
+	report := func(cid *signalpb.ConversationIdentifier) {
+		if chatID, ok := sgChatIDFromConversation(cid); ok {
+			c.listener.OnChatDeleted(chatID, true)
+		}
+	}
+	for _, conv := range evt.GetConversationDeletes() {
+		report(conv.GetConversation())
+	}
+	for _, conv := range evt.GetLocalOnlyConversationDeletes() {
+		report(conv.GetConversation())
+	}
+}
+
 func (c *sgConn) handleEvent(rawEvt events.SignalEvent) bool {
 	switch evt := rawEvt.(type) {
 	case *events.ChatEvent:
@@ -634,6 +699,8 @@ func (c *sgConn) handleEvent(rawEvt events.SignalEvent) bool {
 		c.handleReceipt(evt)
 	case *events.ReadSelf:
 		c.handleReadSelf(evt)
+	case *events.DeleteForMe:
+		c.handleDeleteForMe(evt)
 	case *events.QueueEmpty:
 		c.listener.OnContactsSynced()
 	case *events.LoggedOut:
@@ -1418,6 +1485,14 @@ func sgTargetAuthor(chatId, senderId string) string {
 	return bare
 }
 
+func sgAuthorID(chatId, senderId string) string {
+	id := senderId
+	if id == "" {
+		id = chatId
+	}
+	return strings.TrimPrefix(id, SgIDPrefix)
+}
+
 func SignalReact(chatId string, msgId string, senderId string, emoji string) {
 	c, client, _ := sgActive()
 	if client == nil {
@@ -1466,6 +1541,62 @@ func SignalDelete(chatId string, msgId string) {
 		return
 	}
 	c.listener.OnMessageDeleted(chatId, msgId)
+}
+
+// Linked devices identify a conversation by the messages it ended with as well
+// as by its id, so a delete carrying none of them is dropped on the other side.
+func SignalDeleteChat(chatId string, recent string) bool {
+	c, client, device := sgActive()
+	if client == nil || device == nil {
+		return false
+	}
+	conversation, ok := sgConversationID(chatId)
+	if !ok {
+		return false
+	}
+	var mostRecent []*signalpb.AddressableMessage
+	for _, line := range strings.Split(recent, "\n") {
+		senderId, stamp, found := strings.Cut(line, "|")
+		if !found {
+			continue
+		}
+		ts, err := strconv.ParseUint(stamp, 10, 64)
+		if err != nil {
+			continue
+		}
+		// Through ServiceIDFromString, not uuid.Parse: a PNI author encodes as
+		// 17 bytes with a type prefix, and the bare 16 the UUID gives is the ACI
+		// spelling — the linked device would not match the entry.
+		author, err := libsignalgo.ServiceIDFromString(sgAuthorID(chatId, senderId))
+		if err != nil {
+			continue
+		}
+		mostRecent = append(mostRecent, &signalpb.AddressableMessage{
+			Author: &signalpb.AddressableMessage_AuthorServiceIdBinary{
+				AuthorServiceIdBinary: author.Bytes(),
+			},
+			SentTimestamp: proto.Uint64(ts),
+		})
+	}
+	sync := &signalpb.SyncMessage{
+		Content: &signalpb.SyncMessage_DeleteForMe_{
+			DeleteForMe: &signalpb.SyncMessage_DeleteForMe{
+				ConversationDeletes: []*signalpb.SyncMessage_DeleteForMe_ConversationDelete{{
+					Conversation:       conversation,
+					MostRecentMessages: mostRecent,
+					IsFullDelete:       proto.Bool(true),
+				}},
+			},
+		},
+	}
+	res := client.SendMessage(
+		context.TODO(), device.ACIServiceID(), signalmeow.WrapSyncMessage(sync),
+	)
+	if !res.WasSuccessful {
+		c.log(LogWarning, fmt.Sprintf("delete chat error %v", res.Error))
+		return false
+	}
+	return true
 }
 
 // Signal keys an edit by the original's timestamp and carries a fresh one for
