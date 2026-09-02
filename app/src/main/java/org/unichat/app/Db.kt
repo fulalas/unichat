@@ -121,7 +121,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 32) {
 
     private val ctx: Context = context.applicationContext
 
@@ -237,6 +237,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
                 "played INTEGER NOT NULL DEFAULT 0," +
                 "send_failed INTEGER NOT NULL DEFAULT 0," +
                 "send_pending INTEGER NOT NULL DEFAULT 0," +
+                "time_pinned INTEGER NOT NULL DEFAULT 0," +
                 "forwarded INTEGER NOT NULL DEFAULT 0," +
                 "latitude REAL NOT NULL DEFAULT 0, longitude REAL NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(chat_id, id))"
@@ -409,6 +410,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
         if (oldVersion < 31) {
             db.execSQL("ALTER TABLE messages ADD COLUMN send_pending INTEGER NOT NULL DEFAULT 0")
         }
+        if (oldVersion < 32) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN time_pinned INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     private fun <T> queryList(sql: String, args: Array<String>?, map: (Cursor) -> T): List<T> {
@@ -536,8 +540,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
                 // the post-send reconciliation upsert corrects the optimistic
                 // echo's device-clock time with the server timestamp and adds
                 // the upload's download reference; edits re-deliver with
-                // time_sent 0 / empty file_id, which must not clobber
-                "time_sent=CASE WHEN excluded.time_sent>0 THEN excluded.time_sent ELSE time_sent END," +
+                // time_sent 0 / empty file_id, which must not clobber.
+                // time_pinned holds that correction off a send that failed: its
+                // ack can land minutes later, and taking that time moved the
+                // bubble out of the conversation it belongs to.
+                "time_sent=CASE WHEN excluded.time_sent>0 AND time_pinned=0 " +
+                "THEN excluded.time_sent ELSE time_sent END," +
                 "file_id=CASE WHEN excluded.file_id!='' THEN excluded.file_id ELSE file_id END," +
                 // same guard as file_id: an edit or history re-delivery of a
                 // location carries no coordinates and must not zero the stored ones
@@ -892,7 +900,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
 
     fun setSendFailed(chatId: String, msgId: String) {
         writableDatabase.execSQL(
-            "UPDATE messages SET send_failed=1, send_pending=0 WHERE chat_id=? AND id=?",
+            "UPDATE messages SET send_failed=1, send_pending=0, time_pinned=1 " +
+                "WHERE chat_id=? AND id=?",
             arrayOf(chatId, msgId)
         )
     }
@@ -932,6 +941,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
 
     // Both marks: a send the watchdog gave up on can still land, and a red mark
     // left on a delivered message makes tapping it send a second copy.
+    // The stored time can differ from the one just written: a failed send keeps
+    // its own (time_pinned), and the chat list must not be bumped past it.
+    fun storedTime(chatId: String, msgId: String): Long? = queryFirst(
+        "SELECT time_sent FROM messages WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+    ) { it.getLong(0) }
+
     fun clearSendMarks(chatId: String, msgId: String) {
         writableDatabase.execSQL(
             "UPDATE messages SET send_pending=0, send_failed=0 WHERE chat_id=? AND id=?",
@@ -967,7 +982,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
     // staged id never reached TDLib and is ours to fail.
     fun failStalePending() {
         writableDatabase.execSQL(
-            "UPDATE messages SET send_pending=0, send_failed=1 WHERE send_pending=1 " +
+            "UPDATE messages SET send_pending=0, send_failed=1, time_pinned=1 " +
+                "WHERE send_pending=1 " +
                 "AND NOT (chat_id LIKE 'tg:%' AND id NOT LIKE 'local:%')"
         )
     }
@@ -1111,29 +1127,55 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 31) {
         // contact matches". Only saved contacts and joined groups; @lid alias
         // rows of phone-JID contacts are stored with is_saved=0, so a LID row
         // shows up only when it is the contact's sole (saved) identity.
+        // One person, one row per protocol. Signal hands out the same contact
+        // under an ACI and under a PNI alias, both saved and both carrying the
+        // number, which listed the same name and number twice.
+        val bestAt = HashMap<String, Int>()
+        val bestRank = HashMap<String, Int>()
         readableDatabase.rawQuery(
-            "SELECT id, name, phone, is_group FROM contacts " +
-                "WHERE is_self=0 AND (is_saved=1 OR is_group=1) ORDER BY name COLLATE NOCASE",
+            "SELECT c.id, c.name, c.phone, c.is_group, " +
+                "EXISTS(SELECT 1 FROM chats ch WHERE ch.id=c.id) FROM contacts c " +
+                "WHERE c.is_self=0 AND (c.is_saved=1 OR c.is_group=1) " +
+                "ORDER BY c.name COLLATE NOCASE",
             null
         ).use { c ->
             while (c.moveToNext() && out.size < limit) {
                 val id = c.getString(0)
                 val name = c.getString(1)
                 val phone = c.getString(2)
+                val isGroup = c.getInt(3) != 0
                 if (!Search.contains(name, folded) && !Search.contains(phone, folded) &&
                     !Search.contains(id, folded)
                 ) {
                     continue
                 }
-                out.add(
-                    ChatRow(
-                        id = id, name = name,
-                        lastText = if (phone.isNotEmpty()) "+$phone" else "",
-                        lastTime = 0, unread = 0, isGroup = c.getInt(3) != 0
-                    )
+                val row = ChatRow(
+                    id = id, name = name,
+                    lastText = if (phone.isNotEmpty()) "+$phone" else "",
+                    lastTime = 0, unread = 0, isGroup = isGroup
                 )
+                if (isGroup || phone.isEmpty()) {
+                    out.add(row)
+                    continue
+                }
+                val key = Accounts.ofChat(id).proto + " " + phone
+                // An id with a chat behind it is the one the person actually
+                // messages from; an alias id is the weakest handle.
+                val rank = (if (c.getInt(4) != 0) 2 else 0) + (if (Signal.isPniId(id)) 0 else 1)
+                val at = bestAt[key]
+                if (at == null) {
+                    bestAt[key] = out.size
+                    bestRank[key] = rank
+                    out.add(row)
+                } else if (rank > (bestRank[key] ?: 0)) {
+                    bestRank[key] = rank
+                    out[at] = row
+                }
             }
         }
+        // The winner of a duplicate pair takes the loser's slot, and the two can
+        // carry different names, so the query's own ordering no longer holds.
+        out.sortWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
         return out
     }
 

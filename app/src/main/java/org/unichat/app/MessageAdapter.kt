@@ -78,10 +78,21 @@ class MessageAdapter(
         // on every call: this runs per drag-select row crossing, and in search
         // mode that window can hold thousands of rows.
         val byId = rowsById ?: messages.associateBy { it.id }.also { rowsById = it }
-        return selected.values.map { byId[it.id] ?: it }.sortedBy { it.timeSent }
+        // Timestamps are whole seconds, so a burst of messages ties and the sort
+        // fell back to the order rows were tapped — dragging or tapping from the
+        // bottom up forwarded them reversed. Display position breaks the tie the
+        // same way the chat itself does. A row the loaded window no longer holds
+        // has no position and stays ordered by its time alone.
+        val order = orderById ?: HashMap<String, Int>(messages.size).also { m ->
+            for (i in messages.indices) m[messages[i].id] = i
+            orderById = m
+        }
+        return selected.values.map { byId[it.id] ?: it }
+            .sortedWith(compareBy({ it.timeSent }, { order[it.id] ?: Int.MAX_VALUE }))
     }
 
     private var rowsById: Map<String, MessageRow>? = null
+    private var orderById: Map<String, Int>? = null
 
     private fun isSelected(msg: MessageRow): Boolean = msg.id in selected
 
@@ -186,6 +197,7 @@ class MessageAdapter(
             // selection change — in that window it would rebuild and cache the
             // map from the list that is still on its way out
             rowsById = null
+            orderById = null
             if (namesChanged && itemCount > 0) {
                 notifyItemRangeChanged(0, itemCount)
             } else if (staleQuotes.isNotEmpty()) {
@@ -203,7 +215,7 @@ class MessageAdapter(
         if (fresh.isEmpty() || submitted.isEmpty()) return
         if (submitted.none { it.id in fresh }) return
         submitted = submitted.map { fresh[it.id] ?: it }
-        differ.submitList(submitted) { rowsById = null }
+        differ.submitList(submitted) { rowsById = null; orderById = null }
     }
 
     fun refreshAudioRows(recycler: RecyclerView) {
@@ -470,6 +482,14 @@ class MessageAdapter(
             }
             return m
         }
+        // A voice note that failed to send is still on disk, and the retry gate
+        // above swallowed its play tap: it could not be heard back until the
+        // send finally went through. Only the audio controls opt out, and only
+        // while the recording is actually there.
+        fun playableWhileFailed(h: Holder): Boolean {
+            val m = h.current ?: return false
+            return m.sendFailed && Bridge.fileOnDisk(m)
+        }
         holder.sendFailedBadge.setOnClickListener {
             val m = holder.current ?: return@setOnClickListener
             if (selectionMode) toggleSelection(m) else onRetrySend(m)
@@ -578,7 +598,8 @@ class MessageAdapter(
         // on the frame, not the icon: the icon is hidden while the spinner runs,
         // and a gone view takes no taps
         holder.audioButtonFrame.setOnClickListener {
-            val m = tappedRow() ?: return@setOnClickListener
+            val m = tappedRow(retryIfFailed = !playableWhileFailed(holder))
+                ?: return@setOnClickListener
             // the stored path can be stale (a swept Telegram staging copy);
             // re-download instead of "playing" a file that is no longer there
             if (Bridge.fileOnDisk(m)) {
@@ -599,7 +620,7 @@ class MessageAdapter(
             override fun onStartTrackingTouch(sb: SeekBar?) { seekDragging = true }
             override fun onStopTrackingTouch(sb: SeekBar?) {
                 seekDragging = false
-                val m = tappedRow() ?: return
+                val m = tappedRow(retryIfFailed = !playableWhileFailed(holder)) ?: return
                 if (AudioPlayer.currentMsgId == m.id) {
                     AudioPlayer.seekTo(sb?.progress ?: 0)
                 } else if (Bridge.fileOnDisk(m)) {

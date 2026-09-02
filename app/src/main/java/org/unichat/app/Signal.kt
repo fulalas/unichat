@@ -41,6 +41,10 @@ object Signal : EventListener {
 
     fun isSgId(id: String): Boolean = id.startsWith(PREFIX)
 
+    // The bridge writes "PNI:", older rows carry a lowercase one.
+    fun isPniId(id: String): Boolean =
+        id.startsWith(PREFIX) && id.regionMatches(PREFIX.length, PNI_PREFIX, 0, PNI_PREFIX.length, true)
+
     fun hasSession(): Boolean = linked
 
     fun selfId(): String {

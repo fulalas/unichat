@@ -2299,7 +2299,13 @@ object Bridge : EventListener {
         if (row.id.isEmpty()) { Log.w(TAG, "message with empty id for ${row.chatId}"); return }
         db.upsertMessage(row)
         afterStore()
-        if (bump) db.bumpChat(row.chatId, row.timeSent)
+        // The time the row KEPT, not the one just offered: a send that failed
+        // holds on to the time it was sent, and bumping the chat with the
+        // retry's late ack put it at the top of the list showing an old preview.
+        if (bump) {
+            val kept = if (row.fromMe) db.storedTime(row.chatId, row.id) else null
+            db.bumpChat(row.chatId, kept ?: row.timeSent)
+        }
         // A row that already carries a path has its bytes: Telegram hands one
         // over for media it has cached, and fetching again would be pure waste.
         if (fetchMedia && row.fileId.isNotEmpty() && row.filePath.isEmpty() &&
