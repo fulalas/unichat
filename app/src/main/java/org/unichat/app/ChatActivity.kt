@@ -692,11 +692,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                                     messageList.scrollToPosition(adapter.itemCount - 1)
                             }
                         }
-                        // Only our own send follows to the bottom. An arriving
-                        // message must not move the list a pixel, wherever it is
-                        // read from — it announces itself through the FAB dot.
+                        // A new message follows to the bottom only when the chat
+                        // was already there. A scrolled-up position must not move
+                        // a pixel — the arrival announces itself through the FAB
+                        // dot (0.49.6 regression: it used to yank the list down).
                         newestChanged -> {
-                            if (atBottom && newest.fromMe) {
+                            if (atBottom) {
                                 messageList.scrollToPosition(adapter.itemCount - 1)
                             } else {
                                 hasNewBelow = true
