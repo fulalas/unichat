@@ -606,6 +606,13 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 34) {
     fun deleteMessage(chatId: String, msgId: String) = writableDatabase.transact {
         execSQL("DELETE FROM messages WHERE chat_id=? AND id=?", arrayOf(chatId, msgId))
         execSQL("DELETE FROM reactions WHERE chat_id=? AND msg_id=?", arrayOf(chatId, msgId))
+        val newest = queryFirst(
+            "SELECT max(time_sent) FROM messages WHERE chat_id=?", arrayOf(chatId)
+        ) { it.getLong(0) } ?: 0
+        if (newest > 0) execSQL(
+            "UPDATE chats SET last_time=? WHERE id=? AND last_time>?",
+            arrayOf(newest, chatId, newest)
+        )
         // Editing an album's caption re-sends the attachments its rows still
         // hold, so deleting one here would drop it from the peer's copy too.
         val parent = msgId.substringBeforeLast('-', "")
