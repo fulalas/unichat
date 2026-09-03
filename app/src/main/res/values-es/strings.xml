@@ -52,8 +52,6 @@
     <string name="signal_err_no_session">El registro caducó. Empieza de nuevo.</string>
     <string name="signal_err_code_rejected">Ese código no se aceptó.</string>
     <string name="signal_err_not_registered">No hay ninguna cuenta de Signal en este dispositivo.</string>
-    <string name="signal_err_no_master_key">Esta cuenta no tiene ninguna clave guardada.</string>
-    <string name="signal_err_no_manifest">Signal no tiene lista de contactos para esta cuenta.</string>
     <string name="signal_err_manifest_locked">La clave llegó, pero no se pudo abrir la lista de contactos.</string>
     <string name="signal_err_store_failed">No se pudo guardar la clave recuperada.</string>
     <string name="signal_err_no_backup">Esta cuenta no tiene copia con PIN.</string>

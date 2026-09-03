@@ -254,6 +254,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val filterDebounce = Runnable { applyFilter() }
+
     private fun applyFilter() {
         if (query.isEmpty()) {
             submitChats(allChats)
@@ -457,7 +460,12 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             override fun onQueryTextSubmit(q: String?): Boolean = true
             override fun onQueryTextChange(q: String?): Boolean {
                 query = q.orEmpty().trim()
-                applyFilter()
+                // Debounced like ChatActivity's search: each keystroke queued a
+                // full contact scan plus an address-book provider query on the
+                // shared serial worker, in front of every screen's DB reads.
+                mainHandler.removeCallbacks(filterDebounce)
+                if (query.isEmpty()) applyFilter()
+                else mainHandler.postDelayed(filterDebounce, 200)
                 return true
             }
         })

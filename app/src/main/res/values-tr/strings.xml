@@ -52,8 +52,6 @@
     <string name="signal_err_no_session">Kayıt süresi doldu. Baştan başlayın.</string>
     <string name="signal_err_code_rejected">Bu kod kabul edilmedi.</string>
     <string name="signal_err_not_registered">Bu cihazda Signal hesabı yok.</string>
-    <string name="signal_err_no_master_key">Bu hesabın kayıtlı anahtarı yok.</string>
-    <string name="signal_err_no_manifest">Signal\'de bu hesap için kişi listesi yok.</string>
     <string name="signal_err_manifest_locked">Anahtar geldi ama kişi listesi açılamadı.</string>
     <string name="signal_err_store_failed">Kurtarılan anahtar kaydedilemedi.</string>
     <string name="signal_err_no_backup">Bu hesabın PIN yedeği yok.</string>

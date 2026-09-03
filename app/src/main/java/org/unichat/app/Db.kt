@@ -48,11 +48,11 @@ data class MessageRow(
     val captionLocked: Boolean = false,
 )
 
+val MESSAGE_ORDER: Comparator<MessageRow> =
+    compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L })
+
 fun MessageRow.coordinates(): String =
     if (msgType == "location") "%.6f,%.6f".format(java.util.Locale.US, latitude, longitude) else ""
-
-fun mapLink(latitude: Double, longitude: Double): String =
-    MAP_LINK_PREFIX + "%.6f,%.6f".format(java.util.Locale.US, latitude, longitude)
 
 const val MAP_LINK_PREFIX = "https://maps.google.com/?q="
 
@@ -126,7 +126,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 34) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
 
     private val ctx: Context = context.applicationContext
 
@@ -152,6 +152,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 34) {
         // O(unread) instead of scanning every message row of the chat
         private const val CREATE_UNREAD_INDEX =
             "CREATE INDEX idx_msg_unread ON messages(chat_id) WHERE from_me=0 AND is_read=0"
+
+        // outgoing counterpart for markReadUpTo's peer-read branch, which runs
+        // per read receipt on the tg-receive thread and scanned the whole chat
+        private const val CREATE_UNREAD_OUT_INDEX =
+            "CREATE INDEX IF NOT EXISTS idx_msg_unread_out ON messages(chat_id) " +
+                "WHERE from_me=1 AND is_read=0"
 
         // Every message window query and the chat list's newest-message lookup
         // order by (chat_id, time_sent). IF NOT EXISTS so onCreate and the
@@ -251,6 +257,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 34) {
         db.execSQL(CREATE_SCROLL)
         db.execSQL(CREATE_TIME_INDEX)
         db.execSQL(CREATE_UNREAD_INDEX)
+        db.execSQL(CREATE_UNREAD_OUT_INDEX)
         db.execSQL(CREATE_ID_INDEX)
         db.execSQL(CREATE_REACTIONS)
         db.execSQL(CREATE_DELETED_CHATS)
@@ -441,6 +448,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 34) {
                     "GROUP BY chat_id, substr(id, 1, instr(id, '-') - 1) " +
                     "HAVING count(*) != max(CAST(substr(id, instr(id, '-') + 1) AS INTEGER)))"
             )
+        }
+        if (oldVersion < 35) {
+            db.execSQL(CREATE_UNREAD_OUT_INDEX)
         }
     }
 
@@ -726,8 +736,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 34) {
         arrayOf(chatId, msgId)
     ) { Pair(it.getString(0), it.getInt(1)) } ?: Pair("", 0)
 
-    fun unplayedAudioIds(chatId: String, limit: Int): List<String> = queryList(
+    fun unplayedAudioIds(chatId: String, limit: Int, fromMeOnly: Boolean = false): List<String> = queryList(
         "SELECT id FROM messages WHERE chat_id=? AND msg_type='audio' AND played=0 " +
+            (if (fromMeOnly) "AND from_me=1 " else "") +
             "ORDER BY time_sent DESC LIMIT ?",
         arrayOf(chatId, limit.toString())
     ) { it.getString(0) }
@@ -750,12 +761,6 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 34) {
         "SELECT msg_id, offset FROM scroll WHERE chat_id=?",
         arrayOf(chatId)
     ) { it.getString(0) to it.getInt(1) }
-
-    fun unplayedOwnAudioIds(chatId: String, limit: Int): List<String> = queryList(
-        "SELECT id FROM messages WHERE chat_id=? AND msg_type='audio' AND played=0 AND from_me=1 " +
-            "ORDER BY time_sent DESC LIMIT ?",
-        arrayOf(chatId, limit.toString())
-    ) { it.getString(0) }
 
     fun placeholderMessageIds(chatId: String, limit: Int): List<String> = queryList(
         "SELECT id FROM messages WHERE chat_id=? AND msg_type='' AND file_id='' " +
@@ -812,11 +817,15 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 34) {
         }
     }
 
+    // from_me is a literal, not a bound parameter: the partial unread indexes
+    // only match when the query provably implies their predicate, and a `?`
+    // does not — bound, every read receipt walked the chat's whole PK prefix.
     fun markReadUpTo(chatId: String, upToId: Long, incoming: Boolean) {
         writableDatabase.execSQL(
-            "UPDATE messages SET is_read=1 WHERE chat_id=? AND from_me=? AND is_read=0 " +
-                "AND CAST(id AS INTEGER)<=?",
-            arrayOf(chatId, if (incoming) "0" else "1", upToId.toString())
+            "UPDATE messages SET is_read=1 WHERE chat_id=? AND from_me=" +
+                (if (incoming) "0" else "1") +
+                " AND is_read=0 AND CAST(id AS INTEGER)<=?",
+            arrayOf(chatId, upToId.toString())
         )
     }
 

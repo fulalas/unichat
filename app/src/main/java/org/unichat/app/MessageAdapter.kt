@@ -1006,16 +1006,18 @@ class MessageAdapter(
     // Only plain text rows: a caption under a photo already has its own picture
     // above it, and a card under that reads as a second attachment.
     private fun bindLinkPreview(holder: Holder, msg: MessageRow, linkable: Boolean) {
-        val url = if (linkable && msg.msgType.isEmpty()) urlOf(msg) else null
-        if (url == null) {
+        fun hide() {
             holder.linkPreview.visibility = View.GONE
             holder.linkPreview.tag = null
+        }
+        val url = if (linkable && msg.msgType.isEmpty()) urlOf(msg) else null
+        if (url == null) {
+            hide()
             return
         }
         val row = LinkPreview.cached(url)
         if (row == null) {
-            holder.linkPreview.visibility = View.GONE
-            holder.linkPreview.tag = null
+            hide()
             previewWaiters.getOrPut(url) { HashSet() }.add(msg.id)
             onNeedLinkPreview(url)
             return
@@ -1029,8 +1031,7 @@ class MessageAdapter(
             if (it.isEmpty()) previewWaiters.remove(url)
         }
         if (!row.hasPreview) {
-            holder.linkPreview.visibility = View.GONE
-            holder.linkPreview.tag = null
+            hide()
             return
         }
         holder.linkPreview.visibility = View.VISIBLE

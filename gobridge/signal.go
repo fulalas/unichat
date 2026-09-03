@@ -75,8 +75,6 @@ const (
 	sgErrNoSession      = "no_session"
 	sgErrCodeRejected   = "code_rejected"
 	sgErrNotRegistered  = "not_registered"
-	sgErrNoMasterKey    = "no_master_key"
-	sgErrNoManifest     = "no_manifest"
 	sgErrManifestLocked = "manifest_locked"
 	sgErrStoreFailed    = "store_failed"
 	sgErrNoBackup       = "no_backup"
@@ -511,7 +509,6 @@ func SignalSendTextQuoted(chatId, msgId, text, styles, quotedId, quotedText, quo
 	if client == nil || device == nil {
 		return ""
 	}
-	_ = c
 
 	timestamp := sgTimestamp(msgId)
 	ranges := sgStyleRanges(styles)
@@ -532,11 +529,15 @@ func SignalSendTextQuoted(chatId, msgId, text, styles, quotedId, quotedText, quo
 	msg := signalmeow.WrapDataMessage(dm)
 	msgID := fmt.Sprintf("%d", timestamp)
 	if err := sgSend(c, client, chatId, msg); err != nil {
-		c.log(LogError, "send failed: "+err.Error())
-		c.listener.OnMessageSendFailed(chatId, msgID)
-		return ""
+		return sgFailSend(c, "send", chatId, msgID, err)
 	}
 	return msgID
+}
+
+func sgFailSend(c *sgConn, what, chatId, msgID string, err error) string {
+	c.log(LogError, what+" failed: "+err.Error())
+	c.listener.OnMessageSendFailed(chatId, msgID)
+	return ""
 }
 
 func sgSend(c *sgConn, client *signalmeow.Client, chatId string, msg *signalpb.Content) error {
@@ -567,14 +568,9 @@ func sgSend(c *sgConn, client *signalmeow.Client, chatId string, msg *signalpb.C
 		}
 		return nil
 	}
-	trimmed, isPNI := sgTrimPNI(bare)
-	parsed, err := uuid.Parse(trimmed)
-	if err != nil {
+	serviceID, ok := sgServiceID(bare)
+	if !ok {
 		return fmt.Errorf("malformed recipient id %q", bare)
-	}
-	serviceID := libsignalgo.NewACIServiceID(parsed)
-	if isPNI {
-		serviceID = libsignalgo.NewPNIServiceID(parsed)
 	}
 	res := client.SendMessage(ctx, serviceID, msg)
 	if !res.WasSuccessful {
@@ -603,6 +599,18 @@ func sgTrimPNI(bare string) (string, bool) {
 		}
 	}
 	return bare, false
+}
+
+func sgServiceID(bare string) (libsignalgo.ServiceID, bool) {
+	trimmed, isPNI := sgTrimPNI(bare)
+	parsed, err := uuid.Parse(trimmed)
+	if err != nil {
+		return libsignalgo.ServiceID{}, false
+	}
+	if isPNI {
+		return libsignalgo.NewPNIServiceID(parsed), true
+	}
+	return libsignalgo.NewACIServiceID(parsed), true
 }
 
 func sgRecipientID(aci, pni uuid.UUID) string {
@@ -635,14 +643,9 @@ func sgConversationID(chatId string) (*signalpb.ConversationIdentifier, bool) {
 			Identifier: &signalpb.ConversationIdentifier_ThreadGroupId{ThreadGroupId: gid[:]},
 		}, true
 	}
-	trimmed, isPNI := sgTrimPNI(bare)
-	parsed, err := uuid.Parse(trimmed)
-	if err != nil {
+	serviceID, ok := sgServiceID(bare)
+	if !ok {
 		return nil, false
-	}
-	serviceID := libsignalgo.NewACIServiceID(parsed)
-	if isPNI {
-		serviceID = libsignalgo.NewPNIServiceID(parsed)
 	}
 	return &signalpb.ConversationIdentifier{
 		Identifier: &signalpb.ConversationIdentifier_ThreadServiceIdBinary{
@@ -1299,7 +1302,7 @@ func isWordUnit(u uint16) bool {
 // Signal never delivers a message back to the device that sent it — the sync
 // message goes to the account's OTHER devices only. Without this the bubble
 // never appeared and the chat looked like nothing had been sent. WhatsApp does
-// the same thing (see echoLocalMedia).
+// the same thing (see echoSentMessage).
 // A Signal message id IS the millisecond timestamp it was stamped with, and the
 // two must agree exactly: a mismatch makes every receipt, reaction and edit for
 // that message unmatchable.
@@ -1310,10 +1313,10 @@ func sgTimestamp(msgId string) uint64 {
 	return uint64(time.Now().UnixMilli())
 }
 
-func sgEchoOwn(c *sgConn, chatId, msgID, text, msgType, fileID string, timeSent int64, quotedId, quotedText string) {
+func sgEchoOwn(c *sgConn, chatId, msgID, text, msgType, fileID string, timeSent int64) {
 	c.listener.OnMessage(
 		chatId, msgID, SignalSelfID(), text, true, timeSent, false,
-		msgType, fileID, 0, 0, false, false, quotedId, quotedText, "", "", false,
+		msgType, fileID, 0, 0, false, false, "", "", "", "", false,
 	)
 	c.listener.OnChat(chatId, "", 0, false, timeSent)
 }
@@ -1368,28 +1371,24 @@ func SignalSendAttachment(
 	// Refuse before the allocation: UploadAttachment only takes the whole file
 	// as one []byte in this process's heap, so an unbounded read could OOM-kill
 	// the app. The cap matches Signal's own ~100 MB attachment limit.
-	if info, serr := os.Stat(path); serr != nil || info.Size() > sgMaxAttachmentBytes {
-		if serr != nil {
-			c.log(LogError, "attachment stat failed: "+serr.Error())
-		} else {
-			c.log(LogError, fmt.Sprintf("attachment too large: %d bytes (cap %d)", info.Size(), sgMaxAttachmentBytes))
-		}
+	info, serr := os.Stat(path)
+	if serr != nil {
+		return sgFailSend(c, "attachment stat", chatId, msgID, serr)
+	}
+	if info.Size() > sgMaxAttachmentBytes {
+		c.log(LogError, fmt.Sprintf("attachment too large: %d bytes (cap %d)", info.Size(), sgMaxAttachmentBytes))
 		c.listener.OnMessageSendFailed(chatId, msgID)
 		return ""
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
-		c.log(LogError, "attachment read failed: "+err.Error())
-		c.listener.OnMessageSendFailed(chatId, msgID)
-		return ""
+		return sgFailSend(c, "attachment read", chatId, msgID, err)
 	}
 
 	ctx := context.TODO()
 	ptr, err := client.UploadAttachment(ctx, body)
 	if err != nil {
-		c.log(LogError, "attachment upload failed: "+err.Error())
-		c.listener.OnMessageSendFailed(chatId, msgID)
-		return ""
+		return sgFailSend(c, "attachment upload", chatId, msgID, err)
 	}
 	ptr.ContentType = proto.String(mime)
 	ptr.FileName = proto.String(filepath.Base(path))
@@ -1409,13 +1408,11 @@ func SignalSendAttachment(
 	}
 	// Second echo, for the download reference the upload just produced: the row
 	// exists since before the upload and the upsert only fills an empty file_id.
-	sgEchoOwn(c, chatId, msgID, caption, sgAttachmentKind(mime, voiceNote), sgFileID(ptr), int64(timestamp/1000), "", "")
+	sgEchoOwn(c, chatId, msgID, caption, sgAttachmentKind(mime, voiceNote), sgFileID(ptr), int64(timestamp/1000))
 	if err := sgSend(c, client, chatId, &signalpb.Content{
 		Content: &signalpb.Content_DataMessage{DataMessage: dm},
 	}); err != nil {
-		c.log(LogError, "attachment send failed: "+err.Error())
-		c.listener.OnMessageSendFailed(chatId, msgID)
-		return ""
+		return sgFailSend(c, "attachment send", chatId, msgID, err)
 	}
 	return msgID
 }
@@ -1477,11 +1474,7 @@ func sgExtFor(mime string) string {
 // being acted on. In a 1:1 chat that is either us or the other party; in a
 // group it has to come from the stored row.
 func sgTargetAuthor(chatId, senderId string) string {
-	id := senderId
-	if id == "" {
-		id = chatId
-	}
-	bare, _ := sgTrimPNI(strings.TrimPrefix(id, SgIDPrefix))
+	bare, _ := sgTrimPNI(sgAuthorID(chatId, senderId))
 	return bare
 }
 
@@ -1710,32 +1703,6 @@ func sgHKDF(ikm []byte, info string) ([]byte, error) {
 	return out, nil
 }
 
-// The question behind "my contacts are missing": the contact list lives in
-// storage service, encrypted with a key derived from the account entropy pool.
-// Registering minted a new pool, so the old manifest — if it is still there —
-// is unreadable by us. If the server has no manifest at all, then registering
-// discarded it and no amount of PIN recovery brings it back.
-func SignalProbeStorage() string {
-	c, client, device := sgActive()
-	if client == nil || device == nil {
-		return sgErrNotRegistered
-	}
-	_ = c
-	if len(device.MasterKey) == 0 {
-		return sgErrNoMasterKey
-	}
-	// currentVersion 0 asks for whatever the server has.
-	update, err := client.FetchStorage(context.TODO(), device.MasterKey, 0, nil)
-	if err != nil {
-		return sgUpstream(err)
-	}
-	if update == nil {
-		return sgErrNoManifest
-	}
-	return fmt.Sprintf("manifest version %d, %d records readable, %d missing",
-		update.Version, len(update.NewRecords), len(update.MissingRecords))
-}
-
 // Registering minted a fresh master key, so the account's existing storage
 // manifest stayed on the server unreadable — contacts the user has talked to
 // but who are not discoverable by phone number were invisible. SVR2 holds the
@@ -1861,7 +1828,7 @@ func SignalMyPhone() string {
 }
 
 // Deliberately strict — the whole body must be the link, in the exact form
-// Bridge.mapLink writes — because any looser match would swallow a plain
+// Bridge.kt's MAP_LINK_PREFIX links — because any looser match would swallow a plain
 // message that merely mentions a map.
 func sgParseMapLink(body string) (float64, float64, bool) {
 	coords, hasPrefix := strings.CutPrefix(strings.TrimSpace(body), sgMapLinkPrefix)
@@ -1949,15 +1916,13 @@ func SignalSendLocation(chatId string, msgId string, latitude float64, longitude
 	if client == nil {
 		return ""
 	}
-	// Must match Bridge.mapLink and sgParseMapLink exactly, in both directions.
+	// Must match Bridge.kt's MAP_LINK_PREFIX and sgParseMapLink exactly, in both directions.
 	text := fmt.Sprintf("%s%.6f,%.6f", sgMapLinkPrefix, latitude, longitude)
 	timestamp := sgTimestamp(msgId)
 	dm := &signalpb.DataMessage{Body: proto.String(text), Timestamp: &timestamp}
 	msgID := fmt.Sprintf("%d", timestamp)
 	if err := sgSend(c, client, chatId, signalmeow.WrapDataMessage(dm)); err != nil {
-		c.log(LogError, "location send failed: "+err.Error())
-		c.listener.OnMessageSendFailed(chatId, msgID)
-		return ""
+		return sgFailSend(c, "location send", chatId, msgID, err)
 	}
 	return msgID
 }
@@ -1996,9 +1961,7 @@ func SignalSendContact(chatId string, msgId string, name string, numbers string)
 	}
 	msgID := fmt.Sprintf("%d", timestamp)
 	if err := sgSend(c, client, chatId, signalmeow.WrapDataMessage(dm)); err != nil {
-		c.log(LogError, "contact send failed: "+err.Error())
-		c.listener.OnMessageSendFailed(chatId, msgID)
-		return ""
+		return sgFailSend(c, "contact send", chatId, msgID, err)
 	}
 	return msgID
 }

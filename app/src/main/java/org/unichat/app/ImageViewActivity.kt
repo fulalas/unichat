@@ -81,12 +81,11 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
             }
         })
 
+        singlePath = path
         if (chatId.isEmpty()) {
-            singlePath = path
             pager.adapter?.notifyDataSetChanged()
             return
         }
-        singlePath = path
         if (adoptWindowAlbum(path)) return
         Io.executor.execute {
             val all = Bridge.db.chatImages(chatId)
@@ -247,8 +246,7 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
                 awaitingOlder = false
                 if (fresh.size == images.size) {
                     pullOlder()
-                }
-                if (fresh.size != images.size) {
+                } else {
                     // older history landed: the album grew at the FRONT, so
                     // every index shifted. Re-find the image being viewed and
                     // stay on it, or the user is thrown to a different photo.
@@ -323,7 +321,7 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         // timeout went with the callbacks: without re-arming it a page that never
         // lands leaves awaitingOlder set for good, and no later swipe can pull
         // any older history again.
-        if (awaitingOlder) pager.postDelayed(olderTimeout, Bridge.historyTimeoutMs)
+        if (awaitingOlder) pager.postDelayed(olderTimeout, Bridge.HISTORY_TIMEOUT_MS)
     }
 
     override fun onStop() {
@@ -343,7 +341,7 @@ class ImageViewActivity : BaseActivity(), Bridge.UiListener {
         Bridge.requestChatHistory(chatId)
         // a page that answers with nothing at all produces no event to react to
         pager.removeCallbacks(olderTimeout)
-        pager.postDelayed(olderTimeout, Bridge.historyTimeoutMs)
+        pager.postDelayed(olderTimeout, Bridge.HISTORY_TIMEOUT_MS)
     }
 
     private fun currentPath(): String =

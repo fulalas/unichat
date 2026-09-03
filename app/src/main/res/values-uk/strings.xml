@@ -52,8 +52,6 @@
     <string name="signal_err_no_session">Термін реєстрації минув. Почніть заново.</string>
     <string name="signal_err_code_rejected">Цей код не прийнято.</string>
     <string name="signal_err_not_registered">На цьому пристрої немає акаунта Signal.</string>
-    <string name="signal_err_no_master_key">У цього акаунта немає збереженого ключа.</string>
-    <string name="signal_err_no_manifest">У Signal немає списку контактів для цього акаунта.</string>
     <string name="signal_err_manifest_locked">Ключ отримано, але список контактів відкрити не вдалося.</string>
     <string name="signal_err_store_failed">Не вдалося зберегти відновлений ключ.</string>
     <string name="signal_err_no_backup">У цього акаунта немає резервної копії з PIN-кодом.</string>

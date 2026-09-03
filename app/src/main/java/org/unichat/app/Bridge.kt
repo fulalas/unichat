@@ -65,9 +65,7 @@ object Bridge : EventListener {
 
     private val historyExhausted = CopyOnWriteArraySet<String>()
     private const val HISTORY_PAGE = 100L
-    private const val HISTORY_TIMEOUT_MS = 30_000L
-
-    val historyTimeoutMs: Long get() = HISTORY_TIMEOUT_MS
+    const val HISTORY_TIMEOUT_MS = 30_000L
     private const val INITIAL_HISTORY_MIN = 60
 
     private data class ChatStateInfo(val state: String, val actorName: String, val actorCount: Int)
@@ -82,6 +80,15 @@ object Bridge : EventListener {
     fun chatStateActorCount(chatId: String): Int = chatStates[chatId]?.actorCount ?: 0
     fun isOnline(userId: String): Boolean = online[userId] == true
     fun lastSeenOf(userId: String): Long = lastSeen[userId] ?: 0L
+
+    fun presenceLine(ctx: Context, chatId: String): String? = when {
+        isOnline(chatId) -> ctx.getString(R.string.online)
+        lastSeenOf(chatId) > 0 -> ctx.getString(
+            R.string.last_seen, TimeFormat.compactWithTime(ctx, lastSeenOf(chatId))
+        )
+        lastSeenApproxOf(chatId) != 0 -> ctx.getString(lastSeenApproxOf(chatId))
+        else -> null
+    }
 
     fun lastSeenApproxOf(userId: String): Int = lastSeenApprox[userId] ?: 0
 
@@ -273,6 +280,9 @@ object Bridge : EventListener {
         fun reactionSenders(msg: MessageRow): List<Pair<String, String>>? = null
 
         fun viewOnceKinds(chatId: String): Set<String>
+
+        fun groupMembers(chatId: String): List<Member> = emptyList()
+        fun peerInfo(chatId: String): PeerInfo = PeerInfo("", "", "")
     }
 
     private fun protoExecutor(chatId: String) =
@@ -376,7 +386,6 @@ object Bridge : EventListener {
         // badge never cleared and the same receipt went out again each time.
         override fun markChatRead(chatId: String) = Signal.markChatRead(chatId)
         override fun markVoicePlayed(msg: MessageRow) {}
-        override fun openChat(chatId: String) {}
         override fun closeChat(chatId: String) = Signal.setTyping(chatId, false)
 
         override fun requestInitialHistory(chatId: String) {}
@@ -393,28 +402,14 @@ object Bridge : EventListener {
         // Signal keeps no server-side history to walk, so the local store is
         // all of it.
         override fun exportChat(chatId: String, uri: android.net.Uri): Boolean {
-            val ctx = appContext ?: return false
             // One at a time per chat, like the other two: a second run wrote the
             // same file and released the caller's write grant under the first.
             if (!sgExporting.add(chatId)) return false
             mediaExecutor.execute {
-                var messages = 0
-                // Throwable, not Exception: the whole history goes through one
-                // list, so OutOfMemoryError is the likeliest failure and an
-                // Error would otherwise leave the UI waiting for a completion
-                // that never comes.
-                val success = try {
-                    val sorted = db.messages(chatId, Int.MAX_VALUE).sortedBy { it.timeSent }
-                    messages = sorted.size
-                    ChatExporter.write(ctx, db, chatId, uri, sorted)
-                    true
-                } catch (e: Throwable) {
-                    Log.w(TAG, "signal export write failed: $e")
-                    false
+                writeExportRows(chatId, uri, complete = true,
+                    onWritten = { sgExporting.remove(chatId) }) {
+                    db.messages(chatId, Int.MAX_VALUE).sortedBy { it.timeSent }
                 }
-                sgExporting.remove(chatId)
-                releaseExportUri(uri)
-                notifyUi { it.onChatExportDone(chatId, messages, true, success) }
             }
             return true
         }
@@ -639,6 +634,32 @@ object Bridge : EventListener {
         override val consumesStagingInput: Boolean = true
 
         override fun viewOnceKinds(chatId: String) = WA_VIEW_ONCE
+
+        override fun groupMembers(chatId: String): List<Member> {
+            if (connId < 0) return emptyList()
+            val names = db.contactNames()
+            return Wmbridge.getGroupMembers(connId, chatId).lineSequence().mapNotNull { line ->
+                val parts = line.split('\t')
+                if (parts.size < 2 || parts[0].isEmpty()) return@mapNotNull null
+                // last resort is the bare digits, never "<lid>@lid": that is
+                // what a mention of an unnamed member ends up reading as
+                val name = names[parts[0]]?.takeIf { it.isNotEmpty() }
+                    ?: names[parts[1]]?.takeIf { it.isNotEmpty() }
+                    ?: if (isPhoneId(parts[0])) phoneLabel(parts[0])
+                    else parts[0].substringBefore("@")
+                Member(parts[0], parts[1], name)
+            }.toList()
+        }
+
+        override fun peerInfo(chatId: String): PeerInfo {
+            // only a phone JID holds a real number; a @lid's digits are not one,
+            // so fall back to the number the contact row carries rather than
+            // inventing a plausible-looking "+<lid>"
+            val phone = if (isPhoneId(chatId)) phoneLabel(chatId)
+                else db.contactPhone(chatId).takeIf { it.isNotEmpty() }?.let { "+$it" }.orEmpty()
+            val about = if (connId < 0) "" else Wmbridge.getUserAbout(connId, chatId)
+            return PeerInfo(phone, "", about)
+        }
     }
 
     private object TgTransport : Protocol {
@@ -754,6 +775,33 @@ object Bridge : EventListener {
         // it had just been offered.
         override fun viewOnceKinds(chatId: String): Set<String> =
             if (isGroupId(chatId) || isTgSelfChat(chatId)) emptySet() else TG_VIEW_ONCE
+
+        override fun groupMembers(chatId: String): List<Member> {
+            val names = db.contactNames()
+            // the update stream names most of them on the way in; the leftovers
+            // cost a round trip each, so they are rationed — a TDLib that has
+            // stopped answering would otherwise hold this thread for a 15s
+            // timeout per member, and every other screen's lookups behind it
+            var budget = TG_NAME_LOOKUPS
+            return Tg.groupMembers(chatId).map { id ->
+                var name = names[id].orEmpty()
+                if (name.isEmpty() && budget > 0) {
+                    val looked = Tg.cacheUser(id)
+                    budget = if (looked == null) 0 else budget - 1
+                    name = looked.orEmpty()
+                }
+                Member(id, id, name.ifEmpty { id.removePrefix(Tg.PREFIX) })
+            }
+        }
+
+        override fun peerInfo(chatId: String): PeerInfo {
+            val info = Tg.peerInfo(chatId) ?: return PeerInfo("", "", "")
+            return PeerInfo(
+                phone = if (info.phone.isEmpty()) "" else "+" + info.phone.removePrefix("+"),
+                nickname = if (info.username.isEmpty()) "" else "@" + info.username,
+                about = info.bio,
+            )
+        }
     }
 
     // Memoised own JID. selfId() is asked once per chat-list row bind (every row
@@ -835,7 +883,6 @@ object Bridge : EventListener {
         sendQueued.add(chatId + KEY_SEP + msgId)
         armSendWatchdog(row)
         notifyChat(chatId)
-        notifyChatsChanged()
         return row
     }
 
@@ -853,11 +900,10 @@ object Bridge : EventListener {
             watchdogs.remove(key)
             // No ladder for media: restarting a large upload every few seconds
             // would keep it from ever finishing.
-            val key2 = row.chatId + KEY_SEP + row.id
             if (db.isSendPending(row.chatId, row.id)) {
                 markSendFailed(
                     row.chatId, row.id,
-                    retry = !media && !sendQueued.contains(key2) && !sendInFlight.contains(key2)
+                    retry = !media && !sendQueued.contains(key) && !sendInFlight.contains(key)
                 )
             }
         }, if (media) MEDIA_WATCHDOG_MS else SEND_WATCHDOG_MS,
@@ -1117,23 +1163,17 @@ object Bridge : EventListener {
         }
     }
 
+    // ordered sends go on [batchExecutor], not mediaExecutor's two workers,
+    // where a small file overtook the larger one picked before it and the
+    // attachments arrived shuffled.
     fun sendFile(
         chatId: String, filePath: String, fileName: String, mimeType: String,
         caption: String = "", quoted: MessageRow? = null, viewOnce: Boolean = false,
+        ordered: Boolean = false,
     ) = stageExecutor.execute {
         val row = stageFile(chatId, filePath, fileName, mimeType, caption, quoted)
-        mediaExecutor.execute { sendFileBlocking(row, fileName, mimeType, caption, quoted, viewOnce) }
-    }
-
-    // On [batchExecutor], not mediaExecutor's two workers, where a small file
-    // overtook the larger one picked before it and the attachments arrived
-    // shuffled.
-    fun sendFileInOrder(
-        chatId: String, filePath: String, fileName: String, mimeType: String,
-        quoted: MessageRow? = null, viewOnce: Boolean = false,
-    ) = stageExecutor.execute {
-        val row = stageFile(chatId, filePath, fileName, mimeType, "", quoted)
-        batchExecutor.execute { sendFileBlocking(row, fileName, mimeType, "", quoted, viewOnce) }
+        val exec = if (ordered) batchExecutor else mediaExecutor
+        exec.execute { sendFileBlocking(row, fileName, mimeType, caption, quoted, viewOnce) }
     }
 
     // A document's row text IS its file name; the bubble reads it back.
@@ -1314,7 +1354,7 @@ object Bridge : EventListener {
         retryAttempts.remove(old)?.let { retryAttempts[chatId + KEY_SEP + newId] = it }
     }
 
-    fun isStagingPath(filePath: String): Boolean {
+    private fun isStagingPath(filePath: String): Boolean {
         val cacheDir = appContext?.cacheDir ?: return false
         return filePath.startsWith(cacheDir.path + "/")
     }
@@ -1840,29 +1880,37 @@ object Bridge : EventListener {
         }
     }
 
-    private fun writeExport(ex: ChatExport, complete: Boolean) {
-        val ctx = appContext ?: return
-        var messages = 0
-        // catch Throwable, not Exception: a long export merges the whole fetched
-        // history with the whole local store, so OutOfMemoryError is the most
-        // likely failure — and being an Error it escaped the old catch, leaving
-        // the UI waiting on a completion callback that never fired
-        val success = try {
+    private fun writeExport(ex: ChatExport, complete: Boolean) =
+        writeExportRows(ex.chatId, ex.uri, complete) {
             val all = LinkedHashMap<String, MessageRow>()
             for (m in ex.collected.values) all[m.id] = m
             ex.collected.clear()
             for (m in db.messages(ex.chatId, Int.MAX_VALUE)) all[m.id] = m
-            val sorted = all.values.sortedBy { it.timeSent }
-            all.clear()
+            all.values.sortedBy { it.timeSent }
+        }
+
+    // catch Throwable, not Exception: a long export merges the whole fetched
+    // history with the whole local store, so OutOfMemoryError is the most
+    // likely failure — and being an Error it escaped the old catch, leaving
+    // the UI waiting on a completion callback that never fired
+    internal fun writeExportRows(
+        chatId: String, uri: android.net.Uri, complete: Boolean,
+        onWritten: () -> Unit = {}, rows: () -> List<MessageRow>,
+    ) {
+        val ctx = appContext ?: return
+        var messages = 0
+        val success = try {
+            val sorted = rows()
             messages = sorted.size
-            ChatExporter.write(ctx, db, ex.chatId, ex.uri, sorted)
+            ChatExporter.write(ctx, db, chatId, uri, sorted)
             true
         } catch (e: Throwable) {
             Log.w(TAG, "export write failed: $e")
             false
         }
-        releaseExportUri(ex.uri)
-        notifyUi { it.onChatExportDone(ex.chatId, messages, complete, success) }
+        onWritten()
+        releaseExportUri(uri)
+        notifyUi { it.onChatExportDone(chatId, messages, complete, success) }
     }
 
     override fun onExportMessage(
@@ -1947,65 +1995,19 @@ object Bridge : EventListener {
      *  them — the same person, under two ids, on WhatsApp. */
     class Member(val chatId: String, val mentionId: String, val name: String)
 
-    /** Blocking (both protocols ask their server); worker threads only. Empty
-     *  for a group whose member list this account may not read. */
+    /** Blocking; worker threads only. Empty for a group whose member list this
+     *  account may not read. */
     fun groupMembers(chatId: String): List<Member> {
         if (!isGroupId(chatId)) return emptyList()
-        val names = db.contactNames()
-        val members = if (isTg(chatId)) {
-            // the update stream names most of them on the way in; the leftovers
-            // cost a round trip each, so they are rationed — a TDLib that has
-            // stopped answering would otherwise hold this thread for a 15s
-            // timeout per member, and every other screen's lookups behind it
-            var budget = TG_NAME_LOOKUPS
-            Tg.groupMembers(chatId).map { id ->
-                var name = names[id].orEmpty()
-                if (name.isEmpty() && budget > 0) {
-                    val looked = Tg.cacheUser(id)
-                    budget = if (looked == null) 0 else budget - 1
-                    name = looked.orEmpty()
-                }
-                Member(id, id, name.ifEmpty { id.removePrefix(Tg.PREFIX) })
-            }
-        } else {
-            if (connId < 0) return emptyList()
-            Wmbridge.getGroupMembers(connId, chatId).lineSequence().mapNotNull { line ->
-                val parts = line.split('\t')
-                if (parts.size < 2 || parts[0].isEmpty()) return@mapNotNull null
-                // last resort is the bare digits, never "<lid>@lid": that is
-                // what a mention of an unnamed member ends up reading as
-                val name = names[parts[0]]?.takeIf { it.isNotEmpty() }
-                    ?: names[parts[1]]?.takeIf { it.isNotEmpty() }
-                    ?: if (isPhoneId(parts[0])) phoneLabel(parts[0])
-                    else parts[0].substringBefore("@")
-                Member(parts[0], parts[1], name)
-            }.toList()
-        }
-        return members.sortedBy { it.name.lowercase() }
+        return proto(chatId).groupMembers(chatId).sortedBy { it.name.lowercase() }
     }
 
     class PeerInfo(val phone: String, val nickname: String, val about: String)
 
-    /** Blocking (both protocols ask their server); worker threads only. Every
-     *  field is optional — an empty About is indistinguishable from one the
-     *  contact's privacy settings hide, so the row is simply left out. */
-    fun peerInfo(chatId: String): PeerInfo {
-        if (isTg(chatId)) {
-            val info = Tg.peerInfo(chatId) ?: return PeerInfo("", "", "")
-            return PeerInfo(
-                phone = if (info.phone.isEmpty()) "" else "+" + info.phone.removePrefix("+"),
-                nickname = if (info.username.isEmpty()) "" else "@" + info.username,
-                about = info.bio,
-            )
-        }
-        // only a phone JID holds a real number; a @lid's digits are not one, so
-        // fall back to the number the contact row carries rather than inventing
-        // a plausible-looking "+<lid>"
-        val phone = if (isPhoneId(chatId)) phoneLabel(chatId)
-            else db.contactPhone(chatId).takeIf { it.isNotEmpty() }?.let { "+$it" }.orEmpty()
-        val about = if (connId < 0) "" else Wmbridge.getUserAbout(connId, chatId)
-        return PeerInfo(phone, "", about)
-    }
+    /** Blocking; worker threads only. Every field is optional — an empty About
+     *  is indistinguishable from one the contact's privacy settings hide, so
+     *  the row is simply left out. */
+    fun peerInfo(chatId: String): PeerInfo = proto(chatId).peerInfo(chatId)
 
     fun getAvatarPath(chatId: String): String =
         proto(chatId).avatarPath(chatId, big = false, cachedOnly = false)
@@ -2017,16 +2019,16 @@ object Bridge : EventListener {
     fun getCachedAvatarPath(chatId: String): String =
         proto(chatId).avatarPath(chatId, big = false, cachedOnly = true)
 
-    fun getAvatarFullPath(chatId: String): String =
+    fun bestAvatarPath(chatId: String): String =
         proto(chatId).avatarPath(chatId, big = true, cachedOnly = false)
+            .ifEmpty { getAvatarPath(chatId) }
 
     // The fetch can block on the network for a long time, so the activity may
     // well be gone by the time it returns — launching a viewer from a destroyed
     // activity would pop it over whatever screen the user moved on to.
     fun openAvatar(activity: android.app.Activity, chatId: String) {
         mediaExecutor.execute {
-            var path = getAvatarFullPath(chatId)
-            if (path.isEmpty()) path = getAvatarPath(chatId)
+            val path = bestAvatarPath(chatId)
             activity.runOnUiThread {
                 if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
                 if (path.isEmpty()) {
@@ -2121,14 +2123,24 @@ object Bridge : EventListener {
     // Releasing the claim downloadFile took is the part that matters: without
     // it a failed download can never be retried, because every later attempt
     // sees the slot still held and dispatches nothing.
-    internal fun onFileTransferDone(chatId: String, msgId: String, filePath: String, status: Int) {
-        val key = "$chatId/$msgId"
-        downloading.remove(key)
-        if (status == 3 && userRequestedDownloads.remove(key)) toastUi(R.string.download_failed)
-        else userRequestedDownloads.remove(key)
-        if (autoPlayKey == key) {
+    internal fun onFileTransferDone(chatId: String, msgId: String, filePath: String, status: Int) =
+        settleTransfer(listOf(chatId), chatId, msgId, filePath, status)
+
+    // a failed download is otherwise invisible (the bubble just stays
+    // undownloaded); tell the user — but only for downloads they asked
+    // for, not the automatic ones (expired history media fails in bulk).
+    private fun settleTransfer(
+        chatIds: List<String>, playChatId: String, msgId: String, filePath: String, status: Int,
+    ) {
+        val keys = chatIds.map { "$it/$msgId" }
+        for (key in keys) downloading.remove(key)
+        val requested = keys.count { userRequestedDownloads.remove(it) } > 0
+        if (status == 3 && requested) toastUi(R.string.download_failed)
+        if (autoPlayKey in keys) {
             autoPlayKey = null
-            if (status == 2 && filePath.isNotEmpty()) main.post { AudioPlayer.play(filePath, chatId, msgId) }
+            if (status == 2 && filePath.isNotEmpty()) {
+                main.post { AudioPlayer.play(filePath, playChatId, msgId) }
+            }
         }
     }
 
@@ -2219,8 +2231,7 @@ object Bridge : EventListener {
     ) {
         if (wiping) return
         db.upsertContact(id, name, phone, isSelf, isGroup, isSaved)
-        synchronized(changedChats) { contactsChanged = true }
-        notifyChatsChanged()
+        notifyContactsChangedInternal()
     }
 
     override fun onChat(chatId: String, name: String, unreadCount: Long, isArchived: Boolean, lastMessageTime: Long) {
@@ -2452,23 +2463,9 @@ object Bridge : EventListener {
         // genuinely orphaned: the freshly written file would linger on disk with
         // no bubble to reach it, so drop it now.
         if (updated == 0 && filePath.isNotEmpty()) runCatching { java.io.File(filePath).delete() }
-        // the transfer is over: release the in-flight claim downloadFile took,
-        // under both the id the request was made with and the merged one
-        downloading.remove("$chatId/$msgId")
-        downloading.remove("$target/$msgId")
-        // a failed download is otherwise invisible (the bubble just stays
-        // undownloaded); tell the user — but only for downloads they asked
-        // for, not the automatic ones (expired history media fails in bulk).
-        // Keyed by the id the request was MADE with, plus the merged one.
-        val requested = userRequestedDownloads.remove("$chatId/$msgId") ||
-            userRequestedDownloads.remove("$target/$msgId")
-        if (status.toInt() == 3 && requested) toastUi(R.string.download_failed)
-        if (autoPlayKey == "$chatId/$msgId" || autoPlayKey == "$target/$msgId") {
-            autoPlayKey = null
-            if (status.toInt() == 2 && filePath.isNotEmpty()) {
-                main.post { AudioPlayer.play(filePath, target, msgId) }
-            }
-        }
+        // the transfer is over: release the claim under both the id the request
+        // was made with and the merged one
+        settleTransfer(listOf(chatId, target).distinct(), target, msgId, filePath, status.toInt())
         notifyChatRow(target, msgId)
     }
 

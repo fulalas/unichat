@@ -45,7 +45,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // worst case of the operation it guards: MAX_SEEK_PAGES pages, each with
         // its own bridge-side timeout. A flat 60s used to abort slow-but-working
         // seeks and toast "message not loaded" while pages were still arriving.
-        private val SEEK_TIMEOUT_MS = MAX_SEEK_PAGES * Bridge.historyTimeoutMs + 30_000L
+        private val SEEK_TIMEOUT_MS = MAX_SEEK_PAGES * Bridge.HISTORY_TIMEOUT_MS + 30_000L
         private const val SEEK_CONTEXT_ROWS = 20
         private const val HOLD_MAX_MS = 5000L
         private const val SETTLE_QUIET_MS = 400L
@@ -67,6 +67,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private lateinit var chatId: String
+
+    private val serverSearch get() = Accounts.ofChat(chatId).serverSearch
     private lateinit var messageList: RecyclerView
     private lateinit var lm: LinearLayoutManager
     private lateinit var scrollFab: android.view.View
@@ -281,10 +283,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             // list hands over a label it has already decorated, so re-decorating
             // that produced "Rafael (Telegram) (Telegram)". The extra is only
             // good enough to paint the toolbar before this read lands.
-            val name = Bridge.db.displayName(chatId).let {
-                val proto = selfProtocol(this, chatId)
-                if (proto.isEmpty()) it else "$it ($proto)"
-            }
+            val name = displayNameWithProto(this, chatId)
             runOnUiThread {
                 chatDisplayName = name
                 toolbarTitle.text = name
@@ -651,15 +650,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 if (unreadJump != null && !restoredScroll && pendingJumpId == null && !hasStored) {
                     pendingJumpId = unreadJump
                 }
-                pendingVideoOpen?.let { id ->
-                    val m = messages.find { it.id == id }
-                    if (m != null && m.filePath.isNotEmpty()) {
-                        pendingVideoOpen = null
-                        openMediaFile(m)
-                    } else if (m != null && m.fileStatus == 3) {
-                        pendingVideoOpen = null // failed — Bridge already toasted
-                    }
-                }
+                consumePendingVideo { id -> messages.find { it.id == id } }
                 // capture position/growth against the current list before the
                 // diff is applied; the scroll runs in the commit callback once
                 // the new item count is live
@@ -872,7 +863,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             if (quoteJumpReturns.lastOrNull() != origin.id) quoteJumpReturns.addLast(origin.id)
             return
         }
-        seekQuotedId = origin.quotedId
+        beginSeek(origin.quotedId, origin)
+    }
+
+    private fun beginSeek(target: String, origin: MessageRow?) {
+        seekQuotedId = target
         seekOrigin = origin
         seekCenter = true
         seekFetching = false
@@ -899,11 +894,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     // the reload replaces the search snapshot; positional match
                     // state would index rows that are no longer there (same rule
                     // as onChatMerged)
-                    if (searchActive) {
-                        searchMatches = emptyList()
-                        currentMatch = -1
-                        updateSearchCount()
-                    }
+                    if (searchActive) resetLocalMatches()
                     reload()
                 } else if (!seekFetching) {
                     // not stored: page history back from the replying message.
@@ -932,12 +923,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (scrollToMessage(target, toastIfMissing = false, center = true)) return
         if (seekQuotedId == target) return
         if (seekQuotedId != null) clearSeek()
-        seekQuotedId = target
-        seekOrigin = null
-        seekCenter = true
-        seekFetching = false
-        updateSubtitle()
-        driveSeek()
+        beginSeek(target, null)
     }
 
     private fun completeSeek() {
@@ -984,12 +970,14 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         Bridge.openChat(toId, owner = this) // re-route active-chat / notification suppression
         // the reload below replaces the adapter's list; positional search state
         // would still index into the old (possibly much larger) search window
-        if (searchActive) {
-            searchMatches = emptyList()
-            currentMatch = -1
-            updateSearchCount()
-        }
+        if (searchActive) resetLocalMatches()
         reload()
+    }
+
+    private fun resetLocalMatches() {
+        searchMatches = emptyList()
+        currentMatch = -1
+        updateSearchCount()
     }
 
     override fun onMessagesChanged(chatId: String, rowIds: Set<String>?) {
@@ -1034,17 +1022,20 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             val fresh = Bridge.db.messagesByIds(chatId, ids).associateBy { it.id }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                pendingVideoOpen?.let { id ->
-                    val m = fresh[id]
-                    if (m != null && m.filePath.isNotEmpty()) {
-                        pendingVideoOpen = null
-                        openMediaFile(m)
-                    } else if (m != null && m.fileStatus == 3) {
-                        pendingVideoOpen = null // failed — Bridge already toasted
-                    }
-                }
+                consumePendingVideo { id -> fresh[id] }
                 adapter.refreshRows(fresh)
             }
+        }
+    }
+
+    private fun consumePendingVideo(lookup: (String) -> MessageRow?) {
+        val id = pendingVideoOpen ?: return
+        val m = lookup(id) ?: return
+        if (m.filePath.isNotEmpty()) {
+            pendingVideoOpen = null
+            openMediaFile(m)
+        } else if (m.fileStatus == 3) {
+            pendingVideoOpen = null // failed — Bridge already toasted
         }
     }
 
@@ -1062,7 +1053,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchBar.visibility = android.view.View.VISIBLE
         searchInput.requestFocus()
         showKeyboard(searchInput)
-        if (Tg.isTgId(chatId)) return
+        if (serverSearch) return
         updateCoverage()
         loadSearchWindow()
     }
@@ -1201,9 +1192,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             if (showingHit) reload()
             return
         }
-        // Telegram can be asked directly; WhatsApp is end-to-end encrypted, so
-        // its servers hold nothing to ask about and the scan stays local
-        if (Tg.isTgId(chatId)) runServerSearch(q) else runLocalSearch(q)
+        if (serverSearch) runServerSearch(q) else runLocalSearch(q)
     }
 
     private fun runLocalSearch(q: String) {
@@ -1304,7 +1293,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             val merged = if (more.isEmpty()) emptyList() else {
                 (if (older) more + rows else rows + more)
                     .distinctBy { it.id }
-                    .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
+                    .sortedWith(MESSAGE_ORDER)
             }
             val names = if (merged.isEmpty()) emptyMap() else contactNames()
             val quoteNames =
@@ -1332,8 +1321,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // prefers the stored row — so the row arrived here claiming
         // "downloaded", was skipped, and stayed blank with nothing (bind or
         // tap) ever fetching it again.
-        val hasFile = msg.filePath.isNotEmpty() && File(msg.filePath).exists()
-        if (msg.fileId.isEmpty() || hasFile) return
+        if (msg.fileId.isEmpty() || Bridge.fileOnDisk(msg)) return
         // one automatic try per file: a failed row still binds with an empty
         // path, so every scroll past it would start another blocking fetch. A
         // tap always retries.
@@ -1436,7 +1424,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // "none in what is on this device" — naming the oldest message the scan
     // reached keeps that honest, and the button fetches more.
     private fun updateCoverage() {
-        if (!searchActive || Tg.isTgId(chatId)) {
+        if (!searchActive || serverSearch) {
             searchCoverageRow.visibility = android.view.View.GONE
             return
         }
@@ -1546,18 +1534,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     // rebuilt between runs. Nothing is stored while at the bottom — that chat
     // should open on whatever arrived since.
     private fun saveScrollAnchor(atBottom: Boolean) {
-        val id: String
-        val offset: Int
-        if (atBottom) {
-            id = ""
-            offset = 0
-        } else {
-            val pos = lm.findFirstVisibleItemPosition()
-            if (pos < 0) return
-            id = adapter.messageIdAt(pos)
-            if (id.isEmpty()) return
-            offset = lm.findViewByPosition(pos)?.top ?: 0
-        }
+        val (id, offset) = if (atBottom) "" to 0 else visibleAnchor() ?: return
         if (id == savedAnchorId && offset == savedAnchorOffset) return
         savedAnchorId = id
         savedAnchorOffset = offset
@@ -1631,7 +1608,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         // The loaded window runs oldest-first, the server's hits newest-first,
         // so "up" (delta -1, older) walks the hit list forwards. Server hits
         // also do not wrap: there is always more history behind the last one.
-        if (Tg.isTgId(chatId)) {
+        if (serverSearch) {
             stepHit(-delta)
             return
         }
@@ -1643,7 +1620,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun updateSearchCount() {
-        if (Tg.isTgId(chatId)) {
+        if (serverSearch) {
             searchCount.text = if (serverHits.isEmpty()) getString(R.string.no_results)
                 else "${currentHit + 1}/${maxOf(serverTotal, serverHits.size)}"
             return
@@ -1654,11 +1631,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun showChatMenu(anchor: android.view.View) {
         val popup = android.widget.PopupMenu(this, anchor)
-        // No "sync all" for Signal: there is no server-side history to walk,
-        // so the only messages that exist are the ones already here. Export
-        // works from those, so it is offered for every protocol — a menu with
+        // No "sync all" without server-side history to walk. Export works from
+        // the local store, so it is offered for every protocol — a menu with
         // nothing in it just looked broken.
-        if (!Signal.isSgId(chatId)) popup.menu.add(0, 1, 0, R.string.sync_all)
+        if (Accounts.ofChat(chatId).historySync) popup.menu.add(0, 1, 0, R.string.sync_all)
         popup.menu.add(0, 2, 1, R.string.export_chat)
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -1740,11 +1716,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             state == "typing" -> activityLine(getString(R.string.typing))
             state == "recording" -> activityLine(getString(R.string.recording_voice))
             isGroup || self -> null
-            Bridge.isOnline(chatId) -> getString(R.string.online)
-            Bridge.lastSeenOf(chatId) > 0 ->
-                getString(R.string.last_seen, TimeFormat.compactWithTime(this, Bridge.lastSeenOf(chatId)))
-            Bridge.lastSeenApproxOf(chatId) != 0 -> getString(Bridge.lastSeenApproxOf(chatId))
-            else -> null
+            else -> Bridge.presenceLine(this, chatId)
         }
         toolbarSubtitle.text = subtitle
         toolbarSubtitle.setTextColor(
@@ -2006,8 +1978,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 // the quote rides the first file that actually goes out, not the
                 // first one picked: the reply was lost outright when that one was
                 // dropped as unsupported or failed to stage
-                Bridge.sendFileInOrder(
-                    chatId, local.absolutePath, name, mime, quoted = quote, viewOnce = asked
+                Bridge.sendFile(
+                    chatId, local.absolutePath, name, mime,
+                    quoted = quote, viewOnce = asked, ordered = true,
                 )
                 quote = null
             }
@@ -2176,6 +2149,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         pendingRecordings[chatId] = PendingRecording(
             file, duration, recordAmps.toList(), recordViewOnce
         )
+        showPausedLabel(duration)
+    }
+
+    private fun showPausedLabel(duration: Int) {
         recordTimer.text =
             recordPrefix() + getString(R.string.recording_paused, TimeFormat.mmss(duration))
     }
@@ -2195,8 +2172,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         recordViewOnce = pending.viewOnce
         input.visibility = android.view.View.GONE
         recordTimer.visibility = android.view.View.VISIBLE
-        recordTimer.text =
-            recordPrefix() + getString(R.string.recording_paused, TimeFormat.mmss(pending.duration))
+        showPausedLabel(pending.duration)
         showRecordingButtons()
     }
 
@@ -2533,21 +2509,15 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun openDocument(msg: MessageRow) {
-        if (!mediaOnDisk(msg)) {
+        if (!Bridge.fileOnDisk(msg)) {
             downloadWithToast(msg)
             return
         }
         openMediaFile(msg)
     }
 
-    // A stored path can outlive its file (our own Telegram sends reference the
-    // cacheDir staging copy, swept after a day), and handing that path to an
-    // external viewer opens nothing.
-    private fun mediaOnDisk(msg: MessageRow): Boolean =
-        msg.filePath.isNotEmpty() && File(msg.filePath).exists()
-
     private fun openVideo(msg: MessageRow) {
-        if (mediaOnDisk(msg)) {
+        if (Bridge.fileOnDisk(msg)) {
             openMediaFile(msg)
             return
         }
@@ -2715,7 +2685,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         names[senderId]?.takeIf { it.isNotEmpty() }?.let { return it }
         Bridge.db.displayName(senderId).takeIf { it.isNotEmpty() && it != senderId }
             ?.let { return it }
-        return if (Tg.isTgId(senderId)) getString(R.string.unknown_sender) else phoneLabel(senderId)
+        return if (Accounts.ofChat(senderId).proto == ProtoPicker.WA) phoneLabel(senderId)
+        else getString(R.string.unknown_sender)
     }
 
     private fun openReactorChat(senderId: String, name: String) {

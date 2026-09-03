@@ -151,7 +151,6 @@ ensure_signalmeow() {
             echo "   refresh gobridge/ext/signal-local.patch; the Go bridge cannot link without it" >&2
             exit 1
         fi
-        staging="$dest.new"
         rm -rf "$staging"
         git clone -q --depth 1 --branch "$SIGNALMEOW_TAG" "$SIGNALMEOW_REPO" "$staging" || exit 1
         git -C "$staging" apply "$patch" || { echo "signalmeow: $pinned no longer patches" >&2; exit 1; }
@@ -245,7 +244,7 @@ ensure_whatsmeow() {
     # Writing it before tidy had succeeded marked a half-updated checkout as good
     # forever — a single transient tidy failure then left every later build dying
     # with "missing go.sum entry" until someone deleted the tree by hand.
-    echo "$latest" > "$dest/.wm-commit"
+    echo "$latest" > "$stamp"
 }
 
 if [ "$APK_ONLY" != 1 ]; then

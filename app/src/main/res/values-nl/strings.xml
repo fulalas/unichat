@@ -52,8 +52,6 @@
     <string name="signal_err_no_session">De aanmelding is verlopen. Begin opnieuw.</string>
     <string name="signal_err_code_rejected">Die code is niet geaccepteerd.</string>
     <string name="signal_err_not_registered">Geen Signal-account op dit apparaat.</string>
-    <string name="signal_err_no_master_key">Dit account heeft geen opgeslagen sleutel.</string>
-    <string name="signal_err_no_manifest">Signal heeft geen contactenlijst voor dit account.</string>
     <string name="signal_err_manifest_locked">De sleutel kwam binnen, maar de contactenlijst ging niet open.</string>
     <string name="signal_err_store_failed">De herstelde sleutel kon niet worden opgeslagen.</string>
     <string name="signal_err_no_backup">Dit account heeft geen back-up met pincode.</string>

@@ -35,6 +35,22 @@ object AvatarLoader {
 
     private val placeholders = newBitmapCache(64)
 
+    // For the big header avatars. Off the shared serial worker: the full-size
+    // fetch blocks on the network (a 20s TDLib download, a timeout-less
+    // WhatsApp request) and held up every other screen's DB reads behind it.
+    fun loadBig(
+        activity: android.app.Activity, chatId: String, px: Int, into: (Bitmap?) -> Unit,
+    ) {
+        Io.lookup.execute {
+            val path = Bridge.bestAvatarPath(chatId)
+            val bmp = if (path.isEmpty()) null else ImageLoader.decodeSampled(path, px)
+            activity.runOnUiThread {
+                if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+                into(bmp)
+            }
+        }
+    }
+
     // Two pools, because the two halves of a load have nothing in common:
     // decoding an avatar the bridge already has on disk takes milliseconds,
     // while asking the bridge for one it does not have blocks for a long time

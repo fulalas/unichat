@@ -25,7 +25,6 @@ API=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*\([0-9]*\).*/\1/p' \
 : "${API:?could not read minSdk from app/build.gradle}"
 JOBS=$(nproc)
 ABIS=("${@:-arm64-v8a}")
-[ $# -eq 0 ] && ABIS=(arm64-v8a)
 # Reject unknown ABIs here: openssl_target/clang_target are called inside command
 # substitutions, where an abort would only kill the subshell and hand the caller
 # an empty target string.
@@ -55,7 +54,6 @@ if [ -z "$TD_WANT" ]; then
     # is already checked out rather than refusing to build at all.
     [ -f "$TD_SRC/CMakeLists.txt" ] || { echo "TDLib: upstream unreachable and nothing fetched yet" >&2; exit 1; }
     echo "== TDLib: upstream unreachable; using the existing checkout =="
-    TD_WANT=$(cat "$TD_STAMP" 2>/dev/null) || true
 elif [ "$(cat "$TD_STAMP" 2>/dev/null)" != "$TD_WANT" ] || [ ! -f "$TD_SRC/CMakeLists.txt" ]; then
     echo "== Fetching TDLib @ ${TD_WANT:0:12} (upstream $TD_BRANCH) =="
     # Fetch into a staging dir and swap on success, like build.sh's ensure_*
@@ -87,7 +85,6 @@ elif [ "$(cat "$TD_STAMP" 2>/dev/null)" != "$TD_WANT" ] || [ ! -f "$TD_SRC/CMake
         rm -rf "$TD_NEW"
         [ -f "$TD_SRC/CMakeLists.txt" ] || { echo "TDLib: fetch failed" >&2; exit 1; }
         echo "== TDLib: fetch of ${TD_WANT:0:12} failed; using the existing checkout ==" >&2
-        TD_WANT=$(cat "$TD_STAMP" 2>/dev/null) || true
     fi
 fi
 

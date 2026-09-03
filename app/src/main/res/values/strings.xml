@@ -56,8 +56,6 @@
     <string name="signal_err_no_session">The sign-up expired. Start again.</string>
     <string name="signal_err_code_rejected">That code was not accepted.</string>
     <string name="signal_err_not_registered">No Signal account on this device.</string>
-    <string name="signal_err_no_master_key">This account has no stored key.</string>
-    <string name="signal_err_no_manifest">Signal holds no contact list for this account.</string>
     <string name="signal_err_manifest_locked">The key came back but the contact list could not be opened.</string>
     <string name="signal_err_store_failed">Could not save the recovered key.</string>
     <string name="signal_err_no_backup">This account has no PIN backup.</string>

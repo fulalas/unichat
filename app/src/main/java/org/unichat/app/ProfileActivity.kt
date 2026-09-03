@@ -108,19 +108,8 @@ class ProfileActivity : BaseActivity() {
     // small.
     private val avatarPx by lazy { (200 * resources.displayMetrics.density).toInt() }
 
-    private fun loadAvatar() {
-        // Off the shared serial worker: the full-size fetch blocks on the
-        // network (a 20s TDLib download, a timeout-less WhatsApp request) and
-        // would hold up every other screen's DB reads behind it.
-        Io.lookup.execute {
-            var path = Bridge.getAvatarFullPath(selfId)
-            if (path.isEmpty()) path = Bridge.getAvatarPath(selfId)
-            val bmp = if (path.isEmpty()) null else ImageLoader.decodeSampled(path, avatarPx)
-            runOnUiThread {
-                if (isFinishing) return@runOnUiThread
-                if (bmp != null) showAvatar(bmp) else avatar.setImageResource(R.drawable.ic_person)
-            }
-        }
+    private fun loadAvatar() = AvatarLoader.loadBig(this, selfId, avatarPx) { bmp ->
+        if (bmp != null) showAvatar(bmp) else avatar.setImageResource(R.drawable.ic_person)
     }
 
     private fun showAvatar(bmp: Bitmap) {

@@ -114,13 +114,7 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
 
     private fun loadName() {
         io.execute {
-            // the stored name, never the intent's: the caller hands over a label
-            // it has already decorated with the protocol, and decorating that
-            // again produced "Rafael (Telegram) (Telegram)"
-            val name = Bridge.db.displayName(chatId).let {
-                val proto = selfProtocol(this, chatId)
-                if (proto.isEmpty()) it else "$it ($proto)"
-            }
+            val name = displayNameWithProto(this, chatId)
             runOnUiThread { if (!isFinishing) nameView.text = name }
         }
     }
@@ -129,19 +123,8 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
      *  server-sized photo is never decoded whole just to draw it small. */
     private val avatarPx by lazy { (160 * resources.displayMetrics.density).toInt() }
 
-    private fun loadAvatar() {
-        // Off the shared serial worker: the full-size fetch blocks on the
-        // network (a 20s TDLib download, a timeout-less WhatsApp request) and
-        // held up every other screen's DB reads behind it.
-        Io.lookup.execute {
-            var path = Bridge.getAvatarFullPath(chatId)
-            if (path.isEmpty()) path = Bridge.getAvatarPath(chatId)
-            val bmp = if (path.isEmpty()) null else ImageLoader.decodeSampled(path, avatarPx)
-            runOnUiThread {
-                if (isFinishing || isDestroyed || bmp == null) return@runOnUiThread
-                avatar.setImageBitmap(bmp)
-            }
-        }
+    private fun loadAvatar() = AvatarLoader.loadBig(this, chatId, avatarPx) { bmp ->
+        if (bmp != null) avatar.setImageBitmap(bmp)
     }
 
     private fun loadDetails() {
@@ -168,15 +151,7 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
 
     private fun updateStatus() {
         val online = !isGroup && Bridge.isOnline(chatId)
-        val status = when {
-            isGroup -> null
-            online -> getString(R.string.online)
-            Bridge.lastSeenOf(chatId) > 0 -> getString(
-                R.string.last_seen, TimeFormat.compactWithTime(this, Bridge.lastSeenOf(chatId))
-            )
-            Bridge.lastSeenApproxOf(chatId) != 0 -> getString(Bridge.lastSeenApproxOf(chatId))
-            else -> null
-        }
+        val status = if (isGroup) null else Bridge.presenceLine(this, chatId)
         statusView.text = status
         statusView.setTextColor(
             if (online) themeColor(R.attr.chatAccent) else getColor(R.color.text_secondary)

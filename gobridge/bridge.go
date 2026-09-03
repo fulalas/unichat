@@ -684,11 +684,7 @@ func (c *conn) resetDevice() bool {
 	return true
 }
 
-func requestContactsAsync(connId int) {
-	c := getConn(connId)
-	if c == nil {
-		return
-	}
+func requestContactsAsync(c *conn) {
 	mx.Lock()
 	if c.contactsSyncing {
 		mx.Unlock()
@@ -702,7 +698,7 @@ func requestContactsAsync(connId int) {
 			c.contactsSyncing = false
 			mx.Unlock()
 		}()
-		requestContacts(connId)
+		requestContacts(c)
 	}()
 }
 
@@ -973,7 +969,7 @@ func EditMessage(connId int, chatId string, msgId string, newText string, origTi
 	if c == nil {
 		return false
 	}
-	if origTimeSent > 0 && time.Now().Unix()-origTimeSent > int64(whatsmeow.EditWindow/time.Second) {
+	if origTimeSent > 0 && time.Now().Unix()-origTimeSent > EditWindowSeconds() {
 		c.log(LogWarning, "edit rejected: outside the protocol edit window")
 		return false
 	}
@@ -1039,18 +1035,14 @@ func DeleteMessageForEveryone(connId int, chatId string, msgId string) bool {
 }
 
 func echoSentMessage(c *conn, chatJid types.JID, resp whatsmeow.SendResponse, message *waE2E.Message) {
-	echoMessage(c, chatJid, resp.ID, resp.Timestamp, message)
-}
-
-func echoMessage(c *conn, chatJid types.JID, msgID string, ts time.Time, message *waE2E.Message) {
 	var messageInfo types.MessageInfo
 	messageInfo.Chat = chatJid
 	messageInfo.IsFromMe = true
 	if c.getClient().Store.ID != nil {
 		messageInfo.Sender = *c.getClient().Store.ID
 	}
-	messageInfo.ID = msgID
-	messageInfo.Timestamp = ts
+	messageInfo.ID = resp.ID
+	messageInfo.Timestamp = resp.Timestamp
 	handleMessageFull(c, messageInfo, message, false, false, false, false, true)
 }
 
@@ -1351,35 +1343,42 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 	var setDirectPath func(string)
 	ext := ""
 	var total int64
+	unmarshal := func(m proto.Message) bool {
+		if err := proto.Unmarshal(raw, m); err != nil {
+			fail("file id unmarshal", err)
+			return false
+		}
+		return true
+	}
 	switch kind {
 	case "img":
 		img := &waE2E.ImageMessage{}
-		if err := proto.Unmarshal(raw, img); err != nil {
-			return fail("file id unmarshal", err)
+		if !unmarshal(img) {
+			return ""
 		}
 		downloadable = img
 		setDirectPath = func(p string) { img.DirectPath = proto.String(p) }
 		ext = extFromMime(img.GetMimetype(), ".jpg")
 	case "stk":
 		stk := &waE2E.StickerMessage{}
-		if err := proto.Unmarshal(raw, stk); err != nil {
-			return fail("file id unmarshal", err)
+		if !unmarshal(stk) {
+			return ""
 		}
 		downloadable = stk
 		setDirectPath = func(p string) { stk.DirectPath = proto.String(p) }
 		ext = extFromMime(stk.GetMimetype(), ".webp")
 	case "aud":
 		aud := &waE2E.AudioMessage{}
-		if err := proto.Unmarshal(raw, aud); err != nil {
-			return fail("file id unmarshal", err)
+		if !unmarshal(aud) {
+			return ""
 		}
 		downloadable = aud
 		setDirectPath = func(p string) { aud.DirectPath = proto.String(p) }
 		ext = ".ogg"
 	case "vid", "ptv":
 		vid := &waE2E.VideoMessage{}
-		if err := proto.Unmarshal(raw, vid); err != nil {
-			return fail("file id unmarshal", err)
+		if !unmarshal(vid) {
+			return ""
 		}
 		downloadable = vid
 		setDirectPath = func(p string) { vid.DirectPath = proto.String(p) }
@@ -1387,8 +1386,8 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 		total = int64(vid.GetFileLength())
 	case "doc":
 		doc := &waE2E.DocumentMessage{}
-		if err := proto.Unmarshal(raw, doc); err != nil {
-			return fail("file id unmarshal", err)
+		if !unmarshal(doc) {
+			return ""
 		}
 		downloadable = doc
 		setDirectPath = func(p string) { doc.DirectPath = proto.String(p) }
@@ -2025,6 +2024,18 @@ func MutedChats(connId int, chatIds string) string {
 	return strings.Join(muted, "\n")
 }
 
+// Modern WhatsApp indexes a 1:1 chat under its LID, so an app-state patch keyed
+// by the phone number does not match the phone and other devices; groups keep
+// their @g.us JID.
+func appStateTarget(ctx context.Context, c *conn, jid types.JID) types.JID {
+	if jid.Server == types.DefaultUserServer {
+		if lid, _ := c.getClient().Store.LIDs.GetLIDForPN(ctx, jid); !lid.IsEmpty() {
+			return lid
+		}
+	}
+	return jid
+}
+
 func SetMute(connId int, chatId string, muted bool) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -2035,14 +2046,7 @@ func SetMute(connId int, chatId string, muted bool) bool {
 		return false
 	}
 	ctx := context.TODO()
-	// Mute a 1:1 chat under its LID (how modern WhatsApp indexes it) so the
-	// change matches the phone and other devices; groups keep their @g.us JID.
-	target := jid
-	if jid.Server == types.DefaultUserServer {
-		if lid, _ := c.getClient().Store.LIDs.GetLIDForPN(ctx, jid); !lid.IsEmpty() {
-			target = lid
-		}
-	}
+	target := appStateTarget(ctx, c, jid)
 	// Reports the outcome: this used to be a void function that only logged, so
 	// an offline toggle left the local flag flipped, the server none the wiser,
 	// and nothing to tell the user or trigger a retry.
@@ -2069,14 +2073,7 @@ func DeleteChat(
 		return false
 	}
 	ctx := context.TODO()
-	// Same LID indirection as SetMute: modern WhatsApp indexes a 1:1 chat under
-	// the LID, and a patch keyed by the phone number is dropped.
-	target := jid
-	if jid.Server == types.DefaultUserServer {
-		if lid, _ := c.getClient().Store.LIDs.GetLIDForPN(ctx, jid); !lid.IsEmpty() {
-			target = lid
-		}
-	}
+	target := appStateTarget(ctx, c, jid)
 	var key *waCommon.MessageKey
 	var ts time.Time
 	if lastMsgId != "" {
@@ -2110,11 +2107,7 @@ func contactName(info types.ContactInfo) string {
 	return info.PushName
 }
 
-func requestContacts(connId int) {
-	c := getConn(connId)
-	if c == nil {
-		return
-	}
+func requestContacts(c *conn) {
 	client := c.getClient()
 	if client.Store.ID == nil {
 		return
@@ -2381,11 +2374,11 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 				c.setState("connected")
 			}
 		} else if evt.Name == appstate.WAPatchRegular {
-			requestContactsAsync(connId)
+			requestContactsAsync(c)
 		}
 
 	case *events.OfflineSyncCompleted:
-		requestContactsAsync(connId)
+		requestContactsAsync(c)
 
 	case *events.Message:
 		handleMessageFull(c, evt.Info, evt.Message, false, false, false, evt.IsViewOnce, false)
@@ -2636,8 +2629,7 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 		}
 
 		if hasMessages && !onDemand {
-			chatId := getChatId(client, &chatJid, nil)
-			c.listener.OnChat(chatId, conversation.GetName(), int(conversation.GetUnreadCount()),
+			c.listener.OnChat(convChatId, conversation.GetName(), int(conversation.GetUnreadCount()),
 				conversation.GetArchived(), lastMessageTime)
 		}
 		answerRequest()
@@ -3060,9 +3052,9 @@ func isStatusBroadcast(jid types.JID) bool {
 func getChatId(client *whatsmeow.Client, chatJid *types.JID, senderJid *types.JID) string {
 	if chatJid == nil {
 		return ""
-	} else if chatJid.Server == types.BroadcastServer && chatJid.User == "status" {
+	} else if isStatusBroadcast(*chatJid) {
 		return strFromJid(*chatJid)
-	} else if chatJid.Server == types.BroadcastServer && chatJid.User != "status" {
+	} else if chatJid.Server == types.BroadcastServer {
 		if senderJid != nil {
 			userId := getUserId(client, nil, senderJid)
 			if client.Store.ID != nil && userId == strFromJid(*client.Store.ID) {

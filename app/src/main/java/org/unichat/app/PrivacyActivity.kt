@@ -111,9 +111,9 @@ class PrivacyActivity : BaseActivity() {
         else -> value ?: ""
     }
 
-    private fun chooseThreeWay(titleRes: Int, name: String, onDone: (() -> Unit)? = null) {
+    private fun chooseThreeWay(titleRes: Int, name: String) {
         if (!loaded) return
-        choose(titleRes, name, listOf("all", "contacts", "none"), onDone)
+        choose(titleRes, name, listOf("all", "contacts", "none"))
     }
 
     private fun choose(titleRes: Int, name: String, options: List<String>, onDone: (() -> Unit)? = null) {

@@ -52,8 +52,6 @@
     <string name="signal_err_no_session">注册已过期，请重新开始。</string>
     <string name="signal_err_code_rejected">验证码未被接受。</string>
     <string name="signal_err_not_registered">本机上没有 Signal 账号。</string>
-    <string name="signal_err_no_master_key">此账号没有保存密钥。</string>
-    <string name="signal_err_no_manifest">Signal 上没有此账号的联系人列表。</string>
     <string name="signal_err_manifest_locked">密钥已取回，但联系人列表打不开。</string>
     <string name="signal_err_store_failed">无法保存恢复的密钥。</string>
     <string name="signal_err_no_backup">此账号没有 PIN 码备份。</string>

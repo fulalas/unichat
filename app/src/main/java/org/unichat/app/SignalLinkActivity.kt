@@ -1,16 +1,11 @@
 package org.unichat.app
 
-import android.graphics.Bitmap
-import android.graphics.Color
 import android.os.Bundle
 import android.view.View
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.EncodeHintType
-import com.google.zxing.MultiFormatWriter
 
 // Linking as a second device is the only setup that shows the account's own
 // contact list: the main device hands over the account key, which is what that
@@ -81,18 +76,4 @@ class SignalLinkActivity : BaseActivity(), Bridge.UiListener {
         progress.visibility = View.GONE
     }
 
-    private fun renderQr(content: String, size: Int): Bitmap? = try {
-        val hints = mapOf(EncodeHintType.MARGIN to 1)
-        val matrix = MultiFormatWriter().encode(content, BarcodeFormat.QR_CODE, size, size, hints)
-        val pixels = IntArray(size * size)
-        for (y in 0 until size) {
-            for (x in 0 until size) {
-                pixels[y * size + x] = if (matrix.get(x, y)) Color.BLACK else Color.WHITE
-            }
-        }
-        Bitmap.createBitmap(pixels, size, size, Bitmap.Config.RGB_565)
-    } catch (e: Exception) {
-        android.util.Log.w("SignalLink", "QR encode failed", e)
-        null
-    }
 }

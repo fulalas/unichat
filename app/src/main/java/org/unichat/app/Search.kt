@@ -70,7 +70,4 @@ object Search {
 
     fun contains(haystack: String, foldedNeedle: String): Boolean =
         indexOf(haystack, foldedNeedle) >= 0
-
-    fun containsRaw(haystack: String, query: String): Boolean =
-        contains(haystack, fold(query))
 }

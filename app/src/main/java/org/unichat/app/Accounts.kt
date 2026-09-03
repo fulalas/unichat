@@ -63,6 +63,9 @@ interface Account {
     /** "" when the contact card carries no id this account can use. Blocking. */
     fun chatIdForCardId(cardId: String): String
 
+    val serverSearch: Boolean get() = false
+    val historySync: Boolean get() = true
+
     fun label(ctx: Context): String = ctx.getString(labelRes)
 }
 
@@ -197,6 +200,8 @@ private object TgAccount : Account {
 
     override fun chatIdForCardId(cardId: String) =
         cardId.toLongOrNull()?.let { Tg.createUserChat(it) }.orEmpty()
+
+    override val serverSearch = true
 }
 
 private object SgAccount : Account {
@@ -254,4 +259,6 @@ private object SgAccount : Account {
 
     // A Signal contact card carries no id this account can reuse.
     override fun chatIdForCardId(cardId: String) = ""
+
+    override val historySync = false
 }

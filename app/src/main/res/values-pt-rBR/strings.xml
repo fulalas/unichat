@@ -52,8 +52,6 @@
     <string name="signal_err_no_session">O cadastro expirou. Comece de novo.</string>
     <string name="signal_err_code_rejected">Esse código não foi aceito.</string>
     <string name="signal_err_not_registered">Nenhuma conta do Signal neste aparelho.</string>
-    <string name="signal_err_no_master_key">Esta conta não tem chave guardada.</string>
-    <string name="signal_err_no_manifest">O Signal não tem lista de contatos para esta conta.</string>
     <string name="signal_err_manifest_locked">A chave voltou, mas a lista de contatos não pôde ser aberta.</string>
     <string name="signal_err_store_failed">Não deu para salvar a chave recuperada.</string>
     <string name="signal_err_no_backup">Esta conta não tem backup com PIN.</string>

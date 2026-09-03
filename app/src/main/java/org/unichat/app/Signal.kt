@@ -186,8 +186,6 @@ object Signal : EventListener {
             "no_session" -> ctx.getString(R.string.signal_err_no_session)
             "code_rejected" -> ctx.getString(R.string.signal_err_code_rejected)
             "not_registered" -> ctx.getString(R.string.signal_err_not_registered)
-            "no_master_key" -> ctx.getString(R.string.signal_err_no_master_key)
-            "no_manifest" -> ctx.getString(R.string.signal_err_no_manifest)
             "manifest_locked" -> ctx.getString(R.string.signal_err_manifest_locked)
             "store_failed" -> ctx.getString(R.string.signal_err_store_failed)
             "no_backup" -> ctx.getString(R.string.signal_err_no_backup)

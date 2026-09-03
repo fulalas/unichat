@@ -128,5 +128,13 @@ fun ChatRow.displayLabelWithProto(ctx: android.content.Context): String {
     return if (proto.isEmpty()) displayLabel() else "${displayLabel()} ($proto)"
 }
 
+// Always from the STORED name, never from a caller's extra: the chat list
+// hands over a label it has already decorated with the protocol, and
+// decorating that again produced "Rafael (Telegram) (Telegram)".
+fun displayNameWithProto(ctx: android.content.Context, chatId: String): String {
+    val proto = selfProtocol(ctx, chatId)
+    return Bridge.db.displayName(chatId).let { if (proto.isEmpty()) it else "$it ($proto)" }
+}
+
 fun selfPickerLabel(ctx: android.content.Context, chatId: String): String =
     ctx.getString(R.string.you_proto, selfProtocol(ctx, chatId))

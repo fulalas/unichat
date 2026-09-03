@@ -52,8 +52,6 @@
     <string name="signal_err_no_session">L\'inscription a expiré. Recommencez.</string>
     <string name="signal_err_code_rejected">Ce code n\'a pas été accepté.</string>
     <string name="signal_err_not_registered">Aucun compte Signal sur cet appareil.</string>
-    <string name="signal_err_no_master_key">Ce compte n\'a aucune clé enregistrée.</string>
-    <string name="signal_err_no_manifest">Signal n\'a pas de liste de contacts pour ce compte.</string>
     <string name="signal_err_manifest_locked">La clé est arrivée, mais la liste de contacts n\'a pas pu être ouverte.</string>
     <string name="signal_err_store_failed">Impossible d\'enregistrer la clé récupérée.</string>
     <string name="signal_err_no_backup">Ce compte n\'a pas de sauvegarde par PIN.</string>

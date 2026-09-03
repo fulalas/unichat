@@ -2,8 +2,6 @@ package org.unichat.app
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -15,9 +13,6 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.EncodeHintType
-import com.google.zxing.MultiFormatWriter
 
 /**
  * The caller says which protocol it wants (see [intent]); without that, "Link"
@@ -422,20 +417,4 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         finish()
     }
 
-    private fun renderQr(content: String, size: Int): Bitmap? {
-        return try {
-            val hints = mapOf(EncodeHintType.MARGIN to 1)
-            val matrix = MultiFormatWriter().encode(content, BarcodeFormat.QR_CODE, size, size, hints)
-            val pixels = IntArray(size * size)
-            for (y in 0 until size) {
-                for (x in 0 until size) {
-                    pixels[y * size + x] = if (matrix.get(x, y)) Color.BLACK else Color.WHITE
-                }
-            }
-            Bitmap.createBitmap(pixels, size, size, Bitmap.Config.RGB_565)
-        } catch (e: Exception) {
-            android.util.Log.w("LoginActivity", "QR encode failed", e)
-            null
-        }
-    }
 }

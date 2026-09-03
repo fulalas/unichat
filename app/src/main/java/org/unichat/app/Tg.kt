@@ -263,6 +263,7 @@ private const val UNREAD_REACTION_PAGE = 100
                 repairAttempted.clear()
                 listenedSwept.clear()
                 avatarPaths.clear()
+                contactNames.clear()
                 syncAllChat = null
                 exportChatId = null
                 myId = 0
@@ -391,7 +392,6 @@ private const val UNREAD_REACTION_PAGE = 100
             "updateChatPhoto" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
                 avatarPaths.remove(chatId)
-                avatarPaths.remove("$chatId/big")
                 AvatarLoader.invalidate(chatId)
                 Bridge.notifyChatsChanged()
             }
@@ -599,15 +599,26 @@ private const val UNREAD_REACTION_PAGE = 100
         if (chat.optInt("unread_reaction_count") > 0) fetchUnreadReactions(id)
         val type = chat.optJSONObject("type")?.optString("@type") ?: ""
         if (type == "chatTypeBasicGroup" || type == "chatTypeSupergroup") {
+            contactNames[id] = title
             Bridge.db.upsertContact(id, title, "", isSelf = false, isGroup = true, isSaved = false)
         }
         Bridge.notifyChatsChanged()
     }
 
+    private fun fullName(user: JSONObject): String =
+        listOf(user.optString("first_name"), user.optString("last_name"))
+            .filter { it.isNotEmpty() }.joinToString(" ")
+
+    // Memo for parseMessage's per-sender name lookup: a history page parses up
+    // to 100 messages from the same few senders, and each one was a SQLite
+    // point query on the executor. Written through by every tg contacts write
+    // (onUser, onNewChat's group upsert), cleared on logout.
+    private val contactNames = ConcurrentHashMap<String, String>()
+
     private fun onUser(user: JSONObject) {
         val uid = user.getLong("id")
-        val name = listOf(user.optString("first_name"), user.optString("last_name"))
-            .filter { it.isNotEmpty() }.joinToString(" ")
+        val name = fullName(user)
+        contactNames[idFor(uid)] = name
         Bridge.db.upsertContact(
             idFor(uid), name, user.optString("phone_number"),
             isSelf = uid == myId, isGroup = false,
@@ -642,9 +653,7 @@ private const val UNREAD_REACTION_PAGE = 100
     // leave an island with a gap on either side of it, and pagination anchors
     // on the oldest stored row — which is exactly how a chat ends up jumping
     // over months of messages.
-    private class Parsed(val row: MessageRow, val listened: Boolean)
-
-    private fun parseMessage(msg: JSONObject): Parsed? {
+    private fun parseMessage(msg: JSONObject): MessageRow? {
         val rawChat = msg.getLong("chat_id")
         val chatId = idFor(rawChat)
         val msgId = msg.getLong("id")
@@ -735,8 +744,7 @@ private const val UNREAD_REACTION_PAGE = 100
                         .let { if (it.isNotEmpty() && !it.startsWith("+")) "+$it" else it }
                     // line 1 is always the name header (the number when there
                     // is no name), so later lines are phones by construction
-                    val name = listOf(c.optString("first_name"), c.optString("last_name"))
-                        .filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { phone }
+                    val name = fullName(c).ifEmpty { phone }
                     text = listOf(name, phone).filter { it.isNotEmpty() }.joinToString("\n")
                     // contact rows never download, so file_id is free to carry
                     // the shared user's id — what "Message" opens a chat with
@@ -776,29 +784,27 @@ private const val UNREAD_REACTION_PAGE = 100
         var fileStatus = 0
         localPathOf(msg, content)?.let { filePath = it; fileStatus = 2 }
 
-        val senderName = if (senderId != chatId) Bridge.db.contactName(senderId) ?: "" else ""
-        return Parsed(
-            MessageRow(
-                msgId.toString(), chatId, senderId, text, fromMe, timeSent, isRead,
-                msgType = msgType, fileId = fileId,
-                filePath = filePath, fileStatus = fileStatus,
-                latitude = latitude, longitude = longitude,
-                edited = msg.optLong("edit_date") > 0, quotedId = quotedId,
-                quotedText = quotedText, quotedType = quotedType,
-                senderName = senderName,
-                forwarded = msg.optJSONObject("forward_info") != null,
-                // Carried on the row, not only applied to the stored one: a
-                // search window renders messages the database never held, and
-                // without this every voice note in it drew the unplayed dot.
-                played = listened,
-            ),
-            listened,
+        val senderName = if (senderId != chatId) {
+            contactNames.getOrPut(senderId) { Bridge.db.contactName(senderId) ?: "" }
+        } else ""
+        return MessageRow(
+            msgId.toString(), chatId, senderId, text, fromMe, timeSent, isRead,
+            msgType = msgType, fileId = fileId,
+            filePath = filePath, fileStatus = fileStatus,
+            latitude = latitude, longitude = longitude,
+            edited = msg.optLong("edit_date") > 0, quotedId = quotedId,
+            quotedText = quotedText, quotedType = quotedType,
+            senderName = senderName,
+            forwarded = msg.optJSONObject("forward_info") != null,
+            // Carried on the row, not only applied to the stored one: a
+            // search window renders messages the database never held, and
+            // without this every voice note in it drew the unplayed dot.
+            played = listened,
         )
     }
 
     private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
-        val parsed = parseMessage(msg) ?: return
-        val row = parsed.row
+        val row = parseMessage(msg) ?: return
         // TDLib reports its own copy of a message it has not sent yet, which
         // would sit beside the row the app staged. The staged row is re-keyed to
         // TDLib's id as soon as sendMessage answers, so "no row under this id"
@@ -828,7 +834,7 @@ private const val UNREAD_REACTION_PAGE = 100
             // and skipping it left the stale rows in place
             applyReactions(row.chatId, row.id, msg.optJSONObject("interaction_info"), preview = false)
             // upsertMessage deliberately never writes `played`, so apply it here
-            if (parsed.listened) Bridge.db.setPlayed(row.chatId, row.id)
+            if (row.played) Bridge.db.setPlayed(row.chatId, row.id)
             // nor msg_type, so rows stored before video notes had their own type
             // keep saying "video" until the message is read back
             if (row.msgType == "videonote") {
@@ -844,7 +850,7 @@ private const val UNREAD_REACTION_PAGE = 100
         try { storeMessage(msg) } catch (e: Exception) { Log.e(TAG, "message store failed", e) }
     }
 
-    private fun parseMessageSafe(msg: JSONObject): Parsed? =
+    private fun parseMessageSafe(msg: JSONObject): MessageRow? =
         try { parseMessage(msg) } catch (e: Exception) { Log.e(TAG, "message parse failed", e); null }
 
     private fun placeholderFor(content: JSONObject): String =
@@ -858,11 +864,11 @@ private const val UNREAD_REACTION_PAGE = 100
         // reference the staging copy, which is swept after a day) — a row that
         // claims a dead path renders a play button that plays nothing
         val path = local.optString("path")
-        return if (path.isNotEmpty() && java.io.File(path).exists()) path else null
+        return if (usable(path)) path else null
     }
 
-    private fun fileOf(content: JSONObject): JSONObject? {
-        val file = when (content.optString("@type")) {
+    private fun fileOf(content: JSONObject): JSONObject? =
+        when (content.optString("@type")) {
             "messagePhoto" -> {
                 val sizes = content.getJSONObject("photo").getJSONArray("sizes")
                 if (sizes.length() > 0) sizes.getJSONObject(sizes.length() - 1).getJSONObject("photo") else null
@@ -876,8 +882,6 @@ private const val UNREAD_REACTION_PAGE = 100
             "messageSticker" -> content.getJSONObject("sticker").getJSONObject("sticker")
             else -> null
         }
-        return file
-    }
 
     // The only reaction catch-up that reaches a private chat: TDLib refuses to
     // poll reactions there (need_poll_dialog_message_reactions), and the count
@@ -1049,9 +1053,7 @@ private const val UNREAD_REACTION_PAGE = 100
                 fileTargets[fid]?.remove(target)
                 return false
             }
-            Bridge.db.setFileState(msg.chatId, msg.id, done, 2)
-            Bridge.notifyChatRow(msg.chatId, msg.id)
-            Bridge.onFileTransferDone(msg.chatId, msg.id, done, 2)
+            fileDone(msg.chatId, msg.id, done, 2)
         }
         return true
     }
@@ -1073,11 +1075,13 @@ private const val UNREAD_REACTION_PAGE = 100
     private fun downloadRequest(fid: Int) = JSONObject().put("@type", "downloadFile")
         .put("file_id", fid).put("priority", 16).put("synchronous", false)
 
-    private fun failDownload(msg: MessageRow) {
-        Bridge.db.setFileState(msg.chatId, msg.id, "", 3)
-        Bridge.notifyChatRow(msg.chatId, msg.id)
-        Bridge.onFileTransferDone(msg.chatId, msg.id, "", 3)
+    private fun fileDone(chatId: String, msgId: String, path: String, status: Int) {
+        Bridge.db.setFileState(chatId, msgId, path, status)
+        Bridge.notifyChatRow(chatId, msgId)
+        Bridge.onFileTransferDone(chatId, msgId, path, status)
     }
+
+    private fun failDownload(msg: MessageRow) = fileDone(msg.chatId, msg.id, "", 3)
 
     private fun onFile(file: JSONObject) {
         val fid = file.optInt("id")
@@ -1091,9 +1095,7 @@ private const val UNREAD_REACTION_PAGE = 100
                 // not a download — see usable()
                 val ok = usable(path)
                 for ((chatId, msgId) in targets) {
-                    Bridge.db.setFileState(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
-                    Bridge.notifyChatRow(chatId, msgId)
-                    Bridge.onFileTransferDone(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
+                    fileDone(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
                 }
             }
             local.optBoolean("is_downloading_active") -> {
@@ -1112,11 +1114,7 @@ private const val UNREAD_REACTION_PAGE = 100
             // "failed" with the file already on disk.
             !local.optBoolean("can_be_downloaded", true) -> {
                 fileTargets.remove(fid)
-                for ((chatId, msgId) in targets) {
-                    Bridge.db.setFileState(chatId, msgId, "", 3)
-                    Bridge.notifyChatRow(chatId, msgId)
-                    Bridge.onFileTransferDone(chatId, msgId, "", 3)
-                }
+                for ((chatId, msgId) in targets) fileDone(chatId, msgId, "", 3)
             }
         }
     }
@@ -1247,8 +1245,7 @@ private const val UNREAD_REACTION_PAGE = 100
             JSONObject().put("@type", "getUser").put("user_id", chatIdOf(userId))
         ) ?: return null
         onUser(user)
-        return listOf(user.optString("first_name"), user.optString("last_name"))
-            .filter { it.isNotEmpty() }.joinToString(" ")
+        return fullName(user)
     }
 
     private fun markedText(ft: JSONObject?): String {
@@ -1752,11 +1749,7 @@ private const val UNREAD_REACTION_PAGE = 100
         // TDLib's bounds, as in contextWindow: the offset may not pass -99, the
         // limit not 100, and the limit has to cover the offset
         val n = limit.coerceIn(1, 49)
-        val offset = when (newer) {
-            null -> -n
-            true -> -n
-            false -> 0
-        }
+        val offset = if (newer == false) 0 else -n
         val count = if (newer == false) n else n * 2 + 1
         val res = request(
             JSONObject().put("@type", "searchChatMessages")
@@ -1772,12 +1765,15 @@ private const val UNREAD_REACTION_PAGE = 100
         ) ?: return emptyList()
         val arr = res.optJSONArray("messages") ?: return emptyList()
         val rows = ArrayList<MessageRow>(arr.length())
-        for (i in 0 until arr.length()) parseMessageSafe(arr.getJSONObject(i))?.let { rows.add(it.row) }
-        // prefer the stored row: it knows about a file already on this phone,
-        // which the parsed one only does when TDLib still holds it locally
+        for (i in 0 until arr.length()) parseMessageSafe(arr.getJSONObject(i))?.let { rows.add(it) }
+        return preferStored(chatId, rows)
+    }
+
+    // prefer the stored row: it knows about a file already on this phone,
+    // which the parsed one only does when TDLib still holds it locally
+    private fun preferStored(chatId: String, rows: List<MessageRow>): List<MessageRow> {
         val stored = Bridge.db.messagesByIds(chatId, rows.mapTo(HashSet()) { it.id }).associateBy { it.id }
-        return rows.map { stored[it.id] ?: it }
-            .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
+        return rows.map { stored[it.id] ?: it }.sortedWith(MESSAGE_ORDER)
     }
 
     fun contextWindow(chatId: String, msgId: String, radius: Int = 25): List<MessageRow> {
@@ -1798,10 +1794,8 @@ private const val UNREAD_REACTION_PAGE = 100
         ) ?: return emptyList()
         val arr = res.optJSONArray("messages") ?: return emptyList()
         val rows = ArrayList<MessageRow>(arr.length())
-        for (i in 0 until arr.length()) parseMessageSafe(arr.getJSONObject(i))?.let { rows.add(it.row) }
-        val stored = Bridge.db.messagesByIds(chatId, rows.mapTo(HashSet()) { it.id }).associateBy { it.id }
-        return rows.map { stored[it.id] ?: it }
-            .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
+        for (i in 0 until arr.length()) parseMessageSafe(arr.getJSONObject(i))?.let { rows.add(it) }
+        return preferStored(chatId, rows)
     }
 
     fun historySlice(chatId: String, msgId: String, newer: Boolean, count: Int = 30): List<MessageRow> {
@@ -1821,14 +1815,12 @@ private const val UNREAD_REACTION_PAGE = 100
         val arr = res.optJSONArray("messages") ?: return emptyList()
         val rows = ArrayList<MessageRow>(arr.length())
         for (i in 0 until arr.length()) {
-            val row = parseMessageSafe(arr.getJSONObject(i))?.row ?: continue
+            val row = parseMessageSafe(arr.getJSONObject(i)) ?: continue
             val rowId = row.id.toLongOrNull() ?: continue
             // the anchor itself comes back in the "newer" answer
             if (if (newer) rowId > id else rowId < id) rows.add(row)
         }
-        val stored = Bridge.db.messagesByIds(chatId, rows.mapTo(HashSet()) { it.id }).associateBy { it.id }
-        return rows.map { stored[it.id] ?: it }
-            .sortedWith(compareBy({ it.timeSent }, { it.id.toLongOrNull() ?: 0L }))
+        return preferStored(chatId, rows)
     }
 
     // Blocks until the file lands. The ordinary download path writes progress
@@ -1914,7 +1906,7 @@ private const val UNREAD_REACTION_PAGE = 100
     private val listenedSwept: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private fun refreshOwnListened(chatId: String): Boolean {
-        val pending = Bridge.db.unplayedOwnAudioIds(chatId, 200).toHashSet()
+        val pending = Bridge.db.unplayedAudioIds(chatId, 200, fromMeOnly = true).toHashSet()
         if (pending.isEmpty() || chatId in listenedSwept) return false
         val remaining = pending.toMutableSet()
         // The oldest pending id decides how far back to page: the answer comes
@@ -2197,11 +2189,7 @@ private const val UNREAD_REACTION_PAGE = 100
                 JSONObject().put("@type", "inputChatPhotoStatic").put("photo", inputLocalFile(jpegPath))
             )
         ) != null
-        if (ok) {
-            val self = selfId()
-            avatarPaths.remove(self)
-            avatarPaths.remove("$self/big")
-        }
+        if (ok) avatarPaths.remove(selfId())
         return ok
     }
 

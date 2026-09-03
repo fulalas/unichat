@@ -100,18 +100,6 @@ object PhoneBook {
             ?: java.util.Locale.getDefault().country).uppercase()
     }
 
-    fun rawCount(ctx: Context): Int {
-        if (!granted(ctx)) return 0
-        var n = 0
-        runCatching {
-            ctx.contentResolver.query(
-                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER), null, null, null
-            )?.use { n = it.count }
-        }
-        return n
-    }
-
     // Anything without a country code is dropped rather than guessed at: a
     // wrong guess would open a chat with a stranger.
     fun normalize(raw: String): String {
