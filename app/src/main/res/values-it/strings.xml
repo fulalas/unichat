@@ -272,7 +272,7 @@
     <string name="resend">Invia di nuovo</string>
     <string name="service_notification">Connesso</string>
     <string name="about">Informazioni</string>
-    <string name="about_message">Versione %1$s (build %2$d)\n\nUn messenger Android nativo ed essenziale per Telegram, Signal e WhatsApp in un\'unica lista di chat.\n\nhttps://github.com/fulalas/unichat</string>
+    <string name="about_message">Versione %1$s (build %2$d)\n\nUn messenger Android nativo ed essenziale per Telegram, Signal e WhatsApp in un\'unica lista di chat.\n\nhttps://github.com/fulalas/unichat\n\nConsidera una donazione al progetto UniChat:\n\nhttps://paypal.me/fulalas</string>
     <string name="today">Oggi</string>
     <string name="yesterday">Ieri</string>
     <string name="yesterday_lc">ieri</string>

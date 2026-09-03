@@ -6,13 +6,6 @@ UniChat is a three-protocol messenger:
 - **Telegram** — TDLib via `tdjson/`, JSON interface (see `Tg.kt`)
 - **Signal** — Go bridge / signalmeow over libsignal (see `Signal.kt`)
 
-## Comments (mandatory)
-
-Write a comment only when it records a real failure, or a rule from WhatsApp,
-Telegram, Signal or Android that would bring one back. Do not write file or
-function descriptions, section headers, field notes, layout labels, or anything
-that restates the code.
-
 ## Shared database
 
 Chat ids are namespaced in the shared Db: Telegram rows use a `tg:` prefix,
@@ -40,9 +33,9 @@ Do this before building; `build.sh` names the output APK after `versionName`, so
 
 ## Building
 
-- Full build (Go bridge + APK): `bash -c 'source ../toolchain/env.sh && ./build.sh'`
-- APK only (no Go changes): `bash -c 'source ../toolchain/env.sh && ./build.sh --apk-only'`
-- Install: `source ../toolchain/env.sh && adb install -r unichat-<version>.apk`
+- Full build (Go bridge + APK): `./build.sh`
+- APK only (no Go changes): `./build.sh --apk-only`
+- Install by hand: `source ../toolchain/env.sh && adb install -r unichat-<version>.apk`
 - Auto-install: `build.sh` installs the APK automatically when a device is connected (adb, `device` state); pass `--no-install` to skip.
 
 The toolchain (JDK, Android SDK/NDK, Go, gradle) lives in a SIBLING directory,

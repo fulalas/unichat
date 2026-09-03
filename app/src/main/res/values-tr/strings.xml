@@ -272,7 +272,7 @@
     <string name="resend">Yeniden gönder</string>
     <string name="service_notification">Bağlı</string>
     <string name="about">Hakkında</string>
-    <string name="about_message">Sürüm %1$s (yapı %2$d)\n\nTelegram, Signal ve WhatsApp\'ı tek bir sohbet listesinde toplayan sade, yerel bir Android mesajlaşma uygulaması.\n\nhttps://github.com/fulalas/unichat</string>
+    <string name="about_message">Sürüm %1$s (yapı %2$d)\n\nTelegram, Signal ve WhatsApp\'ı tek bir sohbet listesinde toplayan sade, yerel bir Android mesajlaşma uygulaması.\n\nhttps://github.com/fulalas/unichat\n\nLütfen UniChat projesine bağış yapmayı düşünün:\n\nhttps://paypal.me/fulalas</string>
     <string name="today">Bugün</string>
     <string name="yesterday">Dün</string>
     <string name="yesterday_lc">dün</string>

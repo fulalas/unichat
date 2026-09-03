@@ -272,7 +272,7 @@
     <string name="resend">Opnieuw verzenden</string>
     <string name="service_notification">Verbonden</string>
     <string name="about">Over</string>
-    <string name="about_message">Versie %1$s (build %2$d)\n\nEen kale, native Android-messenger voor Telegram, Signal en WhatsApp in één chatlijst.\n\nhttps://github.com/fulalas/unichat</string>
+    <string name="about_message">Versie %1$s (build %2$d)\n\nEen kale, native Android-messenger voor Telegram, Signal en WhatsApp in één chatlijst.\n\nhttps://github.com/fulalas/unichat\n\nOverweeg een donatie aan het UniChat-project:\n\nhttps://paypal.me/fulalas</string>
     <string name="today">Vandaag</string>
     <string name="yesterday">Gisteren</string>
     <string name="yesterday_lc">gisteren</string>
