@@ -225,7 +225,9 @@ object Bridge : EventListener {
          *  that cannot possibly go out. */
         val connected: Boolean
 
-        fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean
+        fun edit(msg: MessageRow, newText: String, mentions: List<Mention>): Boolean
+
+        fun canEditCaption(msg: MessageRow): Boolean = true
         val editWindowSeconds: Long
         val revokeWindowSeconds: Long
 
@@ -345,8 +347,11 @@ object Bridge : EventListener {
 
         override val ackOnSend = true
 
-        override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long) =
-            Signal.edit(chatId, msgId, newText)
+        override fun edit(msg: MessageRow, newText: String, mentions: List<Mention>) =
+            Signal.edit(msg.chatId, msg.id, newText, msg.fileId)
+
+        override fun canEditCaption(msg: MessageRow) =
+            msg.id.toLongOrNull() != null
         // Signal sets no server-side deadline on either, unlike WhatsApp's 15
         // minutes and 48 hours, so the menu entries stay available.
         override val editWindowSeconds = Long.MAX_VALUE
@@ -502,8 +507,24 @@ object Bridge : EventListener {
 
         override val ackOnSend = true
 
-        override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean =
-            Wmbridge.editMessage(connId, chatId, msgId, newText, origTimeSent)
+        override fun edit(msg: MessageRow, newText: String, mentions: List<Mention>): Boolean {
+            val quoted = msg.quotedId.takeIf { it.isNotEmpty() }
+                ?.let { db.messagesByIds(msg.chatId, listOf(it)).firstOrNull() }
+            val (qid, qtext, qsender) = quoteArgs(quoted)
+            val (body, jids) = waMentionText(newText, mentions)
+            val byDigits = LinkedHashMap<String, String>()
+            for (m in storedMentions(body) { db.contactName(it) != null }) {
+                byDigits[m.id.substringBefore('@')] = m.id
+            }
+            for (id in jids) byDigits[id.substringBefore('@')] = id
+            return Wmbridge.editMessage(
+                connId, msg.chatId, msg.id, body, msg.timeSent, msg.fileId,
+                qid, qtext, qsender, byDigits.values.joinToString(","),
+            )
+        }
+
+        override fun canEditCaption(msg: MessageRow) =
+            msg.fileId.isEmpty() || Wmbridge.canEditMedia(msg.fileId)
 
         override val editWindowSeconds: Long get() = waEditWindowSeconds
         // whatsmeow exposes no constant for the revoke window (only the edit
@@ -662,8 +683,9 @@ object Bridge : EventListener {
         // sits for a while after every cold start with a perfectly good socket.
         override val connected get() = Tg.state != "disconnected"
 
-        override fun edit(chatId: String, msgId: String, newText: String, origTimeSent: Long): Boolean =
-            Tg.editMessageText(chatId, msgId, newText)
+        override fun edit(msg: MessageRow, newText: String, mentions: List<Mention>): Boolean =
+            if (msg.msgType == "") Tg.editMessageText(msg.chatId, msg.id, newText, mentions)
+            else Tg.editMessageCaption(msg.chatId, msg.id, newText, mentions)
 
         override val editWindowSeconds: Long = 48L * 60 * 60
         override val revokeWindowSeconds: Long = 48L * 60 * 60
@@ -919,6 +941,8 @@ object Bridge : EventListener {
     fun canEdit(msg: MessageRow): Boolean =
         System.currentTimeMillis() / 1000 - msg.timeSent < proto(msg.chatId).editWindowSeconds
 
+    fun canEditCaption(msg: MessageRow): Boolean = proto(msg.chatId).canEditCaption(msg)
+
     fun canDeleteForEveryone(msg: MessageRow): Boolean = msg.fromMe &&
         System.currentTimeMillis() / 1000 - msg.timeSent < proto(msg.chatId).revokeWindowSeconds
 
@@ -937,9 +961,9 @@ object Bridge : EventListener {
         main.post { for (l in listeners) block(l) }
     }
 
-    fun editMessage(chatId: String, msgId: String, newText: String, origTimeSent: Long) =
-        protoExecutor(chatId).execute {
-            val ok = proto(chatId).edit(chatId, msgId, newText, origTimeSent)
+    fun editMessage(msg: MessageRow, newText: String, mentions: List<Mention> = emptyList()) =
+        protoExecutor(msg.chatId).execute {
+            val ok = proto(msg.chatId).edit(msg, newText, mentions)
             if (!ok) {
                 Log.w(TAG, "edit failed")
                 toastUi(R.string.edit_failed)
@@ -1220,7 +1244,7 @@ object Bridge : EventListener {
         mentions: List<Mention>,
     ): String = when (m.msgType) {
         "image", "sticker" -> p.sendImage(target, msgId, m.filePath, m.text, quoted, false)
-        "video" -> p.sendVideo(target, msgId, m.filePath, m.text, quoted, false)
+        in VIDEO_TYPES -> p.sendVideo(target, msgId, m.filePath, m.text, quoted, false)
         "audio" -> p.sendAudio(
             target, msgId, m.filePath, TimeFormat.parseSeconds(m.text), quoted, ByteArray(0), false
         )
@@ -1241,7 +1265,7 @@ object Bridge : EventListener {
 
     private val retrying = ConcurrentHashMap.newKeySet<String>()
 
-    private val NEEDS_LOCAL_FILE = PICTURE_TYPES + setOf("video", "audio", "document")
+    private val NEEDS_LOCAL_FILE = PICTURE_TYPES + VIDEO_TYPES + setOf("audio", "document")
 
     private val RETRY_DELAYS_SECONDS = longArrayOf(2, 4, 8, 16, 32, 64, 64, 64, 64, 64)
     private val retryScheduler = Executors.newSingleThreadScheduledExecutor()

@@ -910,7 +910,65 @@ func EditWindowSeconds() int64 {
 	return int64(whatsmeow.EditWindow / time.Second)
 }
 
-func EditMessage(connId int, chatId string, msgId string, newText string, origTimeSent int64) bool {
+func mediaEditMessage(fileId string, caption string) *waE2E.Message {
+	kind, encoded, found := strings.Cut(fileId, ":")
+	if !found {
+		return nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil
+	}
+	switch kind {
+	case "img":
+		img := &waE2E.ImageMessage{}
+		if err := proto.Unmarshal(raw, img); err != nil {
+			return nil
+		}
+		if img.GetViewOnce() {
+			return nil
+		}
+		img.Caption = proto.String(caption)
+		return &waE2E.Message{ImageMessage: img}
+	case "vid":
+		vid := &waE2E.VideoMessage{}
+		if err := proto.Unmarshal(raw, vid); err != nil {
+			return nil
+		}
+		if vid.GetViewOnce() {
+			return nil
+		}
+		vid.Caption = proto.String(caption)
+		return &waE2E.Message{VideoMessage: vid}
+	}
+	// "ptv" lands here on purpose: a round video note carries no caption in
+	// WhatsApp, so there is nothing an edit could legitimately change.
+	return nil
+}
+
+func CanEditMedia(fileId string) bool {
+	return mediaEditMessage(fileId, "") != nil
+}
+
+func applyEditContext(message *waE2E.Message, newText string, ctx *waE2E.ContextInfo) *waE2E.Message {
+	if ctx == nil {
+		return message
+	}
+	switch {
+	case message.GetImageMessage() != nil:
+		message.ImageMessage.ContextInfo = ctx
+	case message.GetVideoMessage() != nil:
+		message.VideoMessage.ContextInfo = ctx
+	default:
+		return &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:        proto.String(newText),
+			ContextInfo: ctx,
+		}}
+	}
+	return message
+}
+
+func EditMessage(connId int, chatId string, msgId string, newText string, origTimeSent int64, fileId string, quotedId string, quotedText string, quotedSender string, mentionedIds string) bool {
 	c := getConn(connId)
 	if c == nil {
 		return false
@@ -923,8 +981,24 @@ func EditMessage(connId int, chatId string, msgId string, newText string, origTi
 	if err != nil {
 		return false
 	}
-	message := waE2E.Message{Conversation: proto.String(newText)}
-	_, err = c.getClient().SendMessage(context.Background(), chatJid, c.getClient().BuildEdit(chatJid, msgId, &message))
+	message := &waE2E.Message{Conversation: proto.String(newText)}
+	if fileId != "" {
+		media := mediaEditMessage(fileId, newText)
+		if media == nil {
+			c.log(LogWarning, "edit rejected: media message could not be rebuilt")
+			return false
+		}
+		message = media
+	}
+	ctx := buildQuoteContext(quotedId, quotedText, quotedSender)
+	if mentions := splitIds(mentionedIds); len(mentions) > 0 {
+		if ctx == nil {
+			ctx = &waE2E.ContextInfo{}
+		}
+		ctx.MentionedJID = mentions
+	}
+	message = applyEditContext(message, newText, ctx)
+	_, err = c.getClient().SendMessage(context.Background(), chatJid, c.getClient().BuildEdit(chatJid, msgId, message))
 	if err != nil {
 		c.log(LogWarning, fmt.Sprintf("edit message error %v", err))
 		return false
@@ -1302,7 +1376,7 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 		downloadable = aud
 		setDirectPath = func(p string) { aud.DirectPath = proto.String(p) }
 		ext = ".ogg"
-	case "vid":
+	case "vid", "ptv":
 		vid := &waE2E.VideoMessage{}
 		if err := proto.Unmarshal(raw, vid); err != nil {
 			return fail("file id unmarshal", err)
@@ -2860,13 +2934,13 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 		return m, true
 	}
 	// PTV ("video message" / round video note) is a VideoMessage in a separate
-	// field; treat it like a normal video so it reuses the "vid" download path.
+	// field; treat it like a normal video so it reuses the video download path.
 	if ptv := msg.GetPtvMessage(); ptv != nil {
 		if ptv.GetViewOnce() && !ownSend {
 			return msgContent{msgType: viewOnceType}, true
 		}
 		m := fromContext(ptv.GetContextInfo())
-		m.text, m.msgType, m.fileId = ptv.GetCaption(), "video", encodeFileId("vid", ptv)
+		m.text, m.msgType, m.fileId = ptv.GetCaption(), "video", encodeFileId("ptv", ptv)
 		return m, true
 	}
 	if aud := msg.GetAudioMessage(); aud != nil {

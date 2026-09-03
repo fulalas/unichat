@@ -681,7 +681,7 @@ private const val UNREAD_REACTION_PAGE = 100
                 msgType = "video"
                 text = markedText(content.optJSONObject("caption"))
             }
-            "messageVideoNote" -> msgType = "video"
+            "messageVideoNote" -> msgType = "videonote"
             "messageAnimation" -> {
                 msgType = "video"
                 text = markedText(content.optJSONObject("caption"))
@@ -829,6 +829,11 @@ private const val UNREAD_REACTION_PAGE = 100
             applyReactions(row.chatId, row.id, msg.optJSONObject("interaction_info"), preview = false)
             // upsertMessage deliberately never writes `played`, so apply it here
             if (parsed.listened) Bridge.db.setPlayed(row.chatId, row.id)
+            // nor msg_type, so rows stored before video notes had their own type
+            // keep saying "video" until the message is read back
+            if (row.msgType == "videonote") {
+                Bridge.db.setMsgType(row.chatId, row.id, row.msgType)
+            }
         }
     }
 
@@ -1191,7 +1196,8 @@ private const val UNREAD_REACTION_PAGE = 100
     private fun typeOf(contentType: String): String = when (contentType) {
         "messagePhoto" -> "image"
         "messageSticker" -> "sticker"
-        "messageVideo", "messageVideoNote", "messageAnimation" -> "video"
+        "messageVideo", "messageAnimation" -> "video"
+        "messageVideoNote" -> "videonote"
         "messageVoiceNote" -> "audio"
         "messageAudio", "messageDocument" -> "document"
         "messageLocation", "messageVenue" -> "location"
@@ -1415,15 +1421,30 @@ private const val UNREAD_REACTION_PAGE = 100
         )
     }
 
-    fun editMessageText(chatId: String, msgId: String, newText: String): Boolean {
+    fun editMessageText(
+        chatId: String, msgId: String, newText: String, mentions: List<Mention> = emptyList(),
+    ): Boolean {
         val res = request(
             JSONObject().put("@type", "editMessageText")
                 .put("chat_id", chatIdOf(chatId))
                 .put("message_id", msgId.toLongOrNull() ?: return false)
                 .put(
                     "input_message_content",
-                    JSONObject().put("@type", "inputMessageText").put("text", formattedText(newText))
+                    JSONObject().put("@type", "inputMessageText")
+                        .put("text", formattedText(newText, mentions))
                 )
+        )
+        return res != null
+    }
+
+    fun editMessageCaption(
+        chatId: String, msgId: String, newText: String, mentions: List<Mention> = emptyList(),
+    ): Boolean {
+        val res = request(
+            JSONObject().put("@type", "editMessageCaption")
+                .put("chat_id", chatIdOf(chatId))
+                .put("message_id", msgId.toLongOrNull() ?: return false)
+                .put("caption", formattedText(newText, mentions))
         )
         return res != null
     }

@@ -30,7 +30,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         private const val DEEP_IDLE_ROUNDS = 3
         private const val LOCAL_PAGE = 500
         private const val RECORD_WAKE_LOCK_MS = 30 * 60 * 1000L
-        private val FILE_MEDIA_TYPES = PICTURE_TYPES + setOf("audio", "video", "document")
+        private val FILE_MEDIA_TYPES = PICTURE_TYPES + VIDEO_TYPES + setOf("audio", "document")
         // three lines is all the card shows; the rest would only cost every bind
         private const val QUOTE_CHARS = 300
         private const val STATE_PICK_VIEW_ONCE = "pickViewOnce"
@@ -1970,7 +1970,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         mentionList.visibility = android.view.View.GONE
         val replying = replyTarget
         when {
-            editing != null -> Bridge.editMessage(chatId, editing.id, text, editing.timeSent)
+            editing != null -> Bridge.editMessage(editing, text, mentions)
             replying != null -> Bridge.sendReply(chatId, text, replying, mentions)
             else -> Bridge.sendText(chatId, text, mentions)
         }
@@ -2626,7 +2626,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (msg.msgType in FILE_MEDIA_TYPES) add(R.string.save_to_downloads) { saveToDownloads(msg) }
         if (msg.msgType != "" && !labelOnly) add(R.string.share) { shareMessage(msg) }
         if (!labelOnly) add(R.string.forward) { pickForwardTarget(msg) }
-        if (msg.fromMe && msg.msgType == "" && Bridge.canEdit(msg)) add(R.string.edit) { startEdit(msg) }
+        val captionEditable = msg.msgType in CAPTION_TYPES && msg.fileId.isNotEmpty() &&
+            !msg.sendPending && !msg.sendFailed && !msg.captionLocked && Bridge.canEditCaption(msg)
+        if (msg.fromMe && (msg.msgType == "" || captionEditable) && Bridge.canEdit(msg)) {
+            add(R.string.edit) { startEdit(msg) }
+        }
         add(R.string.delete) { confirmDelete(listOf(msg)) }
 
         showActionDialog(actions)
@@ -2668,7 +2672,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         val prefix = when {
             msg.msgType in PICTURE_TYPES -> "IMG"
-            msg.msgType == "video" -> "VID"
+            msg.msgType in VIDEO_TYPES -> "VID"
             else -> "AUD"
         }
         val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)

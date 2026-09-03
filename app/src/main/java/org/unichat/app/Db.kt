@@ -45,6 +45,7 @@ data class MessageRow(
     val reactions: String = "",
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
+    val captionLocked: Boolean = false,
 )
 
 fun MessageRow.coordinates(): String =
@@ -72,7 +73,7 @@ fun previewLabel(
     return when (msgType) {
         "image" -> labeled("📷", R.string.photo_label)
         "sticker" -> labeled("🩹", R.string.sticker_label)
-        "video" -> labeled("🎥", R.string.video_label)
+        in VIDEO_TYPES -> labeled("🎥", R.string.video_label)
         "location" -> {
             val base = labeled("📍", R.string.location_label)
             if (detail.isEmpty()) base else "$base: $detail"
@@ -96,6 +97,10 @@ fun previewLabel(
 }
 
 val PICTURE_TYPES = setOf("image", "sticker")
+
+val VIDEO_TYPES = setOf("video", "videonote")
+
+val CAPTION_TYPES = setOf("image", "video")
 
 val LABEL_ONLY_TYPES: Map<String, Pair<String, Int>> = mapOf(
     "viewonce" to ("🔒" to R.string.view_once_label),
@@ -121,7 +126,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 32) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 34) {
 
     private val ctx: Context = context.applicationContext
 
@@ -240,6 +245,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 32) {
                 "time_pinned INTEGER NOT NULL DEFAULT 0," +
                 "forwarded INTEGER NOT NULL DEFAULT 0," +
                 "latitude REAL NOT NULL DEFAULT 0, longitude REAL NOT NULL DEFAULT 0," +
+                "caption_locked INTEGER NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(chat_id, id))"
         )
         db.execSQL(CREATE_SCROLL)
@@ -413,6 +419,29 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 32) {
         if (oldVersion < 32) {
             db.execSQL("ALTER TABLE messages ADD COLUMN time_pinned INTEGER NOT NULL DEFAULT 0")
         }
+        if (oldVersion < 33) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN album_incomplete INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 34) {
+            db.execSQL("ALTER TABLE messages RENAME COLUMN album_incomplete TO caption_locked")
+            // Rows from before the "ptv" file id kind can hide a WhatsApp round
+            // video note inside a plain video row; editing one converted it to a
+            // rectangular video on the peer, so they are all locked.
+            db.execSQL(
+                "UPDATE messages SET caption_locked=1 WHERE msg_type='video' AND from_me=1 " +
+                    "AND chat_id NOT LIKE 'tg:%' AND chat_id NOT LIKE 'sg:%'"
+            )
+            // A Signal album that lost a child before the flag existed re-sends
+            // only the surviving attachments on edit, shrinking the peer's copy;
+            // a gap in the "-n" suffixes betrays the middle deletions.
+            db.execSQL(
+                "UPDATE messages SET caption_locked=1 WHERE chat_id LIKE 'sg:%' AND (chat_id, id) IN (" +
+                    "SELECT chat_id, substr(id, 1, instr(id, '-') - 1) FROM messages " +
+                    "WHERE chat_id LIKE 'sg:%' AND id LIKE '%-%' " +
+                    "GROUP BY chat_id, substr(id, 1, instr(id, '-') - 1) " +
+                    "HAVING count(*) != max(CAST(substr(id, instr(id, '-') + 1) AS INTEGER)))"
+            )
+        }
     }
 
     private fun <T> queryList(sql: String, args: Array<String>?, map: (Cursor) -> T): List<T> {
@@ -577,6 +606,15 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 32) {
     fun deleteMessage(chatId: String, msgId: String) = writableDatabase.transact {
         execSQL("DELETE FROM messages WHERE chat_id=? AND id=?", arrayOf(chatId, msgId))
         execSQL("DELETE FROM reactions WHERE chat_id=? AND msg_id=?", arrayOf(chatId, msgId))
+        // Editing an album's caption re-sends the attachments its rows still
+        // hold, so deleting one here would drop it from the peer's copy too.
+        val parent = msgId.substringBeforeLast('-', "")
+        if (parent.toLongOrNull() != null && msgId.substringAfterLast('-').toIntOrNull() != null) {
+            execSQL(
+                "UPDATE messages SET caption_locked=1 WHERE chat_id=? AND id=?",
+                arrayOf(chatId, parent)
+            )
+        }
     }
 
     fun recentMessages(chatId: String, limit: Int): List<MessageRow> = queryList(
@@ -892,6 +930,21 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 32) {
         arrayOf(phone, "$prefix%")
     ) { it.getString(0) }
 
+    fun setMsgType(chatId: String, msgId: String, msgType: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET msg_type=? WHERE chat_id=? AND id=? AND msg_type!=?",
+            arrayOf(msgType, chatId, msgId, msgType)
+        )
+    }
+
+    fun albumFileIds(chatId: String, msgId: String): List<String> = queryList(
+        "SELECT id, file_id FROM messages WHERE chat_id=? AND id LIKE ? AND file_id!=''",
+        arrayOf(chatId, "$msgId-%")
+    ) { it.getString(0) to it.getString(1) }
+        .filter { (id, _) -> id.substringAfterLast('-').toIntOrNull() != null }
+        .sortedBy { (id, _) -> id.substringAfterLast('-').toInt() }
+        .map { (_, fileId) -> fileId }
+
     fun latestUnread(chatId: String): MessageRow? =
         oneMessage(chatId, "from_me=0 AND is_read=0", "time_sent DESC, rowid DESC")
 
@@ -1062,7 +1115,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 32) {
     private fun messageColumns(src: String) =
         "SELECT id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, " +
             "file_status, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
-            "latitude, longitude, send_failed, send_pending," +
+            "latitude, longitude, send_failed, send_pending, caption_locked," +
             "(SELECT GROUP_CONCAT(emoji) FROM reactions r " +
             "WHERE r.chat_id=$src.chat_id AND r.msg_id=$src.id) AS reactions "
 
@@ -1079,7 +1132,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 32) {
         latitude = it.getDouble(17), longitude = it.getDouble(18),
         sendFailed = it.getInt(19) != 0,
         sendPending = it.getInt(20) != 0,
-        reactions = it.getString(21) ?: ""
+        captionLocked = it.getInt(21) != 0,
+        reactions = it.getString(22) ?: ""
     )
 
     fun messagesByIds(chatId: String, ids: Collection<String>): List<MessageRow> {

@@ -285,7 +285,7 @@ class MessageAdapter(
             val msg = holder.current ?: continue
             if (msg.id != msgId || msg.filePath.isNotEmpty()) continue
             when (msg.msgType) {
-                "video" -> applyVideoState(holder, msg)
+                in VIDEO_TYPES -> applyVideoState(holder, msg)
                 "audio" -> applyAudioState(holder, msg)
                 "document" -> applyDocumentState(holder, msg)
                 in PICTURE_TYPES -> applyImageState(holder, msg)
@@ -501,7 +501,7 @@ class MessageAdapter(
             val m = tappedRow() ?: return@OnClickListener
             when (m.msgType) {
                 "document" -> onDocumentClick(m)
-                "video" -> onVideoOpen(m)
+                in VIDEO_TYPES -> onVideoOpen(m)
                 "location" -> onLocationClick(m)
                 else -> onMessageActions(m)
             }
@@ -946,7 +946,7 @@ class MessageAdapter(
                 applyAudioState(holder, msg)
             }
             "document" -> applyDocumentState(holder, msg)
-            "video" -> {
+            in VIDEO_TYPES -> {
                 holder.text.visibility = View.GONE
                 holder.videoRow.visibility = View.VISIBLE
                 val label = msg.text.ifEmpty { ctx.getString(R.string.video_label) }

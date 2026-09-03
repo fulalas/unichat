@@ -350,9 +350,12 @@ object Signal : EventListener {
         }
     }
 
-    fun edit(chatId: String, msgId: String, newText: String): Boolean {
+    fun edit(chatId: String, msgId: String, newText: String, fileId: String): Boolean {
         val (body, styles) = styled(newText)
-        return Wmbridge.signalEdit(chatId, msgId, body, styles)
+        val fileIds =
+            if (fileId.isEmpty()) ""
+            else (listOf(fileId) + Bridge.db.albumFileIds(chatId, msgId)).joinToString("\n")
+        return Wmbridge.signalEdit(chatId, msgId, body, styles, fileIds)
     }
 
     fun markChatRead(chatId: String) = ops {

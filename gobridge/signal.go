@@ -1601,7 +1601,7 @@ func SignalDeleteChat(chatId string, recent string) bool {
 
 // Signal keys an edit by the original's timestamp and carries a fresh one for
 // the edit itself.
-func SignalEdit(chatId string, msgId string, newText string, styles string) bool {
+func SignalEdit(chatId string, msgId string, newText string, styles string, fileIds string) bool {
 	c, client, _ := sgActive()
 	if client == nil {
 		return false
@@ -1612,13 +1612,24 @@ func SignalEdit(chatId string, msgId string, newText string, styles string) bool
 	}
 	now := uint64(time.Now().UnixMilli())
 	ranges := sgStyleRanges(styles)
+	dm := &signalpb.DataMessage{
+		Timestamp:  &now,
+		Body:       proto.String(newText),
+		BodyRanges: ranges,
+	}
+	if fileIds != "" {
+		for _, fileId := range strings.Split(fileIds, "\n") {
+			ptr, err := sgParseFileID(fileId)
+			if err != nil {
+				c.log(LogError, "edit attachment decode failed: "+err.Error())
+				return false
+			}
+			dm.Attachments = append(dm.Attachments, ptr)
+		}
+	}
 	edit := &signalpb.EditMessage{
 		TargetSentTimestamp: &target,
-		DataMessage: &signalpb.DataMessage{
-			Timestamp:  &now,
-			Body:       proto.String(newText),
-			BodyRanges: ranges,
-		},
+		DataMessage:         dm,
 	}
 	if err := sgSend(c, client, chatId, signalmeow.WrapEditMessage(edit)); err != nil {
 		c.log(LogError, "edit failed: "+err.Error())
