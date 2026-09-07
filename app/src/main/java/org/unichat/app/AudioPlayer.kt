@@ -42,19 +42,9 @@ object AudioPlayer {
     @Volatile var proximitySessionEnded: Boolean = false
         private set
 
-    /**
-     * True from the first clip of a chain until the chain is over — including
-     * the gap where one clip has finished and the next is still being looked
-     * up. The player is null for that gap, so reading `hasCurrent` as "playback
-     * over" released the proximity wake lock and the ear route between two
-     * voice notes: the screen lit up against the user's face and the next clip
-     * started on the speaker. Ended by [endSession], which every path that
-     * stops playback for good already goes through.
-     */
     @Volatile var sessionActive: Boolean = false
         private set
 
-    /** Survives the gap, unlike [currentChatId], which the player owns. */
     @Volatile var sessionChatId: String = ""
         private set
 
@@ -68,9 +58,6 @@ object AudioPlayer {
         audioManager = appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }
 
-    // Intent to play, not "audio is leaving the speaker right now": a player
-    // that is still buffering has playWhenReady set and would otherwise read as
-    // paused, flipping the button and re-triggering the proximity resume.
     val isPlaying: Boolean
         get() = player?.let {
             it.playWhenReady &&
@@ -90,20 +77,6 @@ object AudioPlayer {
         play(path, chatId, msgId)
     }
 
-    /**
-     * Ear playback uses the communication/telephony path, the same one the
-     * official clients use: it reliably reaches the earpiece, and — the reason
-     * it is not merely a fallback — it puts playback on the voice-call stream,
-     * which is the stream the hardware volume keys drive while the screen is
-     * blanked against your face. Routing media to the earpiece with
-     * setPreferredDevice instead kept the clip on the music stream, where the
-     * keys had nothing to act on.
-     *
-     * The rate is applied in software ahead of the output track (ExoPlayer's
-     * Sonic stage), which is what lets that route honour the speed pill: the
-     * platform player asked its telephony track to stretch, the track quietly
-     * refused, and every clip held to an ear played at 1x.
-     */
     fun play(
         path: String,
         chatId: String,
@@ -123,8 +96,6 @@ object AudioPlayer {
             fresh = p
             p.setWakeMode(C.WAKE_MODE_LOCAL)
             applyRoute(commMode)
-            // false: focus is this object's business (see requestFocus), and
-            // ExoPlayer's own handling would duck where a voice note must pause
             p.setAudioAttributes(playerAttributes(commMode), false)
             if (commMode) preferEarpiece(p)
             p.setPlaybackSpeed(speed)
@@ -152,26 +123,17 @@ object AudioPlayer {
         notifyState()
     }
 
-    // Bound to the player it was attached to: a clip recreated on the other
-    // output (the proximity switch) leaves the old instance briefly alive, and
-    // its end-of-stream must not be taken for the new clip's.
     private fun playerListener(p: ExoPlayer, path: String) = object : Player.Listener {
         override fun onPlaybackStateChanged(state: Int) {
             if (player !== p) return
             when (state) {
                 Player.STATE_ENDED -> onClipEnded()
-                // the duration is only known once the file is ready, and the
-                // notification and seekbar are drawn from it
                 Player.STATE_READY -> notifyState()
             }
         }
 
         override fun onPlayerError(error: PlaybackException) {
             if (player !== p) return
-            // Errors have their own path: reported as an end of stream, a
-            // decode failure or a file truncated mid-playback was
-            // indistinguishable from a finished clip and silently advanced the
-            // voice chain.
             android.util.Log.w("AudioPlayer", "playback error for $path", error)
             stopInternal(endSession = true)
             notifyState()
@@ -182,8 +144,6 @@ object AudioPlayer {
         val finishedPath = currentPath
         val finishedChat = currentChatId
         val finishedMsg = currentMsgId
-        // endSession = false: the session stays open across the gap, and the
-        // chain ends it if there is nothing left to play
         stopInternal(endSession = false)
         notifyState()
         if (finishedPath != null) {
@@ -272,12 +232,6 @@ object AudioPlayer {
     // starting one on the media route did the same before it even played.
     private var ownsAudioMode = false
 
-    /**
-     * Playback is over for good: drop the ear route and the audio focus. Called
-     * by every path that ends a chain, so the service learns of it here — but
-     * only when the session was in fact open, since the service's own cleanup
-     * calls this too and an unconditional notify would bounce between them.
-     */
     fun endSession() {
         val wasActive = sessionActive
         sessionActive = false

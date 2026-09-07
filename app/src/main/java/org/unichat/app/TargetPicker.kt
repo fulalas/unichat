@@ -68,8 +68,6 @@ fun Activity.showTargetPicker(
     val send = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
     send.isEnabled = false
 
-    // the row the finger hit is the only one that changed; rebinding the whole
-    // list would re-request every visible avatar per tick
     list.setOnItemClickListener { _, row, position, _ ->
         send.isEnabled = adapter.toggle(position, row)
     }
@@ -85,10 +83,6 @@ fun Activity.showTargetPicker(
     return dialog
 }
 
-/**
- * Rows carry the avatar and its protocol-coloured ring, so the target list reads
- * like the chat list: a name alone said nothing about which account would send.
- */
 private class TargetAdapter(
     private val context: Context,
     private val labels: List<String>,
@@ -103,15 +97,12 @@ private class TargetAdapter(
     }
 
     private val visible = labels.indices.toMutableList()
-    // indexes into `labels`/`ids`, not list positions, so ticks survive a re-filter
     private val chosen = LinkedHashSet<Int>()
-    // three accents at most, and getView runs per row per bind
     private val ringTints = HashMap<Int, ColorStateList>()
     private val avatarPx = (40 * context.resources.displayMetrics.density).toInt()
 
     fun chosenIds(): List<String> = chosen.map { ids[it] }
 
-    /** Returns whether anything is ticked, for the dialog's Send button. */
     fun toggle(position: Int, row: View): Boolean {
         val index = visible[position]
         if (!chosen.remove(index)) chosen.add(index)

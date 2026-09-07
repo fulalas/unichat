@@ -25,7 +25,6 @@ class ChatListAdapter(
 
         private val PREVIEW_WS = Regex("\\s*[\\r\\n]+\\s*")
 
-        // one per protocol accent, not one per bind of a selected row
         private val selectedTints = HashMap<Int, android.graphics.drawable.ColorDrawable>()
 
         private fun selectedTint(accent: Int) = selectedTints.getOrPut(accent) {
@@ -43,8 +42,6 @@ class ChatListAdapter(
         }
     }
 
-    // An address-book search result is not a chat yet: it has no id anything
-    // here could mute, delete or open elsewhere.
     private val selection = Selection<ChatRow>(
         rows = { chats }, idOf = { it.id },
         notifyAt = { notifyItemChanged(it) }, onChanged = { onSelectionChanged() },
@@ -57,11 +54,6 @@ class ChatListAdapter(
 
     private var chatsById: Map<String, ChatRow>? = null
 
-    /**
-     * The stored row is a snapshot from when it was ticked, so the live one
-     * wins — its mute state decides the action-mode label. Built once per list
-     * version: this runs per drag-select row crossing.
-     */
     fun selectedChats(): List<ChatRow> {
         val byId = chatsById ?: chats.associateBy { it.id }.also { chatsById = it }
         return selection.values.map { byId[it.id] ?: it }
@@ -101,8 +93,6 @@ class ChatListAdapter(
             if (selectionMode) selection.toggle(chat) else onClick(chat)
         }
         holder.itemView.setOnLongClickListener {
-            // arm only if the row could be ticked, or a long-press on an
-            // address-book result would start a drag with nothing selected
             holder.current?.let { if (selection.start(it)) onDragArm() }
             true
         }
@@ -124,8 +114,6 @@ class ChatListAdapter(
         holder.current = chat
         holder.name.text = name
         val context = holder.itemView.context
-        // resolved once: each call is an account lookup plus a resource lookup,
-        // and four of these lines want the same colour
         val accent = context.protocolAccent(chat.id)
         val transient = when (chat.transientState) {
             "typing" -> R.string.typing
@@ -164,7 +152,6 @@ class ChatListAdapter(
         }
         holder.avatarRing.backgroundTintList =
             android.content.res.ColorStateList.valueOf(accent)
-        // foreground, not background: the row's background is the theme's ripple
         holder.itemView.foreground = if (chat.id in selection) selectedTint(accent) else null
         holder.onlineDot.visibility = if (chat.online) View.VISIBLE else View.GONE
         // WhatsApp only reports presence for contacts it has been asked about,

@@ -112,8 +112,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     override fun onStop() {
         super.onStop()
         started = false
-        // no ACTION_UP reaches a stopped list: the auto-scroll runnable would
-        // keep re-posting and the listener keep intercepting on return
         dragSelect?.stopDrag()
         syncWatchedChats()
         chatList.removeCallbacks(midnightRefresh)
@@ -220,10 +218,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun submitChats(chats: List<ChatRow>) {
-        // A message arriving mid-drag reorders the list — and scrolls it to the
-        // top — under the finger, shifting every adapter position the drag
-        // range is expressed in, so it would select rows the finger never
-        // crossed. The rows keep their places until the finger is up.
         if (dragSelect?.isDragging == true) {
             reloadAfterDrag = true
             return
@@ -565,14 +559,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
 
         override fun onPrepareActionMode(mode: androidx.appcompat.view.ActionMode, menu: Menu): Boolean {
             val chats = adapter.selectedChats()
-            // one label for the whole selection: unmute only when nothing in it
-            // is still unmuted
             val unmuting = chats.all { it.muted }
             menu.findItem(M_MUTE)?.apply {
                 setTitle(if (unmuting) R.string.unmute_chat else R.string.mute_chat)
-                // there is no crossed-out variant of the icon, and the mute one
-                // over an unmute action reads as the opposite of what it does —
-                // no icon puts the title in the bar instead
                 setIcon(if (unmuting) null else getDrawable(R.drawable.ic_mute))
             }
             menu.findItem(M_OPEN_OTHER)?.isVisible = chats.size == 1

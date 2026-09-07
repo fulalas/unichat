@@ -32,8 +32,6 @@ class WmService : Service() {
         const val ACTION_NEXT = "org.unichat.app.NEXT"
         const val ACTION_NOTIF_DISMISSED = "org.unichat.app.NOTIF_DISMISSED"
 
-        // how long the screen stays blanked after playback ends, waiting for
-        // the phone to leave the ear
         private const val BLANK_HOLD_MS = 60_000L
 
         fun start(context: Context) {
@@ -169,13 +167,7 @@ class WmService : Service() {
     private fun onPlaybackChanged() {
         val session = mediaSession ?: return
         if (!AudioPlayer.hasCurrent) {
-            // Between two clips of a chain there is no player, but the session
-            // is still open: tearing down here released the proximity wake lock
-            // and woke the screen against the user's ear for the gap.
             if (AudioPlayer.sessionActive) {
-                // buffering, not paused: a gap that waits on a download lasts
-                // long enough for the lock screen to offer a pause button that
-                // has nothing to pause
                 session.setPlaybackState(
                     PlaybackState.Builder()
                         .setActions(PlaybackState.ACTION_STOP)
@@ -230,12 +222,6 @@ class WmService : Service() {
 
     private var sessionVolumeRoute: Boolean? = null
 
-    /**
-     * The screen is blanked against the user's ear, so no window is there to
-     * take a volume key — the session has to name the stream itself. It is the
-     * call stream at the ear and the media stream on the speaker, which is what
-     * the volume panel then shows and adjusts.
-     */
     private fun syncSessionVolume(session: MediaSession) {
         val ear = AudioPlayer.earpiece
         if (sessionVolumeRoute == ear) return
@@ -356,8 +342,6 @@ class WmService : Service() {
             } else {
                 if (AudioPlayer.isPlaying) AudioPlayer.pause()
                 releaseProximityWakeLock()
-                // the lock may have outlived playback (see updateProximity), so
-                // the sensor it was waiting on goes with it
                 updateProximity()
             }
         }
@@ -374,11 +358,6 @@ class WmService : Service() {
             !AudioPlayer.proximitySessionEnded &&
             AudioPlayer.sessionChatId == Bridge.activeChatId &&
             screenUsable
-        // The last clip ending must not light the screen up against a face —
-        // that is where stray taps come from. The blank outlives playback and
-        // is normally lifted by the sensor going "far"; the timer is for a
-        // phone that never moves (left face down), which would otherwise hold
-        // the screen off and the sensor registered indefinitely.
         if (!eligible && lastNear && proximityWakeLock?.isHeld == true) {
             main.removeCallbacks(blankRelease)
             main.postDelayed(blankRelease, BLANK_HOLD_MS)

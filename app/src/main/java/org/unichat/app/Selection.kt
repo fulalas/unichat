@@ -1,12 +1,5 @@
 package org.unichat.app
 
-/**
- * The tick state behind both multi-select lists (messages and chats). Keyed by
- * id and not by position, so a list that re-sorts or re-filters under the
- * selection keeps it; the row itself is kept as the value because a selected
- * row can leave the loaded window (a search re-query, a chat list filtered by
- * a term) and the action still has to act on it.
- */
 class Selection<T>(
     private val rows: () -> List<T>,
     private val idOf: (T) -> String,
@@ -42,8 +35,6 @@ class Selection<T>(
         if (selected.isEmpty()) return
         val ids = HashSet(selected.keys)
         selected.clear()
-        // one pass, not a linear scan per id: clearing a bulk drag-select in a
-        // search window ran millions of comparisons in a frame
         rows().forEachIndexed { i, row -> if (idOf(row) in ids) notifyAt(i) }
         onChanged()
     }

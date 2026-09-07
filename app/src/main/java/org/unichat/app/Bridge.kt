@@ -146,15 +146,6 @@ object Bridge : EventListener {
 
     @Volatile private var autoPlayKey: String? = null
 
-    /**
-     * The chain holds the ear route and the proximity wake lock open between
-     * clips, so every exit from it has to say so — including the ones that just
-     * give up. [playingChatId]/[playingMsgId] name the clip the chain was
-     * following: skipToNextVoice asks with it still running, and "nothing next"
-     * there means stopping it rather than leaving it playing outside a session.
-     * Anything else on the player is someone else's (the user tapped another
-     * note while a download was pending) and is left alone.
-     */
     private fun endChain(playingChatId: String = "", playingMsgId: String = "") = main.post {
         when {
             !AudioPlayer.hasCurrent -> AudioPlayer.endSession()
@@ -163,8 +154,6 @@ object Bridge : EventListener {
         }
     }
 
-    // A download that never reports back would hold them for good; the arm goes
-    // with them.
     private val autoPlayTimeout = Runnable {
         if (autoPlayKey != null) {
             disarmAutoPlay()
@@ -2177,8 +2166,6 @@ object Bridge : EventListener {
             if (status == 2 && filePath.isNotEmpty()) {
                 main.post { AudioPlayer.play(filePath, playChatId, msgId) }
             } else {
-                // the chain is over; don't hold the ear route (and the screen
-                // off) waiting for a clip that will not arrive
                 endChain()
             }
         }
