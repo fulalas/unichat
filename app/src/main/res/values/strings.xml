@@ -215,11 +215,11 @@
     <string name="replying_to">Replying to %1$s: %2$s</string>
     <string name="editing_message">Editing message</string>
     <string name="delete_message">Delete message?</string>
-    <string name="chat_options_title">Chat options</string>
     <string name="mute_chat">Mute</string>
     <string name="unmute_chat">Unmute</string>
     <string name="mute_not_synced">Mute couldn\'t be synced — it may not apply on your other devices</string>
     <string name="delete_chat_title">Delete this chat?</string>
+    <string name="delete_chats_title">Delete %1$d chats?</string>
     <string name="delete_chat_media">Also delete downloaded media</string>
     <string name="delete_chat">Delete chat</string>
     <string name="delete_chat_failed">Deleted here only — the other devices could not be told</string>

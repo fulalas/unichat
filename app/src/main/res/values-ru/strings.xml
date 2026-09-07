@@ -209,11 +209,11 @@
     <string name="replying_to">Ответ %1$s: %2$s</string>
     <string name="editing_message">Изменение сообщения</string>
     <string name="delete_message">Удалить сообщение?</string>
-    <string name="chat_options_title">Настройки чата</string>
     <string name="mute_chat">Без звука</string>
     <string name="unmute_chat">Включить звук</string>
     <string name="mute_not_synced">Отключение звука не синхронизировалось — на других устройствах может не сработать</string>
     <string name="delete_chat_title">Удалить этот чат?</string>
+    <string name="delete_chats_title">Удалить %1$d чатов?</string>
     <string name="delete_chat_media">Удалить и скачанные файлы</string>
     <string name="delete_chat">Удалить чат</string>
     <string name="delete_for_everyone">Удалить у всех</string>

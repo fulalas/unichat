@@ -209,11 +209,11 @@
     <string name="replying_to">Réponse à %1$s : %2$s</string>
     <string name="editing_message">Modification du message</string>
     <string name="delete_message">Supprimer le message ?</string>
-    <string name="chat_options_title">Options de la discussion</string>
     <string name="mute_chat">Mettre en sourdine</string>
     <string name="unmute_chat">Réactiver le son</string>
     <string name="mute_not_synced">La sourdine n\'a pas été synchronisée — elle ne s\'appliquera peut-être pas sur vos autres appareils</string>
     <string name="delete_chat_title">Supprimer cette discussion ?</string>
+    <string name="delete_chats_title">Supprimer %1$d discussions ?</string>
     <string name="delete_chat_media">Supprimer aussi les médias téléchargés</string>
     <string name="delete_chat">Supprimer la discussion</string>
     <string name="delete_for_everyone">Supprimer pour tout le monde</string>

@@ -209,11 +209,11 @@
     <string name="replying_to">回复 %1$s：%2$s</string>
     <string name="editing_message">正在编辑消息</string>
     <string name="delete_message">删除这条消息？</string>
-    <string name="chat_options_title">聊天选项</string>
     <string name="mute_chat">静音</string>
     <string name="unmute_chat">取消静音</string>
     <string name="mute_not_synced">静音设置未能同步 — 在你的其他设备上可能不生效</string>
     <string name="delete_chat_title">删除这个聊天？</string>
+    <string name="delete_chats_title">删除 %1$d 个聊天？</string>
     <string name="delete_chat_media">同时删除已下载的媒体文件</string>
     <string name="delete_chat">删除聊天</string>
     <string name="delete_for_everyone">为所有人删除</string>

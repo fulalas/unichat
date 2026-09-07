@@ -209,11 +209,11 @@
     <string name="replying_to">Antwort an %1$s: %2$s</string>
     <string name="editing_message">Nachricht wird bearbeitet</string>
     <string name="delete_message">Nachricht löschen?</string>
-    <string name="chat_options_title">Chat-Optionen</string>
     <string name="mute_chat">Stummschalten</string>
     <string name="unmute_chat">Stummschaltung aufheben</string>
     <string name="mute_not_synced">Die Stummschaltung wurde nicht synchronisiert — auf deinen anderen Geräten gilt sie vielleicht nicht</string>
     <string name="delete_chat_title">Diesen Chat löschen?</string>
+    <string name="delete_chats_title">%1$d Chats löschen?</string>
     <string name="delete_chat_media">Auch heruntergeladene Medien löschen</string>
     <string name="delete_chat">Chat löschen</string>
     <string name="delete_for_everyone">Für alle löschen</string>

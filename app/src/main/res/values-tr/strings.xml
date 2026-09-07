@@ -209,11 +209,11 @@
     <string name="replying_to">%1$s kişisine yanıt: %2$s</string>
     <string name="editing_message">Mesaj düzenleniyor</string>
     <string name="delete_message">Mesaj silinsin mi?</string>
-    <string name="chat_options_title">Sohbet seçenekleri</string>
     <string name="mute_chat">Sessize al</string>
     <string name="unmute_chat">Sesi aç</string>
     <string name="mute_not_synced">Sessize alma eşitlenemedi — diğer cihazlarınızda geçerli olmayabilir</string>
     <string name="delete_chat_title">Bu sohbet silinsin mi?</string>
+    <string name="delete_chats_title">%1$d sohbet silinsin mi?</string>
     <string name="delete_chat_media">İndirilen medyayı da sil</string>
     <string name="delete_chat">Sohbeti sil</string>
     <string name="delete_for_everyone">Herkes için sil</string>

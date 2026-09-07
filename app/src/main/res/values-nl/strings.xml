@@ -209,11 +209,11 @@
     <string name="replying_to">Antwoord aan %1$s: %2$s</string>
     <string name="editing_message">Bericht bewerken</string>
     <string name="delete_message">Bericht verwijderen?</string>
-    <string name="chat_options_title">Chatopties</string>
     <string name="mute_chat">Dempen</string>
     <string name="unmute_chat">Dempen opheffen</string>
     <string name="mute_not_synced">Het dempen is niet gesynchroniseerd — op je andere apparaten geldt het misschien niet</string>
     <string name="delete_chat_title">Deze chat verwijderen?</string>
+    <string name="delete_chats_title">%1$d chats verwijderen?</string>
     <string name="delete_chat_media">Ook gedownloade media verwijderen</string>
     <string name="delete_chat">Chat verwijderen</string>
     <string name="delete_for_everyone">Voor iedereen verwijderen</string>

@@ -3,8 +3,15 @@ package org.unichat.app
 import android.view.MotionEvent
 import androidx.recyclerview.widget.RecyclerView
 
+interface DragSelectAdapter {
+    fun snapshotSelection(): Set<String>
+    fun setSelectedAt(pos: Int, sel: Boolean): Boolean
+    fun commitDragSelection()
+    fun idAt(pos: Int): String
+}
+
 class DragSelectTouchListener(
-    private val adapter: MessageAdapter,
+    private val adapter: DragSelectAdapter,
     private val onDragFinished: () -> Unit = {},
 ) : RecyclerView.OnItemTouchListener {
 
@@ -85,7 +92,7 @@ class DragSelectTouchListener(
         adapter.commitDragSelection()
     }
 
-    private fun wasSelected(pos: Int): Boolean = adapter.messageIdAt(pos) in preSelected
+    private fun wasSelected(pos: Int): Boolean = adapter.idAt(pos) in preSelected
 
     fun stopDrag() {
         val wasDragging = isDragging

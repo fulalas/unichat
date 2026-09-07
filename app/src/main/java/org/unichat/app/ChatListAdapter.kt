@@ -13,8 +13,9 @@ import androidx.recyclerview.widget.RecyclerView
 class ChatListAdapter(
     private val onClick: (ChatRow) -> Unit,
     private val onAvatarClick: (ChatRow) -> Unit,
-    private val onLongClick: (ChatRow) -> Unit,
-) : RecyclerView.Adapter<ChatListAdapter.Holder>() {
+    private val onSelectionChanged: () -> Unit = {},
+    private val onDragArm: () -> Unit = {},
+) : RecyclerView.Adapter<ChatListAdapter.Holder>(), DragSelectAdapter {
 
     companion object {
         private val DIFF = object : DiffUtil.ItemCallback<ChatRow>() {
@@ -23,14 +24,58 @@ class ChatListAdapter(
         }
 
         private val PREVIEW_WS = Regex("\\s*[\\r\\n]+\\s*")
+
+        // one per protocol accent, not one per bind of a selected row
+        private val selectedTints = HashMap<Int, android.graphics.drawable.ColorDrawable>()
+
+        private fun selectedTint(accent: Int) = selectedTints.getOrPut(accent) {
+            android.graphics.drawable.ColorDrawable((0x33 shl 24) or (accent and 0xFFFFFF))
+        }
     }
 
     private val differ = AsyncListDiffer(this, DIFF)
     private val chats: List<ChatRow> get() = differ.currentList
 
     fun submit(newChats: List<ChatRow>, commitCallback: Runnable? = null) {
-        differ.submitList(newChats, commitCallback)
+        differ.submitList(newChats) {
+            chatsById = null
+            commitCallback?.run()
+        }
     }
+
+    // An address-book search result is not a chat yet: it has no id anything
+    // here could mute, delete or open elsewhere.
+    private val selection = Selection<ChatRow>(
+        rows = { chats }, idOf = { it.id },
+        notifyAt = { notifyItemChanged(it) }, onChanged = { onSelectionChanged() },
+        canSelect = { !PhoneBook.isPhoneEntry(it.id) },
+    )
+
+    val selectionMode: Boolean get() = selection.active
+
+    fun selectedCount(): Int = selection.count
+
+    private var chatsById: Map<String, ChatRow>? = null
+
+    /**
+     * The stored row is a snapshot from when it was ticked, so the live one
+     * wins — its mute state decides the action-mode label. Built once per list
+     * version: this runs per drag-select row crossing.
+     */
+    fun selectedChats(): List<ChatRow> {
+        val byId = chatsById ?: chats.associateBy { it.id }.also { chatsById = it }
+        return selection.values.map { byId[it.id] ?: it }
+    }
+
+    fun clearSelection() = selection.clear()
+
+    override fun setSelectedAt(pos: Int, sel: Boolean) = selection.setSelectedAt(pos, sel)
+
+    override fun commitDragSelection() = selection.commitDragSelection()
+
+    override fun snapshotSelection(): Set<String> = selection.snapshotSelection()
+
+    override fun idAt(pos: Int): String = selection.idAt(pos)
 
     class Holder(view: View) : RecyclerView.ViewHolder(view) {
         val avatar: ImageView = view.findViewById(R.id.avatar)
@@ -51,12 +96,20 @@ class ChatListAdapter(
         holder.avatar.outlineProvider = ViewOutlineProvider.BACKGROUND
         // set once here, not per bind: they dispatch off holder.current so a
         // recycled row acts on the chat it currently shows
-        holder.itemView.setOnClickListener { holder.current?.let(onClick) }
+        holder.itemView.setOnClickListener {
+            val chat = holder.current ?: return@setOnClickListener
+            if (selectionMode) selection.toggle(chat) else onClick(chat)
+        }
         holder.itemView.setOnLongClickListener {
-            holder.current?.let(onLongClick)
+            // arm only if the row could be ticked, or a long-press on an
+            // address-book result would start a drag with nothing selected
+            holder.current?.let { if (selection.start(it)) onDragArm() }
             true
         }
-        holder.avatar.setOnClickListener { holder.current?.let(onAvatarClick) }
+        holder.avatar.setOnClickListener {
+            val chat = holder.current ?: return@setOnClickListener
+            if (selectionMode) selection.toggle(chat) else onAvatarClick(chat)
+        }
         return holder
     }
 
@@ -71,6 +124,9 @@ class ChatListAdapter(
         holder.current = chat
         holder.name.text = name
         val context = holder.itemView.context
+        // resolved once: each call is an account lookup plus a resource lookup,
+        // and four of these lines want the same colour
+        val accent = context.protocolAccent(chat.id)
         val transient = when (chat.transientState) {
             "typing" -> R.string.typing
             "recording" -> R.string.recording_voice
@@ -78,7 +134,7 @@ class ChatListAdapter(
         }
         if (transient != 0) {
             holder.lastMessage.text = context.getString(transient)
-            holder.lastMessage.setTextColor(context.protocolAccent(chat.id))
+            holder.lastMessage.setTextColor(accent)
         } else {
             val preview = if (chat.lastText.indexOf('\n') < 0 && chat.lastText.indexOf('\r') < 0)
                 chat.lastText else chat.lastText.replace(PREVIEW_WS, " ")
@@ -89,7 +145,7 @@ class ChatListAdapter(
         holder.timestamp.text = if (chat.lastFromMe) {
             Ticks.timeWithTick(
                 context, time, chat.lastRead, holder.timestamp.textSize,
-                tickFirst = true, readTint = context.protocolAccent(chat.id),
+                tickFirst = true, readTint = accent,
                 failed = chat.lastFailed, pending = chat.lastPending,
             )
         } else {
@@ -99,7 +155,7 @@ class ChatListAdapter(
         if (chat.unread > 0) {
             holder.unreadBadge.visibility = View.VISIBLE
             holder.unreadBadge.backgroundTintList =
-                android.content.res.ColorStateList.valueOf(context.protocolAccent(chat.id))
+                android.content.res.ColorStateList.valueOf(accent)
             holder.unreadBadge.text =
                 if (chat.unread > 99) context.getString(R.string.unread_overflow)
                 else chat.unread.toString()
@@ -107,7 +163,9 @@ class ChatListAdapter(
             holder.unreadBadge.visibility = View.GONE
         }
         holder.avatarRing.backgroundTintList =
-            android.content.res.ColorStateList.valueOf(context.protocolAccent(chat.id))
+            android.content.res.ColorStateList.valueOf(accent)
+        // foreground, not background: the row's background is the theme's ripple
+        holder.itemView.foreground = if (chat.id in selection) selectedTint(accent) else null
         holder.onlineDot.visibility = if (chat.online) View.VISIBLE else View.GONE
         // WhatsApp only reports presence for contacts it has been asked about,
         // so the ask happens per visible row (Bridge subscribes once per

@@ -209,11 +209,11 @@
     <string name="replying_to">Respondendo a %1$s: %2$s</string>
     <string name="editing_message">Editando mensagem</string>
     <string name="delete_message">Apagar mensagem?</string>
-    <string name="chat_options_title">Opções da conversa</string>
     <string name="mute_chat">Silenciar</string>
     <string name="unmute_chat">Reativar som</string>
     <string name="mute_not_synced">O silenciar não foi sincronizado — pode não valer nos seus outros aparelhos</string>
     <string name="delete_chat_title">Apagar esta conversa?</string>
+    <string name="delete_chats_title">Apagar %1$d conversas?</string>
     <string name="delete_chat_media">Apagar também as mídias baixadas</string>
     <string name="delete_chat">Apagar conversa</string>
     <string name="delete_for_everyone">Apagar para todos</string>

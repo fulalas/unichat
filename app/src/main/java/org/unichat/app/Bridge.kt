@@ -146,15 +146,45 @@ object Bridge : EventListener {
 
     @Volatile private var autoPlayKey: String? = null
 
+    /**
+     * The chain holds the ear route and the proximity wake lock open between
+     * clips, so every exit from it has to say so — including the ones that just
+     * give up. [playingChatId]/[playingMsgId] name the clip the chain was
+     * following: skipToNextVoice asks with it still running, and "nothing next"
+     * there means stopping it rather than leaving it playing outside a session.
+     * Anything else on the player is someone else's (the user tapped another
+     * note while a download was pending) and is left alone.
+     */
+    private fun endChain(playingChatId: String = "", playingMsgId: String = "") = main.post {
+        when {
+            !AudioPlayer.hasCurrent -> AudioPlayer.endSession()
+            AudioPlayer.currentChatId == playingChatId &&
+                AudioPlayer.currentMsgId == playingMsgId -> AudioPlayer.stop()
+        }
+    }
+
+    // A download that never reports back would hold them for good; the arm goes
+    // with them.
+    private val autoPlayTimeout = Runnable {
+        if (autoPlayKey != null) {
+            disarmAutoPlay()
+            endChain()
+        }
+    }
+
+    private fun disarmAutoPlay() {
+        autoPlayKey = null
+        main.removeCallbacks(autoPlayTimeout)
+    }
+
     private fun chainNextVoice(chatId: String, finishedMsgId: String) {
-        if (chatId.isEmpty()) { main.post { AudioPlayer.resetRoute() }; return }
-        if (connId < 0) return
+        if (chatId.isEmpty() || connId < 0) { endChain(chatId, finishedMsgId); return }
         executor.execute {
             // the DB, not the loaded rows: the next voice message can lie
             // outside the last 500 the chat has loaded
             val next = db.nextAudioMessage(chatId, finishedMsgId)
             if (next == null) {
-                main.post { AudioPlayer.resetRoute() }
+                endChain(chatId, finishedMsgId)
                 return@execute
             }
             val (path, status) = db.fileState(next.chatId, next.id)
@@ -162,11 +192,15 @@ object Bridge : EventListener {
                 main.post { AudioPlayer.play(path, chatId, next.id) }
             } else {
                 autoPlayKey = next.chatId + "/" + next.id
+                main.postDelayed(autoPlayTimeout, 15_000)
                 // downloadFile can decline (no fileId, or a failure already
                 // auto-retried this run) and then never reports back; leaving
                 // autoPlayKey armed made a LATER, unrelated download of that
                 // same message (Share/Forward/open) start playback unprompted
-                if (!downloadFile(next)) autoPlayKey = null
+                if (!downloadFile(next)) {
+                    main.post { disarmAutoPlay() }
+                    endChain(chatId, finishedMsgId)
+                }
             }
         }
     }
@@ -2081,7 +2115,9 @@ object Bridge : EventListener {
         main.post { if (isWaId(AudioPlayer.currentChatId)) AudioPlayer.stop() }
         selfIdMemo = ""
         if (isWaId(activeChatId)) activeChatId = ""
-        autoPlayKey?.let { if (isWaId(it.substringBeforeLast('/'))) autoPlayKey = null }
+        autoPlayKey?.let {
+            if (isWaId(it.substringBeforeLast('/'))) main.post { disarmAutoPlay() }
+        }
         // WhatsApp-only by construction: Tg keeps its own slots, and these are
         // written by the Wa transport alone.
         historyInFlight = null
@@ -2137,9 +2173,13 @@ object Bridge : EventListener {
         val requested = keys.count { userRequestedDownloads.remove(it) } > 0
         if (status == 3 && requested) toastUi(R.string.download_failed)
         if (autoPlayKey in keys) {
-            autoPlayKey = null
+            main.post { disarmAutoPlay() }
             if (status == 2 && filePath.isNotEmpty()) {
                 main.post { AudioPlayer.play(filePath, playChatId, msgId) }
+            } else {
+                // the chain is over; don't hold the ear route (and the screen
+                // off) waiting for a clip that will not arrive
+                endChain()
             }
         }
     }

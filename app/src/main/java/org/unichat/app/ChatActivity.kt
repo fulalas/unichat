@@ -1120,7 +1120,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun visibleAnchor(): Pair<String, Int>? {
         val pos = lm.findFirstVisibleItemPosition()
         if (pos < 0) return null
-        val id = adapter.messageIdAt(pos)
+        val id = adapter.idAt(pos)
         if (id.isEmpty()) return null
         return id to (lm.findViewByPosition(pos)?.top ?: 0)
     }
@@ -1151,7 +1151,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val last = lm.findLastVisibleItemPosition()
         if (first < 0 || last < first) return
         val ids = ArrayList<String>(last - first + 1)
-        for (pos in first..last) adapter.messageIdAt(pos).takeIf { it.isNotEmpty() }?.let(ids::add)
+        for (pos in first..last) adapter.idAt(pos).takeIf { it.isNotEmpty() }?.let(ids::add)
         if (ids == reportedVisible) return
         reportedVisible = ids
         Bridge.reportVisible(chatId, ids)
@@ -1207,7 +1207,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 if (adapter.highlightQuery != q) return@runOnUiThread
                 val keepId = currentMatchId()
                 searchMatches = matches
-                val kept = matches.indexOfFirst { adapter.messageIdAt(it) == keepId }
+                val kept = matches.indexOfFirst { adapter.idAt(it) == keepId }
                 currentMatch = if (deepening && kept >= 0) kept else matches.size - 1
                 if (!deepening && currentMatch >= 0) {
                     messageList.scrollToPosition(matches[currentMatch])
@@ -1219,7 +1219,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun currentMatchId(): String =
-        searchMatches.getOrNull(currentMatch)?.let { adapter.messageIdAt(it) } ?: ""
+        searchMatches.getOrNull(currentMatch)?.let { adapter.idAt(it) } ?: ""
 
     private fun runServerSearch(q: String) {
         val seq = ++searchSeq

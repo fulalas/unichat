@@ -209,11 +209,11 @@
     <string name="replying_to">Odpowiedź do %1$s: %2$s</string>
     <string name="editing_message">Zmiana wiadomości</string>
     <string name="delete_message">Usunąć wiadomość?</string>
-    <string name="chat_options_title">Opcje czatu</string>
     <string name="mute_chat">Wycisz</string>
     <string name="unmute_chat">Włącz dźwięk</string>
     <string name="mute_not_synced">Wyciszenie nie zsynchronizowało się — na innych urządzeniach może nie zadziałać</string>
     <string name="delete_chat_title">Usunąć ten czat?</string>
+    <string name="delete_chats_title">Usunąć %1$d czatów?</string>
     <string name="delete_chat_media">Usuń też pobrane multimedia</string>
     <string name="delete_chat">Usuń czat</string>
     <string name="delete_for_everyone">Usuń u wszystkich</string>

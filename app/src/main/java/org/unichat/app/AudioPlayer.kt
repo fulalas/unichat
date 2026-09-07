@@ -1,17 +1,24 @@
 package org.unichat.app
 
 import android.content.Context
-import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.MediaPlayer
-import android.media.PlaybackParams
-import android.os.PowerManager
+import android.net.Uri
+import androidx.annotation.OptIn
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import java.io.File
 
+@OptIn(UnstableApi::class)
 object AudioPlayer {
     private var appContext: Context? = null
     private var audioManager: AudioManager? = null
-    private var player: MediaPlayer? = null
+    private var player: ExoPlayer? = null
 
     var currentPath: String? = null
         private set
@@ -35,6 +42,22 @@ object AudioPlayer {
     @Volatile var proximitySessionEnded: Boolean = false
         private set
 
+    /**
+     * True from the first clip of a chain until the chain is over — including
+     * the gap where one clip has finished and the next is still being looked
+     * up. The player is null for that gap, so reading `hasCurrent` as "playback
+     * over" released the proximity wake lock and the ear route between two
+     * voice notes: the screen lit up against the user's face and the next clip
+     * started on the speaker. Ended by [endSession], which every path that
+     * stops playback for good already goes through.
+     */
+    @Volatile var sessionActive: Boolean = false
+        private set
+
+    /** Survives the gap, unlike [currentChatId], which the player owns. */
+    @Volatile var sessionChatId: String = ""
+        private set
+
     var onStateChanged: (() -> Unit)? = null
     var onServiceStateChanged: (() -> Unit)? = null
     var onCompleted: ((String, String, String) -> Unit)? = null
@@ -45,15 +68,23 @@ object AudioPlayer {
         audioManager = appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }
 
-    val isPlaying: Boolean get() = player?.isPlaying == true
+    // Intent to play, not "audio is leaving the speaker right now": a player
+    // that is still buffering has playWhenReady set and would otherwise read as
+    // paused, flipping the button and re-triggering the proximity resume.
+    val isPlaying: Boolean
+        get() = player?.let {
+            it.playWhenReady &&
+                it.playbackState != Player.STATE_ENDED &&
+                it.playbackState != Player.STATE_IDLE
+        } == true
     val hasCurrent: Boolean get() = player != null
-    val positionMs: Int get() = try { player?.currentPosition ?: 0 } catch (e: Exception) { 0 }
-    val durationMs: Int get() = try { player?.duration ?: 0 } catch (e: Exception) { 0 }
+    val positionMs: Int get() = player?.currentPosition?.toInt() ?: 0
+    val durationMs: Int
+        get() = player?.duration?.takeIf { it != C.TIME_UNSET }?.toInt() ?: 0
 
     fun playPause(path: String, chatId: String, msgId: String) {
-        val p = player
-        if (p != null && currentMsgId == msgId && currentChatId == chatId) {
-            if (p.isPlaying) pause() else resume()
+        if (player != null && currentMsgId == msgId && currentChatId == chatId) {
+            if (isPlaying) pause() else resume()
             return
         }
         play(path, chatId, msgId)
@@ -65,9 +96,13 @@ object AudioPlayer {
      * it is not merely a fallback — it puts playback on the voice-call stream,
      * which is the stream the hardware volume keys drive while the screen is
      * blanked against your face. Routing media to the earpiece with
-     * setPreferredDevice kept the clip on the music stream, where the keys had
-     * nothing to act on. The cost is a fixed 1x rate at the ear; the speaker
-     * route still honours the speed pill.
+     * setPreferredDevice instead kept the clip on the music stream, where the
+     * keys had nothing to act on.
+     *
+     * The rate is applied in software ahead of the output track (ExoPlayer's
+     * Sonic stage), which is what lets that route honour the speed pill: the
+     * platform player asked its telephony track to stretch, the track quietly
+     * refused, and every clip held to an ear played at 1x.
      */
     fun play(
         path: String,
@@ -76,48 +111,29 @@ object AudioPlayer {
         startMs: Int = 0,
         useEarpiece: Boolean = proximityNear,
     ) {
-        stopInternal(resetRoute = false)
+        stopInternal(endSession = false)
         val commMode = useEarpiece
+        val context = appContext ?: return
         // Held outside the try so a failure part-way through setup still
-        // releases the native player: `player` is null here (stopInternal above
+        // releases the player: `player` is null here (stopInternal above
         // cleared it), so the catch's stopInternal cannot reach this instance.
-        var fresh: MediaPlayer? = null
+        var fresh: ExoPlayer? = null
         try {
-            val p = MediaPlayer()
+            val p = ExoPlayer.Builder(context).build()
             fresh = p
-            appContext?.let { p.setWakeMode(it, PowerManager.PARTIAL_WAKE_LOCK) }
+            p.setWakeMode(C.WAKE_MODE_LOCAL)
             applyRoute(commMode)
-            p.setAudioAttributes(buildAttributes(commMode))
-            p.setDataSource(path)
+            // false: focus is this object's business (see requestFocus), and
+            // ExoPlayer's own handling would duck where a voice note must pause
+            p.setAudioAttributes(playerAttributes(commMode), false)
+            if (commMode) preferEarpiece(p)
+            p.setPlaybackSpeed(speed)
+            p.addListener(playerListener(p, path))
+            p.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(path))))
             p.prepare()
-            p.setOnErrorListener { _, what, extra ->
-                // Without a listener the framework reports runtime errors (a
-                // decode failure, a file truncated mid-playback, a dead media
-                // server) to the completion listener instead, so a broken clip
-                // was indistinguishable from a finished one and silently
-                // auto-advanced the voice chain. Returning true keeps that from
-                // happening; playback of this clip is over either way.
-                android.util.Log.w("AudioPlayer", "playback error what=$what extra=$extra for $path")
-                stopInternal(resetRoute = true)
-                notifyState()
-                true
-            }
-            p.setOnCompletionListener {
-                val finishedPath = currentPath
-                val finishedChat = currentChatId
-                val finishedMsg = currentMsgId
-                stopInternal(resetRoute = false)
-                notifyState()
-                if (finishedPath != null) {
-                    try { onCompleted?.invoke(finishedPath, finishedChat, finishedMsg) } catch (e: Exception) {
-                        android.util.Log.e("AudioPlayer", "onCompleted listener threw", e)
-                    }
-                }
-            }
-            if (startMs > 0) p.seekTo(startMs)
+            if (startMs > 0) p.seekTo(startMs.toLong())
             requestFocus(commMode)
-            p.start()
-            applySpeed(p)
+            p.play()
             player = p
             fresh = null // ownership transferred; stopInternal releases it now
             currentPath = path
@@ -125,13 +141,56 @@ object AudioPlayer {
             currentMsgId = msgId
             earpiece = useEarpiece
             proximitySessionEnded = false
+            sessionActive = true
+            sessionChatId = chatId
             try { onPlayStarted?.invoke(path, chatId, msgId) } catch (e: Exception) {}
         } catch (e: Exception) {
             android.util.Log.w("AudioPlayer", "play failed for $path", e)
             try { fresh?.release() } catch (e2: Exception) {}
-            stopInternal(resetRoute = true)
+            stopInternal(endSession = true)
         }
         notifyState()
+    }
+
+    // Bound to the player it was attached to: a clip recreated on the other
+    // output (the proximity switch) leaves the old instance briefly alive, and
+    // its end-of-stream must not be taken for the new clip's.
+    private fun playerListener(p: ExoPlayer, path: String) = object : Player.Listener {
+        override fun onPlaybackStateChanged(state: Int) {
+            if (player !== p) return
+            when (state) {
+                Player.STATE_ENDED -> onClipEnded()
+                // the duration is only known once the file is ready, and the
+                // notification and seekbar are drawn from it
+                Player.STATE_READY -> notifyState()
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            if (player !== p) return
+            // Errors have their own path: reported as an end of stream, a
+            // decode failure or a file truncated mid-playback was
+            // indistinguishable from a finished clip and silently advanced the
+            // voice chain.
+            android.util.Log.w("AudioPlayer", "playback error for $path", error)
+            stopInternal(endSession = true)
+            notifyState()
+        }
+    }
+
+    private fun onClipEnded() {
+        val finishedPath = currentPath
+        val finishedChat = currentChatId
+        val finishedMsg = currentMsgId
+        // endSession = false: the session stays open across the gap, and the
+        // chain ends it if there is nothing left to play
+        stopInternal(endSession = false)
+        notifyState()
+        if (finishedPath != null) {
+            try { onCompleted?.invoke(finishedPath, finishedChat, finishedMsg) } catch (e: Exception) {
+                android.util.Log.e("AudioPlayer", "onCompleted listener threw", e)
+            }
+        }
     }
 
     fun cycleSpeed(): Float {
@@ -140,24 +199,22 @@ object AudioPlayer {
             1.5f -> 2f
             else -> 1f
         }
-        // Only a playing player accepts new PlaybackParams (setting them on a
-        // paused one starts playback on many devices); a speed picked while
-        // paused is applied by resume() instead, so the pill never lies.
-        player?.let { if (it.isPlaying) applySpeed(it) }
+        player?.setPlaybackSpeed(speed)
         notifyState()
         return speed
     }
 
-    private fun applySpeed(p: MediaPlayer) {
-        // Reading p.playbackParams first — as the getter — throws on a freshly
-        // start()ed player on many devices; the exception was swallowed,
-        // silently dropping the speed and resetting playback to 1x whenever a
-        // clip was recreated (e.g. the proximity switch to earpiece).
-        try { p.playbackParams = PlaybackParams().setSpeed(speed) } catch (e: Exception) {}
+    private fun preferEarpiece(p: ExoPlayer) {
+        val device = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            ?.firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+            ?: return
+        try { p.setPreferredAudioDevice(device) } catch (e: Exception) {
+            android.util.Log.w("AudioPlayer", "earpiece routing refused", e)
+        }
     }
 
     fun seekTo(ms: Int) {
-        try { player?.seekTo(ms) } catch (e: Exception) {}
+        try { player?.seekTo(ms.toLong()) } catch (e: Exception) {}
         if (ms == 0 && player != null && !isPlaying && !proximitySessionEnded) {
             proximitySessionEnded = true
             notifyState()
@@ -173,7 +230,7 @@ object AudioPlayer {
      */
     fun pause(userInitiated: Boolean = true) {
         val p = player ?: return
-        if (p.isPlaying) {
+        if (isPlaying) {
             p.pause()
             if (userInitiated) abandonFocus()
             notifyState()
@@ -182,17 +239,16 @@ object AudioPlayer {
 
     fun resume() {
         val p = player ?: return
-        if (p.isPlaying) return
+        if (isPlaying) return
         proximitySessionEnded = false
         if (earpiece != proximityNear) {
             val path = currentPath ?: return
-            play(path, currentChatId, currentMsgId, p.currentPosition)
+            play(path, currentChatId, currentMsgId, p.currentPosition.toInt())
         } else {
             // re-requested, not assumed: a permanent loss (another app took over
             // the audio) is what paused this clip in the first place
             requestFocus(earpiece && ownsAudioMode)
-            p.start()
-            applySpeed(p)
+            p.play()
             notifyState()
         }
     }
@@ -201,12 +257,12 @@ object AudioPlayer {
         val p = player ?: return
         val path = currentPath ?: return
         val chatId = currentChatId
-        val pos = (p.currentPosition - rewindMs).coerceAtLeast(0)
+        val pos = (p.currentPosition.toInt() - rewindMs).coerceAtLeast(0)
         play(path, chatId, currentMsgId, pos, useEarpiece = true)
     }
 
     fun stop() {
-        stopInternal(resetRoute = true)
+        stopInternal(endSession = true)
         notifyState()
     }
 
@@ -216,13 +272,23 @@ object AudioPlayer {
     // starting one on the media route did the same before it even played.
     private var ownsAudioMode = false
 
-    fun resetRoute() {
+    /**
+     * Playback is over for good: drop the ear route and the audio focus. Called
+     * by every path that ends a chain, so the service learns of it here — but
+     * only when the session was in fact open, since the service's own cleanup
+     * calls this too and an unconditional notify would bounce between them.
+     */
+    fun endSession() {
+        val wasActive = sessionActive
+        sessionActive = false
+        sessionChatId = ""
         earpiece = false
         releaseAudioMode()
         // Focus follows the route: it is deliberately kept across a chain of
-        // voice messages (stopInternal(resetRoute = false)), so whatever was
+        // voice messages (stopInternal(endSession = false)), so whatever was
         // playing before doesn't resume for the gap between two clips.
         abandonFocus()
+        if (wasActive) refreshServiceState()
     }
 
     val volumeStream: Int
@@ -285,7 +351,7 @@ object AudioPlayer {
                 if (commMode) AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
                 else AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
             )
-                .setAudioAttributes(buildAttributes(commMode))
+                .setAudioAttributes(focusAttributes(commMode))
                 // ducked speech is speech the user has to replay, so ask to be
                 // paused instead of turned down
                 .setWillPauseWhenDucked(true)
@@ -318,20 +384,20 @@ object AudioPlayer {
         }
     }
 
-    private fun stopInternal(resetRoute: Boolean) {
+    private fun stopInternal(endSession: Boolean) {
         player?.release()
         player = null
         currentPath = null
         currentChatId = ""
         currentMsgId = ""
-        if (resetRoute) resetRoute()
+        if (endSession) endSession()
     }
 
     private fun applyRoute(commMode: Boolean) {
         val am = audioManager ?: return
-        // Ear playback always takes this path (see play): only the media
-        // pipeline honors playback speed, so speaker playback must not use it,
-        // and it is the only case that touches the global audio mode.
+        // Ear playback always takes this path (see play): it is what puts the
+        // clip on the earpiece and the volume keys on the call stream, and the
+        // only case that touches the global audio mode.
         if (commMode) {
             am.mode = AudioManager.MODE_IN_COMMUNICATION
             ownsAudioMode = true
@@ -341,12 +407,19 @@ object AudioPlayer {
         }
     }
 
-    private fun buildAttributes(commMode: Boolean): AudioAttributes {
-        // The media route needs USAGE_MEDIA for tempo changes to take effect.
-        val b = AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-        b.setUsage(if (commMode) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA)
-        return b.build()
-    }
+    private fun playerAttributes(commMode: Boolean): AudioAttributes = AudioAttributes.Builder()
+        .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
+        .setUsage(if (commMode) C.USAGE_VOICE_COMMUNICATION else C.USAGE_MEDIA)
+        .build()
+
+    private fun focusAttributes(commMode: Boolean): android.media.AudioAttributes =
+        android.media.AudioAttributes.Builder()
+            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+            .setUsage(
+                if (commMode) android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION
+                else android.media.AudioAttributes.USAGE_MEDIA
+            )
+            .build()
 
     fun refreshServiceState() {
         try { onServiceStateChanged?.invoke() } catch (e: Exception) {

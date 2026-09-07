@@ -44,7 +44,7 @@ class MessageAdapter(
     private val onLinkPreviewClick: (String) -> Unit = {},
     private val onSelectionChanged: () -> Unit = {},
     private val onDragArm: () -> Unit = {},
-) : RecyclerView.Adapter<MessageAdapter.Holder>() {
+) : RecyclerView.Adapter<MessageAdapter.Holder>(), DragSelectAdapter {
 
     companion object {
         private const val FLASH_WINDOW_MS = 6000L
@@ -67,11 +67,14 @@ class MessageAdapter(
 
     fun indexOfMessage(msgId: String): Int = messages.indexOfFirst { it.id == msgId }
 
-    private val selected = LinkedHashMap<String, MessageRow>()
-    var selectionMode = false
-        private set
+    private val selection = Selection<MessageRow>(
+        rows = { messages }, idOf = { it.id },
+        notifyAt = { notifyItemChanged(it) }, onChanged = { onSelectionChanged() },
+    )
 
-    fun selectedCount(): Int = selected.size
+    val selectionMode: Boolean get() = selection.active
+
+    fun selectedCount(): Int = selection.count
 
     fun selectedMessages(): List<MessageRow> {
         // Built once per list version instead of scanning the whole loaded window
@@ -87,59 +90,28 @@ class MessageAdapter(
             for (i in messages.indices) m[messages[i].id] = i
             orderById = m
         }
-        return selected.values.map { byId[it.id] ?: it }
+        return selection.values.map { byId[it.id] ?: it }
             .sortedWith(compareBy({ it.timeSent }, { order[it.id] ?: Int.MAX_VALUE }))
     }
 
     private var rowsById: Map<String, MessageRow>? = null
     private var orderById: Map<String, Int>? = null
 
-    private fun isSelected(msg: MessageRow): Boolean = msg.id in selected
+    private fun isSelected(msg: MessageRow): Boolean = msg.id in selection
 
-    fun startSelection(msg: MessageRow) {
-        selectionMode = true
-        if (selected.put(msg.id, msg) == null) rebindRow(msg.id)
-        onSelectionChanged()
-    }
+    fun startSelection(msg: MessageRow) { selection.start(msg) }
 
-    fun toggleSelection(msg: MessageRow) {
-        if (selected.remove(msg.id) == null) selected[msg.id] = msg
-        rebindRow(msg.id)
-        if (selected.isEmpty()) selectionMode = false
-        onSelectionChanged()
-    }
+    fun toggleSelection(msg: MessageRow) = selection.toggle(msg)
 
-    fun clearSelection() {
-        if (!selectionMode && selected.isEmpty()) return
-        selectionMode = false
-        val ids = HashSet(selected.keys)
-        selected.clear()
-        // one pass, not a linear indexOfMessage scan per id: clearing a bulk
-        // drag-select in a search window ran millions of comparisons in a frame
-        messages.forEachIndexed { i, m -> if (m.id in ids) notifyItemChanged(i) }
-        onSelectionChanged()
-    }
+    fun clearSelection() = selection.clear()
 
-    private fun rebindRow(msgId: String) {
-        val i = indexOfMessage(msgId)
-        if (i >= 0) notifyItemChanged(i)
-    }
+    override fun setSelectedAt(pos: Int, sel: Boolean) = selection.setSelectedAt(pos, sel)
 
-    fun setSelectedAt(pos: Int, sel: Boolean): Boolean {
-        val msg = messages.getOrNull(pos) ?: return false
-        val changed = if (sel) selected.put(msg.id, msg) == null else selected.remove(msg.id) != null
-        if (changed) notifyItemChanged(pos)
-        return changed
-    }
+    override fun commitDragSelection() = selection.commitDragSelection()
 
-    fun commitDragSelection() {
-        selectionMode = selected.isNotEmpty()
-        onSelectionChanged()
-    }
+    override fun snapshotSelection(): Set<String> = selection.snapshotSelection()
 
-    fun snapshotSelection(): Set<String> = HashSet(selected.keys)
-
-    fun messageIdAt(pos: Int): String = messages.getOrNull(pos)?.id ?: ""
+    override fun idAt(pos: Int): String = selection.idAt(pos)
 
     private val differ = AsyncListDiffer(this, DIFF)
     private val messages: List<MessageRow> get() = differ.currentList
@@ -1073,7 +1045,10 @@ class MessageAdapter(
 
     fun onLinkPreviewReady(url: String) {
         val waiting = previewWaiters.remove(url) ?: return
-        for (id in waiting) rebindRow(id)
+        for (id in waiting) {
+            val i = indexOfMessage(id)
+            if (i >= 0) notifyItemChanged(i)
+        }
     }
 
     // Cheap necessary-condition test for Patterns.AUTOLINK_WEB_URL: it only ever

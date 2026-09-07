@@ -26,12 +26,16 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         private const val M_PRIVACY = 6
         private const val M_PROFILE = 7
         private const val M_ACCOUNTS = 9
+        private const val M_MUTE = 10
+        private const val M_DELETE = 11
+        private const val M_OPEN_OTHER = 12
     }
 
     private lateinit var chatList: RecyclerView
     private lateinit var lm: LinearLayoutManager
     private lateinit var emptyText: TextView
     private lateinit var adapter: ChatListAdapter
+    private var dragSelect: DragSelectTouchListener? = null
     private val io = Io.executor
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -57,13 +61,14 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             onAvatarClick = { chat ->
                 if (!PhoneBook.isPhoneEntry(chat.id)) Bridge.openAvatar(this, chat.id)
             },
-            onLongClick = { chat ->
-                if (!PhoneBook.isPhoneEntry(chat.id)) showChatOptions(chat)
-            },
+            onSelectionChanged = { onSelectionChanged() },
+            onDragArm = { dragSelect?.arm() },
         )
         lm = LinearLayoutManager(this)
         chatList.layoutManager = lm
         chatList.adapter = adapter
+        dragSelect = DragSelectTouchListener(adapter, onDragFinished = { onDragSelectFinished() })
+            .also { chatList.addOnItemTouchListener(it) }
         chatList.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             // on idle only: a fling would otherwise open and close a chat per row
             // it passes, each one a request
@@ -107,6 +112,9 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     override fun onStop() {
         super.onStop()
         started = false
+        // no ACTION_UP reaches a stopped list: the auto-scroll runnable would
+        // keep re-posting and the listener keep intercepting on return
+        dragSelect?.stopDrag()
         syncWatchedChats()
         chatList.removeCallbacks(midnightRefresh)
         chatList.removeCallbacks(bgReloadRelease)
@@ -203,7 +211,23 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         else it.copy(transientState = state, online = online)
     }
 
+    private var reloadAfterDrag = false
+
+    private fun onDragSelectFinished() {
+        if (!reloadAfterDrag) return
+        reloadAfterDrag = false
+        applyFilter()
+    }
+
     private fun submitChats(chats: List<ChatRow>) {
+        // A message arriving mid-drag reorders the list — and scrolls it to the
+        // top — under the finger, shifting every adapter position the drag
+        // range is expressed in, so it would select rows the finger never
+        // crossed. The rows keep their places until the finger is up.
+        if (dragSelect?.isDragging == true) {
+            reloadAfterDrag = true
+            return
+        }
         val atTop = !chatList.canScrollVertically(-1)
         adapter.submit(withChatStates(chats)) {
             if (atTop) chatList.scrollToPosition(0)
@@ -512,21 +536,74 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         return super.onOptionsItemSelected(item)
     }
 
-    private fun showChatOptions(chat: ChatRow) {
-        val muteLabel = getString(if (chat.muted) R.string.unmute_chat else R.string.mute_chat)
-        val items = arrayOf(
-            muteLabel, getString(R.string.open_on_other_account), getString(R.string.delete_chat)
-        )
-        AlertDialog.Builder(this)
-            .setTitle(R.string.chat_options_title)
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> Bridge.setMuted(chat.id, !chat.muted)
-                    1 -> openOnOtherAccount(chat)
-                    2 -> showDeleteChatDialog(chat)
-                }
+    private var actionMode: androidx.appcompat.view.ActionMode? = null
+
+    private fun onSelectionChanged() {
+        val count = adapter.selectedCount()
+        if (count == 0) {
+            actionMode?.finish()
+            return
+        }
+        if (actionMode == null) actionMode = startSupportActionMode(selectionCallback)
+        actionMode?.title = count.toString()
+        actionMode?.invalidate()
+    }
+
+    private val selectionCallback = object : androidx.appcompat.view.ActionMode.Callback {
+        override fun onCreateActionMode(mode: androidx.appcompat.view.ActionMode, menu: Menu): Boolean {
+            menu.add(0, M_MUTE, 0, R.string.mute_chat).apply {
+                setIcon(R.drawable.ic_mute)
+                setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
             }
-            .show()
+            menu.add(0, M_DELETE, 1, R.string.delete_chat).apply {
+                setIcon(R.drawable.ic_delete)
+                setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+            }
+            menu.add(0, M_OPEN_OTHER, 2, R.string.open_on_other_account)
+            return true
+        }
+
+        override fun onPrepareActionMode(mode: androidx.appcompat.view.ActionMode, menu: Menu): Boolean {
+            val chats = adapter.selectedChats()
+            // one label for the whole selection: unmute only when nothing in it
+            // is still unmuted
+            val unmuting = chats.all { it.muted }
+            menu.findItem(M_MUTE)?.apply {
+                setTitle(if (unmuting) R.string.unmute_chat else R.string.mute_chat)
+                // there is no crossed-out variant of the icon, and the mute one
+                // over an unmute action reads as the opposite of what it does —
+                // no icon puts the title in the bar instead
+                setIcon(if (unmuting) null else getDrawable(R.drawable.ic_mute))
+            }
+            menu.findItem(M_OPEN_OTHER)?.isVisible = chats.size == 1
+            return true
+        }
+
+        override fun onActionItemClicked(mode: androidx.appcompat.view.ActionMode, item: MenuItem): Boolean {
+            val chats = adapter.selectedChats()
+            if (chats.isEmpty()) return false
+            when (item.itemId) {
+                M_MUTE -> {
+                    val mute = !chats.all { it.muted }
+                    for (chat in chats) if (chat.muted != mute) Bridge.setMuted(chat.id, mute)
+                    mode.finish()
+                }
+                M_DELETE -> showDeleteChatDialog(chats)
+                M_OPEN_OTHER -> { openOnOtherAccount(chats[0]); mode.finish() }
+            }
+            return true
+        }
+
+        override fun onDestroyActionMode(mode: androidx.appcompat.view.ActionMode) {
+            actionMode = null
+            adapter.clearSelection()
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (adapter.selectionMode) adapter.clearSelection()
+        else @Suppress("DEPRECATION") super.onBackPressed()
     }
 
     /**
@@ -562,16 +639,20 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    private fun showDeleteChatDialog(chat: ChatRow) {
+    private fun showDeleteChatDialog(chats: List<ChatRow>) {
         val deleteMedia = booleanArrayOf(true)
+        val title =
+            if (chats.size == 1) getString(R.string.delete_chat_title)
+            else getString(R.string.delete_chats_title, chats.size)
         AlertDialog.Builder(this)
-            .setTitle(R.string.delete_chat_title)
+            .setTitle(title)
             .setMultiChoiceItems(
                 arrayOf(getString(R.string.delete_chat_media)), deleteMedia
             ) { _, _, isChecked -> deleteMedia[0] = isChecked }
             .setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(R.string.delete_chat) { _, _ ->
-                Bridge.deleteChat(chat.id, deleteMedia[0])
+                for (chat in chats) Bridge.deleteChat(chat.id, deleteMedia[0])
+                actionMode?.finish()
             }
             .show()
     }
