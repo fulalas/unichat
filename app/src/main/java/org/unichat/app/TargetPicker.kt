@@ -21,11 +21,6 @@ fun Activity.targetChoices(): Pair<List<String>, List<String>> {
     val ids = ArrayList<String>()
     val labels = ArrayList<String>()
     val chats = Bridge.visibleChats()
-    // Every notes-to-self stays pinned above the chats rather than ordered by
-    // recency: Telegram's is where files are sent, and ordering these by recency
-    // pushed it under the others on any day it went unused.
-    // selfIdBlocking, not selfId: both callers are on a worker thread, and a
-    // share that started this process gets here before TDLib knows who we are.
     val selves = Accounts.active()
         .map { it.selfIdBlocking() }
         .filter { it.isNotEmpty() }

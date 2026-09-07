@@ -26,9 +26,6 @@ class ShareActivity : BaseActivity() {
         }
         Bridge.connect()
 
-        // EXTRA_TEXT is a CharSequence: apps that share styled text put a
-        // Spanned there and getStringExtra just returns null for it, so the
-        // share fell through to "nothing to send" and closed without a word
         val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
         val streams = extraStreams(intent, action)
         val mime = intent.type ?: "*/*"
@@ -40,9 +37,6 @@ class ShareActivity : BaseActivity() {
                 return@execute
             }
             runOnUiThread {
-                // the picker is an AlertDialog: showing it once this window's
-                // token is gone (the user backed out of this invisible activity
-                // while the chat query ran) throws BadTokenException
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 showTargetPicker(R.string.share_to, labels, ids, onCancel = { finish() }) {
                     share(it, text, streams, mime)
@@ -67,24 +61,13 @@ class ShareActivity : BaseActivity() {
 
     private fun share(chatIds: List<String>, text: String?, streams: List<Uri>, mime: String) {
         if (chatIds.isEmpty()) { finish(); return }
-        // Io.files, not Io.executor: the loop below copies each shared item once
-        // per target chat, and on the shared serial worker that stalled every
-        // other screen's DB reads for the whole share.
         Io.files.execute {
             if (streams.isNotEmpty()) {
-                // A send deletes its own cacheDir staging file, so every (item,
-                // chat) pair needs its own copy of the master.
                 var staged = 0
                 var attempted = 0
-                // the caption used to ride item 0 unconditionally, so when that
-                // item failed to stage the user's text was silently sent to no one
                 val captioned = HashSet<String>()
                 for ((itemIndex, stream) in streams.withIndex()) {
                     val name = uriDisplayName(stream) ?: "shared"
-                    // Per item, not the intent's type: a multi-item share of
-                    // mixed content carries "*/*", and Bridge dispatches on the
-                    // mime — so every shared photo and video went out as a
-                    // document.
                     val itemMime = contentResolver.getType(stream) ?: mime
                     val master = copyUriToCache(stream, "share", "0_${itemIndex}_$name")
                     if (master == null) {
@@ -106,8 +89,6 @@ class ShareActivity : BaseActivity() {
                     runOnUiThread { failAndFinish(R.string.share_failed) }
                     return@execute
                 }
-                // a partial failure used to be invisible: the user saw the normal
-                // "Sending…" toast and never learned some chats got nothing
                 if (staged < attempted) {
                     runOnUiThread {
                         if (!isFinishing) {
@@ -149,8 +130,6 @@ class ShareActivity : BaseActivity() {
             src.inputStream().use { input -> out.outputStream().use { input.copyTo(it) } }
             out
         } catch (_: Exception) {
-            // a half-written copy left behind survives until the 24h startup
-            // sweep, and every retried share adds another
             out.delete()
             null
         }

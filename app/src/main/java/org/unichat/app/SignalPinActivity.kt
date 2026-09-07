@@ -6,10 +6,6 @@ import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 
-// Registering this app as the primary device minted a new master key, which
-// left the account's existing storage-service manifest — the contact list,
-// groups and settings — on the server but undecryptable. The PIN is the only
-// thing that unwraps the original key.
 class SignalPinActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -34,9 +30,6 @@ class SignalPinActivity : BaseActivity() {
             Signal.restoreFromPin(entered) { err ->
                 if (isFinishing || isDestroyed) return@restoreFromPin
                 if (err.isEmpty()) {
-                    // No count: the contacts are written by the sync's own
-                    // thread and land after this returns, so anything counted
-                    // here reads zero on the first restore.
                     Toast.makeText(this, R.string.signal_pin_ok, Toast.LENGTH_LONG).show()
                     finish()
                 } else {

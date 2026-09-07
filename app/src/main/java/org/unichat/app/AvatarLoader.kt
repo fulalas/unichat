@@ -15,9 +15,6 @@ import kotlin.math.min
 object AvatarLoader {
 
     private const val REFRESH_MS = 60 * 60 * 1000L
-    // A contact with no profile picture writes no file, so there is nothing to
-    // cache and every bind used to re-issue a network lookup through the
-    // bridge. Remember the miss for a while instead.
     private const val NO_AVATAR_MS = 30 * 60 * 1000L
 
     private val cache = newBitmapCache(32)
@@ -35,9 +32,6 @@ object AvatarLoader {
 
     private val placeholders = newBitmapCache(64)
 
-    // For the big header avatars. Off the shared serial worker: the full-size
-    // fetch blocks on the network (a 20s TDLib download, a timeout-less
-    // WhatsApp request) and held up every other screen's DB reads behind it.
     fun loadBig(
         activity: android.app.Activity, chatId: String, px: Int, into: (Bitmap?) -> Unit,
     ) {
@@ -51,14 +45,6 @@ object AvatarLoader {
         }
     }
 
-    // Two pools, because the two halves of a load have nothing in common:
-    // decoding an avatar the bridge already has on disk takes milliseconds,
-    // while asking the bridge for one it does not have blocks for a long time
-    // (a 20s TDLib download for tg: ids, a timeout-less HTTP request for
-    // WhatsApp ones). Sharing one pool meant four unreachable contacts pinned
-    // every thread and every cached row waited behind them — possibly forever.
-    // The fetch pool is deliberately small: it is network-bound work whose only
-    // job is to not starve anything else.
     private val decoder = Executors.newFixedThreadPool(4)
     private val fetcher = Executors.newFixedThreadPool(2)
     private val main = Handler(Looper.getMainLooper())
@@ -88,7 +74,6 @@ object AvatarLoader {
         val missed = missedAt[chatId]
         if (missed != null && System.currentTimeMillis() - missed < NO_AVATAR_MS) return
 
-        // a fetch for this id is already running; we are queued on it
         if (!requests.await(chatId, imageView, sizePx)) return
 
         if (cached != null) fetcher.execute { resolve(chatId, sizePx, cachedOnly = false) }
@@ -102,13 +87,6 @@ object AvatarLoader {
         var px = sizePx
         try {
             pending = requests.peek(chatId)
-            // Skip only when nothing holds a live view any more and the
-            // bitmap is already cached. Deliberately does NOT read
-            // imageView.tag: View is not thread-safe, and this runs on a
-            // worker. A view recycled onto another row still holds a live
-            // reference, so we may decode something momentarily off-screen —
-            // deliver() re-checks the tag on the main thread and simply
-            // won't paint it, and the decode still populates the cache.
             if (pending.isEmpty() && cache.get(chatId) != null) return
             px = pending.maxOfOrNull { it.payload } ?: sizePx
             val path =
@@ -122,11 +100,6 @@ object AvatarLoader {
                 forget(chatId)
                 return
             }
-            // Subsample on the way in: circleCrop scales to px (256 at most)
-            // anyway, so a full-resolution decode of an avatar the server allows
-            // up to 8 MiB allocated the whole bitmap just to throw it away.
-            // decodeSampled also catches OutOfMemoryError, which a bare decode
-            // on this pool let reach the thread's uncaught handler.
             val raw = ImageLoader.decodeSampled(path, px)
             if (raw == null) {
                 forget(chatId)
@@ -139,23 +112,14 @@ object AvatarLoader {
             delivering = true
             main.post { deliver(chatId, circled) }
         } catch (t: Throwable) {
-            // Bridge JNI calls and circleCrop's allocations can throw (OOM
-            // included); uncaught on this pool it took the whole process down.
             android.util.Log.e("AvatarLoader", "resolve failed for $chatId", t)
         } finally {
-            // Nothing will be painted, so this run's own waiters go; anything
-            // queued after its peek could not claim a run of its own, so it is
-            // re-fetched here instead of being dropped with them.
             if (!handedOff && !delivering && requests.settle(chatId, pending).isNotEmpty()) {
                 fetcher.execute { resolve(chatId, px, cachedOnly = false) }
             }
         }
     }
 
-    // The cached bitmap has to go with the miss: keeping it meant a picture the
-    // contact removed stayed on screen for the rest of the process's life,
-    // because every later bind took the cache-hit branch and the refresh always
-    // landed back here.
     private fun forget(chatId: String) {
         cache.remove(chatId)
         loadedAt.remove(chatId)
@@ -177,8 +141,6 @@ object AvatarLoader {
     fun initials(name: String, sizePx: Int): Bitmap = placeholder(name, name, sizePx)
 
     private fun placeholder(chatId: String, name: String, sizePx: Int): Bitmap {
-        // masked rather than abs(): abs(Int.MIN_VALUE) is negative, which would
-        // index out of the palette the moment its size stops dividing 2^31
         val color = placeholderColors[
             ((chatId.hashCode().toLong() and 0x7fffffffL) % placeholderColors.size).toInt()
         ]

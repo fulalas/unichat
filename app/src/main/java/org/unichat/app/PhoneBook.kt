@@ -6,10 +6,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.ContactsContract
 
-// A linked device only ever learns contacts through WhatsApp's synced contact
-// list, which trails the phone's address book — someone saved a minute ago is
-// simply not there yet, and used to be unfindable. Reading the address book
-// directly closes that gap.
 object PhoneBook {
 
     class Entry(val name: String, val number: String) {
@@ -41,8 +37,6 @@ object PhoneBook {
                 while (c.moveToNext() && out.size < limit) {
                     val name = c.getString(0) ?: continue
                     val number = normalize(c.getString(1) ?: continue)
-                    // one row per number, not per label: the same number saved
-                    // as both "mobile" and "work" comes back twice
                     if (number.isEmpty() || !seen.add(number)) continue
                     out.add(Entry(name, number))
                 }
@@ -51,9 +45,6 @@ object PhoneBook {
         return out
     }
 
-    // Feeds Signal's contact discovery, which has no other way to learn who the
-    // user knows: a freshly registered account holds no server-side contact
-    // list.
     fun allEntries(ctx: Context, limit: Int = 2000): List<Entry> {
         if (!granted(ctx)) return emptyList()
         val region = deviceRegion(ctx)
@@ -78,11 +69,6 @@ object PhoneBook {
         return out
     }
 
-    // Address-book numbers are mostly saved in local form, with no country
-    // code. [normalize] refuses to guess one, which is right when the result
-    // would open a chat, but for contact discovery it hid most of the address
-    // book. The platform formatter applies the device's own region, the same
-    // assumption the dialler makes.
     private fun toE164(raw: String, region: String): String {
         if (region.isNotEmpty()) {
             android.telephony.PhoneNumberUtils.formatNumberToE164(raw, region)?.let {
@@ -100,8 +86,6 @@ object PhoneBook {
             ?: java.util.Locale.getDefault().country).uppercase()
     }
 
-    // Anything without a country code is dropped rather than guessed at: a
-    // wrong guess would open a chat with a stranger.
     fun normalize(raw: String): String {
         val digits = raw.filter { it.isDigit() }
         if (digits.isEmpty()) return ""
@@ -116,9 +100,6 @@ object PhoneBook {
 
     class Picked(val name: String, val numbers: List<String>)
 
-    // Picks one PHONE NUMBER, not one person: the row it hands back carries the
-    // name too, and reading it is covered by the picker's own one-shot grant —
-    // so sending a contact works even when READ_CONTACTS was refused.
     fun pickIntent(): android.content.Intent = android.content.Intent(
         android.content.Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI
     )
@@ -159,17 +140,12 @@ object PhoneBook {
             )?.use { c ->
                 while (c.moveToNext()) {
                     val number = c.getString(0)?.trim().orEmpty()
-                    // one entry per number, not per label: the same number saved
-                    // as both "mobile" and "work" comes back twice
                     if (number.isNotEmpty() && seen.add(digitsOf(number))) into.add(number)
                 }
             }
         }
     }
 
-    // Deliberately carries no `waid=` parameter: that claims the number belongs
-    // to a specific WhatsApp account, and this app has not asked the server
-    // whether it does — a guessed one would send the recipient to a stranger.
     fun vcard(name: String, numbers: List<String>): String {
         val lines = ArrayList<String>()
         lines.add("BEGIN:VCARD")
@@ -178,7 +154,6 @@ object PhoneBook {
         lines.add("FN:${escapeVcard(name)}")
         for (n in numbers) lines.add("TEL;type=CELL;type=VOICE:${escapeVcard(n)}")
         lines.add("END:VCARD")
-        // RFC 2426 requires CRLF; strict receiving clients reject a bare-LF card
         return lines.joinToString("\r\n")
     }
 

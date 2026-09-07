@@ -5,17 +5,6 @@ import android.text.Spannable
 import android.text.SpannableStringBuilder
 import android.text.style.StyleSpan
 
-/**
- * WhatsApp has no formatting entities: `*bold*` and `_italic_` are carried
- * literally in the message body and every client renders them itself. So the
- * markers are what we store, and Telegram's entities are translated to and
- * from them at its own edge (see Tg.formattedText).
- *
- * A marker only opens when the character before it is not part of a word and
- * the one after it is not a space, and only closes under the mirror rule —
- * WhatsApp's own test, and the reason `snake_case`, `a*b`, `2 * 3` and URLs
- * with underscores stay literal instead of eating half the message.
- */
 object Markup {
     class Mark(val start: Int, val end: Int, val bold: Boolean)
 
@@ -27,8 +16,6 @@ object Markup {
         val out = StringBuilder()
         val marks = ArrayList<Mark>()
         scan(text, 0, text.length, out, marks)
-        // TDLib wants the entities in reading order, outer before inner; scan
-        // closes a run only after walking what is nested inside it
         marks.sortWith(compareBy({ it.start }, { it.start - it.end }))
         return out.toString() to marks
     }
@@ -47,8 +34,6 @@ object Markup {
     }
 
     fun withMarkers(plain: String, marks: List<Mark>): String {
-        // Telegram allows runs that cross (bold [0,5) with italic [3,8)); their
-        // markers fail closeOf's mirror rule and arrived as literal symbols
         val usable = ArrayList<Mark>()
         for (m in marks) {
             if (!readableBack(plain, m)) continue
@@ -60,7 +45,6 @@ object Markup {
         for (m in usable) {
             val marker = if (m.bold) BOLD else ITALIC
             at[m.start].append(marker)
-            // a run ending where another does must close from the inside out
             at[m.end].insert(0, marker)
         }
         val out = StringBuilder()
@@ -72,9 +56,6 @@ object Markup {
         return out.toString()
     }
 
-    // Markers cannot express a run that starts inside a word or is padded with
-    // spaces — parse would refuse to open one there — and Telegram entities can
-    // do both. Marking it anyway showed the asterisks instead of the styling.
     private fun readableBack(plain: String, m: Mark): Boolean {
         if (m.start < 0 || m.end > plain.length || m.end <= m.start) return false
         if (plain[m.start].isWhitespace() || plain[m.end - 1].isWhitespace()) return false

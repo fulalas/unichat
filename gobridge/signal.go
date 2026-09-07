@@ -33,28 +33,18 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Signal rides alongside WhatsApp in this package because gomobile binds one
-// aar per Go package: a second package would mean a second .so, and both would
-// then link their own copy of the Go runtime into the same process.
 
 type sgConn struct {
 	mu        sync.Mutex
 	client    *signalmeow.Client
 	device    *sgstore.Device
 	container *sgstore.Container
-	// Held so logout can close it: Container exposes no Close, and the caller
-	// deletes the whole directory straight afterwards.
 	sql      *sql.DB
 	listener EventListener
 	path     string
 	state    string
 	cancel   context.CancelFunc
-	// Held so leaving the screen closes the provisioning websocket instead of
-	// leaving it waiting for a scan.
 	linkCancel context.CancelFunc
-	// The storage-service sync covers saved contacts, but anyone else — and
-	// every group — is resolved lazily from the first message they send, which
-	// must not refetch on every later one.
 	known map[string]bool
 }
 
@@ -63,13 +53,8 @@ var (
 	sgSelf *sgConn
 )
 
-// Kotlin builds the same ids, so both sides must agree.
 const SgIDPrefix = "sg:"
 
-// Errors that reach the UI travel as codes, never as sentences: Kotlin maps them
-// through strings.xml, which is what makes them translatable. A code may carry
-// one argument after a ':'. Anything raised by signalmeow or the server has no
-// code of its own, so it rides behind "upstream:" and is shown verbatim.
 const (
 	sgErrNotInitialised = "not_initialised"
 	sgErrNoSession      = "no_session"
@@ -83,11 +68,6 @@ const (
 
 func sgUpstream(err error) string { return "upstream:" + err.Error() }
 
-// sgLookupFailed is a number lookup that could not be made, as opposed to "" —
-// "this number has no Signal account". Reported as "" it reached the user as
-// "Not on Signal", which is the one thing it must never say for a question
-// nobody asked. Kotlin tests for the same word (Bridge.NUMBER_LOOKUP_FAILED),
-// so both sides must agree.
 const sgLookupFailed = "failed"
 
 func sgRestoreError(err error) string {
@@ -138,8 +118,6 @@ func (c *sgConn) setState(state string) {
 	}
 }
 
-// stderr is not collected on Android, so signalmeow's zerolog output has to go
-// through OnLog to reach logcat.
 type sgLogWriter struct{ c *sgConn }
 
 func (w *sgLogWriter) Write(p []byte) (int, error) {
@@ -148,10 +126,6 @@ func (w *sgLogWriter) Write(p []byte) (int, error) {
 }
 
 func (c *sgConn) logger() zerolog.Logger {
-	// Info, not the zerolog default: signalmeow traces every storage-service
-	// record it handles, which on a real account means dumping the whole
-	// address book — names and phone numbers — into logcat, and drowning every
-	// other line in the process.
 	return zerolog.New(&sgLogWriter{c: c}).Level(zerolog.InfoLevel).With().Timestamp().Logger()
 }
 
@@ -173,10 +147,6 @@ func SignalInit(dataDir string, listener EventListener) bool {
 		c.log(LogError, "sqlite open error "+err.Error())
 		return false
 	}
-	// Closed on every failing path from here on. The handle only becomes
-	// reachable once sgSelf is published at the end, so a failure in between
-	// leaked the connection (and its file lock) with nothing able to close it —
-	// and Kotlin's init retries on a false return, opening another one.
 	opened := false
 	defer func() {
 		if !opened {
@@ -244,9 +214,6 @@ func SignalConnect() bool {
 	}
 
 	c.setState("connecting")
-	// One receive loop at a time, like SignalLinkStart's linkCancel:
-	// StartReceiveLoops has no re-entry guard, so a second connect orphaned the
-	// first loop's cancel and left duplicate loops delivering every event twice.
 	c.mu.Lock()
 	if c.cancel != nil {
 		c.cancel()
@@ -265,9 +232,6 @@ func SignalConnect() bool {
 	c.cancel = cancel
 	c.mu.Unlock()
 
-	// StartReceiveLoops returns before the socket is up, so the first status it
-	// reports is what settles this call. Buffered and written at most once, so
-	// the loop below never blocks on a caller that has already given up.
 	settled := make(chan bool, 1)
 	settle := func(ok bool) {
 		select {
@@ -284,12 +248,7 @@ func SignalConnect() bool {
 				settle(true)
 			case signalmeow.SignalConnectionEventDisconnected, signalmeow.SignalConnectionEventError:
 				c.setState("disconnected")
-				// Deliberately not settling: signalmeow reports a drop while it
-				// is still dialling, and reporting failure on the first one gave
-				// up on a connection that went on to come up.
 			case signalmeow.SignalConnectionEventLoggedOut:
-				// The primary device unlinked us. The stored keys are dead;
-				// keeping them would make every later connect fail the same way.
 				c.log(LogWarning, "unlinked by the primary device")
 				client.ClearKeysAndDisconnect(context.TODO())
 				c.dropDeadDevice()
@@ -297,7 +256,6 @@ func SignalConnect() bool {
 				settle(false)
 			}
 		}
-		// The loop only closes the channel when it has stopped for good.
 		settle(false)
 	}()
 
@@ -311,13 +269,6 @@ func SignalConnect() bool {
 	}
 }
 
-// Linking as a companion device is the only way to see the account's own
-// contact list. The primary hands over the account entropy pool in the
-// provisioning message, and that is what the storage service (contacts,
-// groups, settings) is encrypted with. Registering mints a fresh pool instead,
-// which leaves the account's existing contact list on the server unreadable —
-// so a registered account knows only the people number lookup can find, and
-// never anyone who hides their number.
 func SignalLinkStart(deviceName string) {
 	c := sgGet()
 	if c == nil {
@@ -325,9 +276,6 @@ func SignalLinkStart(deviceName string) {
 	}
 	c.mu.Lock()
 	container := c.container
-	// One at a time: leaving the previous websocket open meant two QR codes
-	// racing for the same screen, and a scan landing on the abandoned one
-	// linked the account behind the user's back.
 	if c.linkCancel != nil {
 		c.linkCancel()
 		c.linkCancel = nil
@@ -345,8 +293,6 @@ func SignalLinkStart(deviceName string) {
 	}
 	go func() {
 		defer cancel()
-		// allowBackup false: this client does not implement the backup
-		// transfer, and asking for one makes the primary wait on it.
 		for resp := range signalmeow.PerformProvisioning(ctx, container, deviceName, false) {
 			switch resp.State {
 			case signalmeow.StateProvisioningURLReceived:
@@ -403,10 +349,6 @@ func (c *sgConn) adoptLinkedDevice(ctx context.Context, aci uuid.UUID) {
 	c.setState("linked")
 }
 
-// Only a linked device can read the stored contact list: it is encrypted with
-// the account entropy pool the primary handed over. This is where everyone who
-// does not publish their phone number comes from — number lookup alone can
-// never see them.
 func SignalSyncContacts() bool {
 	c, client, device := sgActive()
 	if client == nil || device == nil {
@@ -417,9 +359,6 @@ func SignalSyncContacts() bool {
 		return false
 	}
 	ctx := context.TODO()
-	// Read the manifest before syncing, because SyncStorage swallows its own
-	// errors: whether it decrypts is the only proof the stored key is the
-	// account's, and that is what tells the UI the list is available at all.
 	update, err := client.FetchStorage(ctx, device.MasterKey, 0, nil)
 	if err != nil {
 		c.log(LogWarning, "stored contact list not readable: "+err.Error())
@@ -429,14 +368,10 @@ func SignalSyncContacts() bool {
 		c.log(LogInfo, "no stored contact list for this account")
 		return false
 	}
-	// ProcessStorage, not SyncStorage: that would fetch the whole manifest and
-	// every record again, on every connect, for what we already have here.
 	if err := client.ProcessStorage(ctx, update); err != nil {
 		c.log(LogWarning, "storage sync failed: "+err.Error())
 		return false
 	}
-	// Now that the account record is in, the account's own row can carry the
-	// name the user actually set rather than their number.
 	c.publishSelfContact()
 	c.listener.OnContactsSynced()
 	return true
@@ -472,9 +407,6 @@ func SignalLogout() {
 	if client != nil {
 		client.ClearKeysAndDisconnect(ctx)
 	}
-	// Clearing the keys is not a logout on its own: the device row survives, so
-	// the next start finds it, reports a live session and offers no way to link
-	// again — an account permanently unable to connect.
 	if device != nil && container != nil {
 		if err := container.DeleteDevice(ctx, &device.DeviceData); err != nil {
 			c.log(LogWarning, "failed to delete device row: "+err.Error())
@@ -488,10 +420,6 @@ func SignalLogout() {
 	c.mu.Unlock()
 	c.setState("logged_out")
 
-	// Kotlin deletes the whole signal directory straight after this; leaving the
-	// sqlite handle open on the unlinked file meant a re-registration in the same
-	// session wrote into a database that no longer existed, and vanished at the
-	// next launch.
 	if handle != nil {
 		if err := handle.Close(); err != nil {
 			c.log(LogWarning, "failed to close signal store: "+err.Error())
@@ -543,15 +471,6 @@ func sgFailSend(c *sgConn, what, chatId, msgID string, err error) string {
 func sgSend(c *sgConn, client *signalmeow.Client, chatId string, msg *signalpb.Content) error {
 	ctx := context.TODO()
 	bare := sgBareID(chatId)
-	// Note to self goes out as a sync message rather than a normal send: there
-	// is no other party to encrypt for, so SendMessage fails with an empty
-	// recipient.
-	//
-	// Best-effort: with no other device on the account there is nothing to
-	// deliver to and the server answers 400, which is not a failure of the
-	// message — the local copy the caller stores is the whole of a note to self
-	// on a single-device account. Reporting the error instead made every send
-	// to yourself fail.
 	if selfID := SignalSelfID(); selfID != "" && chatId == selfID {
 		if err := client.SendNoteToSelf(ctx, msg); err != nil {
 			c.log(LogDebug, "note to self not synced (no other devices?): "+err.Error())
@@ -579,19 +498,8 @@ func sgSend(c *sgConn, client *signalmeow.Client, chatId string, msg *signalpb.C
 	return nil
 }
 
-// Contact discovery returns an ACI only for people who have shared it; everyone
-// else comes back PNI-only, and a PNI is a perfectly good address to message —
-// it just is not interchangeable with an ACI, so the id has to say which one it
-// holds.
-//
-// Spelled exactly as libsignalgo.ServiceID.String() spells it, uppercase,
-// because incoming 1:1 chat ids come straight from that. A lowercase constant
-// here silently forked every PNI contact in two: the discovered row under one
-// spelling and their messages under the other, with replies routed at a
-// nonexistent group because the id no longer parsed as a UUID.
 const sgPNIPrefix = "PNI:"
 
-// Both spellings, so ids written by an older build still resolve.
 func sgTrimPNI(bare string) (string, bool) {
 	for _, prefix := range []string{sgPNIPrefix, "pni:"} {
 		if strings.HasPrefix(bare, prefix) {
@@ -622,8 +530,6 @@ func sgRecipientID(aci, pni uuid.UUID) string {
 
 func sgBareID(chatId string) string { return strings.TrimPrefix(chatId, SgIDPrefix) }
 
-// A 1:1 chat is keyed by the other party's ACI, which is a UUID; a group is
-// keyed by its base64 group identifier, which is not.
 func sgAsGroup(bare string) (types.GroupIdentifier, bool) {
 	trimmed, _ := sgTrimPNI(bare)
 	if _, err := uuid.Parse(trimmed); err == nil {
@@ -714,9 +620,6 @@ func (c *sgConn) handleEvent(rawEvt events.SignalEvent) bool {
 	return true
 }
 
-// Clearing the keys alone is not a logout: the row survives, so the next start
-// finds it, reports a live session, skips the setup screen and every connect
-// fails — an account permanently unable to link again.
 func (c *sgConn) dropDeadDevice() {
 	c.mu.Lock()
 	device, container := c.device, c.container
@@ -729,8 +632,6 @@ func (c *sgConn) dropDeadDevice() {
 	}
 }
 
-// Signal sends no chat list on registration, so without the storage-service
-// sync the app knows a name only for people who have already messaged it.
 func (c *sgConn) handleContactList(evt *events.ContactList) {
 	c.mu.Lock()
 	device := c.device
@@ -739,9 +640,6 @@ func (c *sgConn) handleContactList(evt *events.ContactList) {
 		if r == nil || r.ACI == uuid.Nil {
 			continue
 		}
-		// The account's own record is in the list too. Reported as an ordinary
-		// contact it cleared the is_self flag, which is what keeps the user out
-		// of their own contact search.
 		isSelf := device != nil && r.ACI == device.ACI
 		name := r.ContactName
 		if name == "" {
@@ -757,16 +655,10 @@ func (c *sgConn) handleContactList(evt *events.ContactList) {
 		c.mu.Lock()
 		c.known[id] = true
 		c.mu.Unlock()
-		// Bare digits: the contacts table stores the number without '+', and the
-		// query that reads it adds one back.
 		c.listener.OnContact(id, name, strings.TrimPrefix(r.E164, "+"), isSelf, false, true)
 	}
 }
 
-// A receipt names the reader and the timestamps read, never the chat, so the id
-// passed on is the reader and the app has to find the row by message id. Signal
-// sends READ only when the reader has read receipts on; DELIVERY says nothing
-// about the tick.
 func (c *sgConn) handleReceipt(evt *events.Receipt) {
 	var report func(chatId string, msgId string)
 	switch evt.Content.GetType() {
@@ -783,16 +675,8 @@ func (c *sgConn) handleReceipt(evt *events.Receipt) {
 	}
 }
 
-// Marking is cumulative, so the first one the app can find settles the chat and
-// the rest update nothing; the tail is only there because the newest message
-// may never have reached this device, and a read whose message is unknown is
-// dropped.
 const sgReadSelfDepth = 8
 
-// Like a receipt, the read sync names the message's author instead of the chat.
-// One sync repeats every timestamp the other device read — hundreds after it
-// catches up — and reporting each one blocked the receive loop for a JNI hop
-// and a write transaction apiece.
 func (c *sgConn) handleReadSelf(evt *events.ReadSelf) {
 	byAuthor := make(map[string][]uint64, len(evt.Messages))
 	order := make([]string, 0, len(evt.Messages))
@@ -860,9 +744,6 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 			quotedText = q.GetText()
 		}
 		if atts := content.GetAttachments(); len(atts) > 0 {
-			// One row per attachment, because the app's message model carries a
-			// single file. The caption rides on the first, matching how the
-			// WhatsApp side splits an album.
 			for i, att := range atts {
 				kind := sgAttachmentKind(att.GetContentType(), att.GetFlags()&uint32(signalpb.AttachmentPointer_VOICE_MESSAGE) != 0)
 				caption := ""
@@ -880,9 +761,6 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 			}
 			return
 		}
-		// Before the empty-body test: a card carries no body of its own, so it
-		// fell through and the message went missing outright — no bubble, not
-		// even a placeholder.
 		if text := sgContactText(content.GetContact()); text != "" {
 			c.listener.OnMessage(
 				chatID, msgID, senderID, text,
@@ -900,8 +778,6 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 			return
 		}
 		if body == "" {
-			// Reactions, receipts and timer changes all arrive as DataMessages
-			// with no body; those are handled elsewhere or not at all yet.
 			return
 		}
 		c.listener.OnMessage(
@@ -910,10 +786,6 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 		)
 	case *signalpb.EditMessage:
 		edited := content.GetDataMessage()
-		// timeSent 0, not the edit's own timestamp: upsertMessage overwrites
-		// time_sent with anything above zero, which moved the edited message to
-		// the bottom of the chat. The WhatsApp path does the same for the same
-		// reason.
 		c.listener.OnMessage(
 			chatID, fmt.Sprintf("%d", content.GetTargetSentTimestamp()), senderID,
 			sgWithMarkers(edited.GetBody(), edited.GetBodyRanges()), fromMe, 0, false, "", "",
@@ -928,8 +800,6 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 	}
 }
 
-// Signal sends no contact list to a linked device, so without this every chat
-// would show as a bare UUID.
 func (c *sgConn) resolveName(client *signalmeow.Client, bare string, chatID string) {
 	c.mu.Lock()
 	seen := c.known[chatID]
@@ -952,8 +822,6 @@ func (c *sgConn) resolveName(client *signalmeow.Client, bare string, chatID stri
 		}
 	}
 	if name == "" {
-		// Marked known only on success: a transient fetch failure used to leave
-		// the chat titled with a raw UUID for the rest of the process.
 		return
 	}
 	c.mu.Lock()
@@ -965,8 +833,6 @@ func (c *sgConn) resolveName(client *signalmeow.Client, bare string, chatID stri
 
 var sgRegSession string
 
-// Signal permits exactly one primary per number, so registering here
-// unregisters the official app on it.
 func SignalRegisterStart(number string) string {
 	c := sgGet()
 	if c == nil {
@@ -996,7 +862,6 @@ func SignalRegisterSubmitCaptcha(token string) string {
 	return ""
 }
 
-// transport is "sms" or "voice"; the server rejects anything else.
 func SignalRegisterRequestCode(transport string) string {
 	if sgRegSession == "" {
 		return sgErrNoSession
@@ -1041,11 +906,6 @@ func SignalRegisterSubmitCode(number string, code string) string {
 	return ""
 }
 
-// A freshly registered primary has nothing to sync: storage-service data is
-// encrypted with a master key derived from the account entropy pool, and
-// registering mints a new one, so the previous manifest is unreadable by
-// design. Discovery against the device's own address book is the only way this
-// account learns who is on Signal.
 func SignalDiscoverContacts(numbers string) string {
 	c, client, device := sgActive()
 	if client == nil || device == nil {
@@ -1064,9 +924,6 @@ func SignalDiscoverContacts(numbers string) string {
 		}
 		e164s = append(e164s, n)
 	}
-	// Always include our own number. It is guaranteed to be registered, so if
-	// the lookup comes back without it the request itself is wrong rather than
-	// the address book simply having no Signal users in it.
 	selfDigits := strings.TrimPrefix(client.Store.Number, "+")
 	selfE164, selfErr := strconv.ParseUint(selfDigits, 10, 64)
 	if selfErr == nil {
@@ -1088,38 +945,20 @@ func SignalDiscoverContacts(numbers string) string {
 	type sgHit struct{ id, phone string }
 	hits := make([]sgHit, 0, len(resp))
 
-	// One transaction for the whole address book. A phone with a thousand
-	// contacts meant a thousand separate sqlite commits, each one an fsync.
-	// Only the store writes are in here: the OnContact callbacks below cross
-	// into Kotlin, which must not happen with the transaction open.
 	store := func(ctx context.Context) error {
-		// Reset first: DoTxn does not retry today, but if it ever did, appending
-		// again would report every discovered contact twice.
 		hits = hits[:0]
 		found = 0
 		for e164, entry := range resp {
 			if entry.ACI == uuid.Nil && entry.PNI == uuid.Nil {
 				continue
 			}
-			// Our own number is only in the lookup as a control that the request
-			// worked. Reporting it as a contact would overwrite the self row
-			// publishSelfContact wrote — with a blank name, since the address
-			// book rarely holds your own number — and the note-to-self chat
-			// would fall back to showing a bare ACI.
 			id := sgRecipientID(entry.ACI, entry.PNI)
 			if id == selfID {
 				found++
 				continue
 			}
-			// Digits only: the contacts table stores a bare number and the query
-			// that reads it prepends the '+', so storing one here showed "++34…".
 			phone := fmt.Sprintf("%d", e164)
-			// Teach signalmeow the number/ACI/PNI mapping, so a later message
-			// from this person is recognised as the same recipient instead of
-			// opening a second chat.
 			if _, err := client.Store.RecipientStore.UpdateRecipientE164(ctx, entry.ACI, entry.PNI, "+"+phone); err != nil {
-				// Not fatal, and never returned: one unstorable recipient must
-				// not roll back the whole address book.
 				c.log(LogWarning, "failed to store discovered recipient: "+err.Error())
 			}
 			hits = append(hits, sgHit{id: id, phone: phone})
@@ -1127,8 +966,6 @@ func SignalDiscoverContacts(numbers string) string {
 		}
 		return nil
 	}
-	// signalmeow's own helper, not a bare DoTxn: it takes the same contact lock
-	// every other batch write to the recipient table takes.
 	if err := device.DoContactTxn(ctx, store); err != nil {
 		return sgUpstream(err)
 	}
@@ -1139,9 +976,6 @@ func SignalDiscoverContacts(numbers string) string {
 	}
 	c.mu.Unlock()
 	for _, hit := range hits {
-		// Name is left empty: the address book already has one for this number,
-		// and the app prefers its own contact name over anything a service
-		// reports. Sending a blank one here would overwrite it.
 		c.listener.OnContact(hit.id, "", hit.phone, false, false, true)
 	}
 	_, selfFound := resp[selfE164]
@@ -1153,8 +987,6 @@ func SignalDiscoverContacts(numbers string) string {
 	return ""
 }
 
-// Signal announces nothing about the account to itself, so without this the
-// self chat had no name and fell back to showing a bare ACI.
 func (c *sgConn) publishSelfContact() {
 	c.mu.Lock()
 	client, device := c.client, c.device
@@ -1162,11 +994,6 @@ func (c *sgConn) publishSelfContact() {
 	if client == nil || device == nil {
 		return
 	}
-	// The account record, first: it is the account's own name as the user set
-	// it, and it survives this app minting a new profile key at registration —
-	// which is exactly what makes the profile fetch below come back nameless.
-	// It only exists after a storage sync, so this is published again once one
-	// has run.
 	name := ""
 	if rec := client.Store.AccountRecord; rec != nil {
 		name = strings.TrimSpace(rec.GetGivenName() + " " + rec.GetFamilyName())
@@ -1180,22 +1007,12 @@ func (c *sgConn) publishSelfContact() {
 		}
 	}
 	if name == "" {
-		// A number is a poor label, but it is the account and it is readable —
-		// unlike the bare ACI the row falls back to with nothing at all.
 		name = device.Number
 	}
 	c.listener.OnContact(SignalSelfID(), name, strings.TrimPrefix(device.Number, "+"), true, false, true)
 }
 
-// Signal keeps formatting apart from the text: the body travels plain and a
-// BodyRange marks each styled span, in UTF-16 units. The app stores WhatsApp's
-// `*bold*` / `_italic_` markers in the text itself (see Markup.kt), so the two
-// are translated here at Signal's edge, the way Tg.kt does it for Telegram.
-// Sent without this, the markers reached the other side as literal asterisks
-// and underscores.
 
-// The spec Kotlin builds in Markup.parse: "start,length,b" runs joined by ';',
-// offsets already in UTF-16 units.
 func sgStyleRanges(spec string) []*signalpb.BodyRange {
 	if spec == "" {
 		return nil
@@ -1225,15 +1042,10 @@ func sgStyleRanges(spec string) []*signalpb.BodyRange {
 	return out
 }
 
-// Mirrors Markup.withMarkers, including its rule about which runs can be
-// written as markers at all: one that starts inside a word or is padded with
-// spaces would render as literal punctuation rather than styling, so it is left
-// plain instead.
 func sgWithMarkers(body string, ranges []*signalpb.BodyRange) string {
 	if body == "" || len(ranges) == 0 {
 		return body
 	}
-	// UTF-16 throughout, because that is what the offsets count.
 	units := utf16.Encode([]rune(body))
 	at := make([][]rune, len(units)+1)
 	used := false
@@ -1249,17 +1061,12 @@ func sgWithMarkers(body string, ranges []*signalpb.BodyRange) string {
 		case signalpb.BodyRange_ITALIC:
 			marker = '_'
 		default:
-			// Spoiler, strikethrough and monospace have no marker the app
-			// stores, so the text stays plain rather than gaining a stray one.
 			continue
 		}
 		start, end := int(r.GetStart()), int(r.GetStart()+r.GetLength())
 		if start < 0 || end > len(units) || end <= start {
 			continue
 		}
-		// A boundary on a low surrogate puts the marker between the halves of a
-		// pair, and utf16.Decode then turns both halves into U+FFFD. The space
-		// and word checks below cannot catch it: a lone surrogate is neither.
 		if isLowSurrogate(units[start]) || (end < len(units) && isLowSurrogate(units[end])) {
 			continue
 		}
@@ -1273,7 +1080,6 @@ func sgWithMarkers(body string, ranges []*signalpb.BodyRange) string {
 			continue
 		}
 		at[start] = append(at[start], marker)
-		// A run ending where another does must close from the inside out.
 		at[end] = append([]rune{marker}, at[end]...)
 		used = true
 	}
@@ -1299,13 +1105,6 @@ func isWordUnit(u uint16) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-// Signal never delivers a message back to the device that sent it — the sync
-// message goes to the account's OTHER devices only. Without this the bubble
-// never appeared and the chat looked like nothing had been sent. WhatsApp does
-// the same thing (see echoSentMessage).
-// A Signal message id IS the millisecond timestamp it was stamped with, and the
-// two must agree exactly: a mismatch makes every receipt, reaction and edit for
-// that message unmatchable.
 func sgTimestamp(msgId string) uint64 {
 	if ts, err := strconv.ParseUint(msgId, 10, 64); err == nil && ts > 0 {
 		return ts
@@ -1368,9 +1167,6 @@ func SignalSendAttachment(
 	timestamp := sgTimestamp(msgId)
 	msgID := fmt.Sprintf("%d", timestamp)
 
-	// Refuse before the allocation: UploadAttachment only takes the whole file
-	// as one []byte in this process's heap, so an unbounded read could OOM-kill
-	// the app. The cap matches Signal's own ~100 MB attachment limit.
 	info, serr := os.Stat(path)
 	if serr != nil {
 		return sgFailSend(c, "attachment stat", chatId, msgID, serr)
@@ -1393,8 +1189,6 @@ func SignalSendAttachment(
 	ptr.ContentType = proto.String(mime)
 	ptr.FileName = proto.String(filepath.Base(path))
 	if voiceNote {
-		// The flag is what makes Signal render a waveform instead of a file
-		// attachment; the MIME type alone is not enough.
 		flags := uint32(signalpb.AttachmentPointer_VOICE_MESSAGE)
 		ptr.Flags = &flags
 	}
@@ -1406,8 +1200,6 @@ func SignalSendAttachment(
 	if caption != "" {
 		dm.Body = proto.String(caption)
 	}
-	// Second echo, for the download reference the upload just produced: the row
-	// exists since before the upload and the upsert only fills an empty file_id.
 	sgEchoOwn(c, chatId, msgID, caption, sgAttachmentKind(mime, voiceNote), sgFileID(ptr), int64(timestamp/1000))
 	if err := sgSend(c, client, chatId, &signalpb.Content{
 		Content: &signalpb.Content_DataMessage{DataMessage: dm},
@@ -1417,8 +1209,6 @@ func SignalSendAttachment(
 	return msgID
 }
 
-// OnFileDownloaded follows the WhatsApp download contract: status 2 is success,
-// 3 is failure.
 func SignalDownloadAttachment(chatId string, msgId string, fileId string) {
 	c := sgGet()
 	if c == nil {
@@ -1470,9 +1260,6 @@ func sgExtFor(mime string) string {
 	return extFromMime(mime, "")
 }
 
-// A reaction or remote-delete points at the ACI of whoever wrote the message
-// being acted on. In a 1:1 chat that is either us or the other party; in a
-// group it has to come from the stored row.
 func sgTargetAuthor(chatId, senderId string) string {
 	bare, _ := sgTrimPNI(sgAuthorID(chatId, senderId))
 	return bare
@@ -1536,8 +1323,6 @@ func SignalDelete(chatId string, msgId string) {
 	c.listener.OnMessageDeleted(chatId, msgId)
 }
 
-// Linked devices identify a conversation by the messages it ended with as well
-// as by its id, so a delete carrying none of them is dropped on the other side.
 func SignalDeleteChat(chatId string, recent string) bool {
 	c, client, device := sgActive()
 	if client == nil || device == nil {
@@ -1557,9 +1342,6 @@ func SignalDeleteChat(chatId string, recent string) bool {
 		if err != nil {
 			continue
 		}
-		// Through ServiceIDFromString, not uuid.Parse: a PNI author encodes as
-		// 17 bytes with a type prefix, and the bare 16 the UUID gives is the ACI
-		// spelling — the linked device would not match the entry.
 		author, err := libsignalgo.ServiceIDFromString(sgAuthorID(chatId, senderId))
 		if err != nil {
 			continue
@@ -1592,8 +1374,6 @@ func SignalDeleteChat(chatId string, recent string) bool {
 	return true
 }
 
-// Signal keys an edit by the original's timestamp and carries a fresh one for
-// the edit itself.
 func SignalEdit(chatId string, msgId string, newText string, styles string, fileIds string) bool {
 	c, client, _ := sgActive()
 	if client == nil {
@@ -1664,18 +1444,6 @@ type sgKeyReading struct {
 	key  []byte
 }
 
-// What SVR2 hands back is not self-describing, and one wrong layer produces a
-// key that fails no differently from a wrong PIN, so every plausible reading is
-// tried.
-//
-// libsignal's hierarchy (rust/account-keys/src/lib.rs) is
-//
-//	AccountEntropyPool  --HKDF(info=svrMasterKeyInfo)-->  SvrKey  --HMAC(label)-->  storage key
-//
-// and only the SvrKey is supposed to be in SVR2. Signal has changed what it
-// stores there more than once, though, and the account's records may predate the
-// entropy pool entirely, so the pool readings are tried too: the storage
-// manifest authenticates the answer, so a wrong guess costs one request.
 func sgKeyReadings(candidates [][]byte) []sgKeyReading {
 	const svrMasterKeyInfo = "20240801_SIGNAL_SVR_MASTER_KEY"
 	out := make([]sgKeyReading, 0, len(candidates)*3)
@@ -1684,9 +1452,6 @@ func sgKeyReadings(candidates [][]byte) []sgKeyReading {
 		if derived, err := sgHKDF(raw, svrMasterKeyInfo); err == nil {
 			out = append(out, sgKeyReading{name: "entropy pool", key: derived})
 		}
-		// The pool is 64 characters of [0-9a-z], and 32 bytes written out in hex
-		// is exactly that, so a record holding the pool's bytes has to be spelt
-		// back out before the derivation sees it.
 		if hexed, err := sgHKDF([]byte(hex.EncodeToString(raw)), svrMasterKeyInfo); err == nil {
 			out = append(out, sgKeyReading{name: "entropy pool as hex", key: hexed})
 		}
@@ -1703,10 +1468,6 @@ func sgHKDF(ikm []byte, info string) ([]byte, error) {
 	return out, nil
 }
 
-// Registering minted a fresh master key, so the account's existing storage
-// manifest stayed on the server unreadable — contacts the user has talked to
-// but who are not discoverable by phone number were invisible. SVR2 holds the
-// original key.
 func SignalRestoreFromPIN(pin string) string {
 	c, client, device := sgActive()
 	if client == nil || device == nil {
@@ -1719,14 +1480,9 @@ func SignalRestoreFromPIN(pin string) string {
 		return sgRestoreError(err)
 	}
 
-	// Settle which reading of the payload is the real key by using it: only the
-	// right one decrypts the account's storage manifest.
 	var masterKey []byte
 	var lastErr error
 	for _, candidate := range sgKeyReadings(candidates) {
-		// update != nil as well: the server answers 204 when it holds no
-		// manifest, which is not the same as this key opening one — taking it
-		// for success stored whichever reading happened to be tried first.
 		if update, err := client.FetchStorage(ctx, candidate.key, 0, nil); err == nil && update != nil {
 			masterKey = candidate.key
 			c.log(LogInfo, "storage manifest opened with the "+candidate.name+" reading")
@@ -1753,8 +1509,6 @@ func SignalRestoreFromPIN(pin string) string {
 		c.log(LogError, "failed to store recovered key: "+err.Error())
 		return sgErrStoreFailed
 	}
-	// SyncStorage walks the manifest and raises a ContactList event, which is
-	// what actually fills the contact table.
 	client.SyncStorage(ctx)
 	c.log(LogInfo, "master key recovered from SVR2, storage sync started")
 	return ""
@@ -1786,8 +1540,6 @@ func SignalMyAbout() string {
 	return ""
 }
 
-// Name and about go together: Signal's profile endpoint replaces every field at
-// once, so sending one alone would blank the other.
 func SignalSetProfile(name string, about string, discoverable bool) bool {
 	c, client, _ := sgActive()
 	if client == nil {
@@ -1812,8 +1564,6 @@ func SignalSetDiscoverable(discoverable bool) bool {
 	return true
 }
 
-// Signal keys everything by ACI, so the number is not recoverable from the self
-// id.
 func SignalMyPhone() string {
 	c := sgGet()
 	if c == nil {
@@ -1827,15 +1577,8 @@ func SignalMyPhone() string {
 	return c.device.Number
 }
 
-// Deliberately strict — the whole body must be the link, in the exact form
-// Bridge.kt's MAP_LINK_PREFIX links — because any looser match would swallow a plain
-// message that merely mentions a map.
 func sgParseMapLink(body string) (float64, float64, bool) {
 	coords, hasPrefix := strings.CutPrefix(strings.TrimSpace(body), sgMapLinkPrefix)
-	// CutPrefix's own flag, not a comparison against the untrimmed body: that
-	// test passed for any message with surrounding whitespace and no prefix at
-	// all, so a plain "-23.5505,-46.6333\n" became a location card and the text
-	// the person actually wrote was thrown away.
 	if !hasPrefix {
 		return 0, 0, false
 	}
@@ -1859,8 +1602,6 @@ func sgParseMapLink(body string) (float64, float64, bool) {
 
 const sgMapLinkPrefix = "https://maps.google.com/?q="
 
-// "name\nnumber…" is the body shape the app's contact row, its preview and the
-// Add-contact action all read back — the same one SignalSendContact writes.
 func sgContactText(cards []*signalpb.DataMessage_Contact) string {
 	var people []string
 	for _, card := range cards {
@@ -1877,8 +1618,6 @@ func sgContactText(cards []*signalpb.DataMessage_Contact) string {
 			people = append(people, strings.Join(lines, "\n"))
 		}
 	}
-	// A blank line between people, so the app never reads the next person's name
-	// as another number of the one before. The WhatsApp side splits the same way.
 	return strings.Join(people, "\n\n")
 }
 
@@ -1900,23 +1639,17 @@ func sgContactName(card *signalpb.DataMessage_Contact) string {
 	if org := card.GetOrganization(); org != "" {
 		return org
 	}
-	// No name at all still has to render as something: an empty body would make
-	// the row fall back to "no body" and vanish, which is the bug this fixes.
 	if len(card.GetNumber()) > 0 {
 		return card.GetNumber()[0].GetValue()
 	}
 	return ""
 }
 
-// Going through SignalSendTextQuoted instead left the sender looking at a raw
-// URL while the recipient saw a card — and a later forward of that row took the
-// plain-text path.
 func SignalSendLocation(chatId string, msgId string, latitude float64, longitude float64) string {
 	c, client, _ := sgActive()
 	if client == nil {
 		return ""
 	}
-	// Must match Bridge.kt's MAP_LINK_PREFIX and sgParseMapLink exactly, in both directions.
 	text := fmt.Sprintf("%s%.6f,%.6f", sgMapLinkPrefix, latitude, longitude)
 	timestamp := sgTimestamp(msgId)
 	dm := &signalpb.DataMessage{Body: proto.String(text), Timestamp: &timestamp}
@@ -1949,8 +1682,6 @@ func SignalSendContact(chatId string, msgId string, name string, numbers string)
 		return ""
 	}
 
-	// The whole display name goes in givenName: the app carries one name string,
-	// and splitting it on whitespace would guess wrong for most of the world.
 	timestamp := sgTimestamp(msgId)
 	dm := &signalpb.DataMessage{
 		Timestamp: &timestamp,
@@ -1984,10 +1715,6 @@ func SignalLookupNumber(number string) string {
 	if !ok || (entry.ACI == uuid.Nil && entry.PNI == uuid.Nil) {
 		return ""
 	}
-	// Take the id from the MERGED recipient, not straight from the lookup.
-	// Discovery often answers PNI-only, while an existing chat with the same
-	// person is keyed by the ACI learned when they messaged us — using the
-	// lookup's own answer opened a second, empty chat beside the real one.
 	aci, pni := entry.ACI, entry.PNI
 	if merged, err := client.Store.RecipientStore.UpdateRecipientE164(
 		context.TODO(), aci, pni, "+"+number,

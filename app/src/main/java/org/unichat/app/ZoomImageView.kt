@@ -75,18 +75,12 @@ class ZoomImageView @JvmOverloads constructor(
     )
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        // The gesture must be claimed from the pager: a pinch IS horizontal
-        // movement, so at fit-to-screen the pager intercepted the second finger
-        // and turned a zoom into a page swipe; and once zoomed in every drag
-        // belongs to the image, so paging must not start at all.
         val pinching = event.pointerCount > 1 || scaleDetector.isInProgress
         if (pinching || zoom > 1f) parent?.requestDisallowInterceptTouchEvent(true)
 
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
 
-        // Checked after the detectors have run, so a pinch ending at 1x hands
-        // paging back immediately rather than one gesture later.
         if (event.actionMasked == MotionEvent.ACTION_UP ||
             event.actionMasked == MotionEvent.ACTION_CANCEL
         ) {
@@ -95,9 +89,6 @@ class ZoomImageView @JvmOverloads constructor(
         return true
     }
 
-    // accessibility services (TalkBack, Switch Access) and key events activate
-    // views via performClick, never through touch events — route it to the
-    // same single-tap action so the viewer stays dismissible for them
     override fun performClick(): Boolean {
         super.performClick()
         onSingleTap?.invoke()
@@ -124,7 +115,6 @@ class ZoomImageView @JvmOverloads constructor(
         apply()
     }
 
-    // Frame-driven (not an Animator, so it ignores the system animator scale).
     private fun animateZoomTo(target: Float, fx: Float, fy: Float) {
         val start = SystemClock.uptimeMillis()
         val from = zoom
@@ -141,11 +131,6 @@ class ZoomImageView @JvmOverloads constructor(
         postOnAnimation(tick)
     }
 
-    /**
-     * ViewPager2 asks this before claiming a horizontal drag. A zoomed-in image
-     * must answer yes in BOTH directions: handing the gesture over at an edge
-     * meant a zoomed photo paged one way but not the other.
-     */
     override fun canScrollHorizontally(direction: Int): Boolean = zoom > 1f
 
     fun reset() {

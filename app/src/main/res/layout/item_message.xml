@@ -293,8 +293,6 @@
             android:textSize="15sp"
             android:textColorLink="?attr/chatAccent" />
 
-        <!-- The accent bar down the left edge is the background, so the card
-             needs no extra view for it. -->
         <LinearLayout
             android:id="@+id/linkPreview"
             android:layout_width="wrap_content"
@@ -340,8 +338,6 @@
                 android:textSize="14sp"
                 android:visibility="gone" />
 
-            <!-- Sized in code once the picture is decoded (LinkPreview.applyBounds):
-                 the card's width by the picture's own proportions. -->
             <ImageView
                 android:id="@+id/linkImage"
                 android:layout_width="wrap_content"
@@ -361,8 +357,6 @@
             android:textSize="11sp"
             android:layout_marginTop="2dp" />
 
-        <!-- dividers via showDividers, not match_parent Views: a match_parent
-             child inflates the wrap_content bubble to full screen width -->
         <LinearLayout
             android:id="@+id/contactActions"
             android:layout_width="wrap_content"

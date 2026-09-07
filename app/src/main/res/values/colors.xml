@@ -6,9 +6,6 @@
     <color name="bubble_in">#F5F6F6</color>
     <color name="bubble_out">#D2E7FA</color>
     <color name="accent">#2481CC</color>
-    <!-- Launcher icon only: no values-night copy — launchers cache icon
-         bitmaps, so a night variant leaves stale/mixed icons after a theme
-         switch. -->
     <color name="ic_launcher_background">#2481CC</color>
     <color name="text_primary">#111B21</color>
     <color name="text_secondary">#667781</color>
@@ -17,8 +14,6 @@
     <color name="quote_flash">#4D2481CC</color>
     <color name="msg_selected">#332481CC</color>
 
-    <!-- Signal's own brand blue is unusable here: it reads as Telegram. Violet
-         is the one strong hue left once blue and green are taken. -->
     <color name="accent_sg">#6D28D9</color>
     <color name="bubble_out_sg">#E5DBFA</color>
     <color name="quote_flash_sg">#4D6D28D9</color>

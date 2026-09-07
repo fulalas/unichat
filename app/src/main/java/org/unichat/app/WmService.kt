@@ -88,12 +88,6 @@ class WmService : Service() {
             ACTION_NOTIF_DISMISSED ->
                 intent.getStringExtra("chatId")?.let { Notifications.onDismissed(this, it) }
             else -> {
-                // Off the main thread: init() opens the Go sqlstore and runs its
-                // migrations (and is @Synchronized, so it can also wait on the
-                // warm-up thread), and hasSession() is a blocking JNI call. The
-                // foreground notification is already up, so nothing here is
-                // holding the start deadline. init() is idempotent, so the extra
-                // thread of a START_STICKY restart costs nothing.
                 val app = applicationContext
                 Thread({
                     if (Bridge.init(app) && Bridge.hasSession()) Bridge.connect()
@@ -103,10 +97,6 @@ class WmService : Service() {
         return START_STICKY
     }
 
-    // Android 15+ caps some foreground-service types (dataSync) at ~6h/24h and
-    // calls this when the budget runs out; not handling it is a
-    // ForegroundServiceDidNotStopInTimeException kill. The connection is
-    // declared as specialUse (untimed), so this is only a backstop.
     override fun onTimeout(startId: Int, fgsType: Int) {
         ensureForeground()
     }
@@ -120,10 +110,6 @@ class WmService : Service() {
         mediaSession = null
         stopPositionTicker()
         main.removeCallbacks(blankRelease)
-        // Nothing else owns these: the media notification would otherwise stay
-        // in the shade with dead play/pause actions, and the audio mode would
-        // stay in MODE_IN_COMMUNICATION, pinning other apps' audio to the
-        // voice-call stream.
         getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_MEDIA)
         AudioPlayer.stop()
     }
@@ -140,9 +126,6 @@ class WmService : Service() {
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .build()
-        // specialUse, not dataSync: a companion-device connection has to stay up
-        // indefinitely, and dataSync is capped at ~6h/24h on Android 15+ (after
-        // which the platform kills the app).
         startForeground(
             NOTIFICATION_CONN, notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
@@ -180,12 +163,7 @@ class WmService : Service() {
             stopPositionTicker()
             getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_MEDIA)
             updateProximity()
-            // ensure the system audio mode never stays in communication mode
-            // after playback ends, regardless of how it ended
             AudioPlayer.endSession()
-            // drop the cached title so the next clip re-resolves it: a contact
-            // sync that names a previously unnamed chat used to leave the old
-            // "+15551234567" on the lock screen for the service's whole life
             mediaTitleChatId = null
             return
         }
@@ -247,8 +225,6 @@ class WmService : Service() {
                         PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SEEK_TO or
                         PlaybackState.ACTION_SKIP_TO_NEXT or PlaybackState.ACTION_STOP
                 )
-                // real playback rate, so the system extrapolates the position
-                // correctly at 1.5x/2x instead of drifting behind between ticks
                 .setState(
                     state, AudioPlayer.positionMs.toLong(),
                     if (AudioPlayer.isPlaying) AudioPlayer.speed else 0f
@@ -349,8 +325,6 @@ class WmService : Service() {
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
-    // A screen blanked by OUR OWN wake lock still counts as usable, otherwise
-    // the "far" transition stops working once the phone is at the ear.
     private fun updateProximity() {
         val screenUsable = getSystemService(PowerManager::class.java).isInteractive ||
             proximityWakeLock?.isHeld == true
@@ -372,8 +346,6 @@ class WmService : Service() {
         updateProximity()
     }
 
-    // A screen-off the user asked for must disarm the sensor; the one our own
-    // wake lock causes must not. Audio keeps running either way.
     private val screenReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -395,7 +367,6 @@ class WmService : Service() {
     private fun unregisterProximity() {
         if (!proximityRegistered) return
         proximityRegistered = false
-        // no playback -> assume "away" so the next manual play uses the speaker
         AudioPlayer.proximityNear = false
         lastNear = false
         sensorManager?.unregisterListener(proximityListener)

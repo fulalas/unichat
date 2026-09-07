@@ -24,7 +24,6 @@ class PrivacyActivity : BaseActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         proto = intent.getStringExtra("proto") ?: ProtoPicker.WA
-        // must precede any view inflation
         applyProtocolTheme(proto)
         setContentView(R.layout.activity_privacy)
         supportActionBar?.apply {
@@ -50,8 +49,6 @@ class PrivacyActivity : BaseActivity() {
         rowAbout.visibility = if ("status" in keys) View.VISIBLE else View.GONE
         rowAbout.setOnClickListener { chooseThreeWay(R.string.privacy_about, "status") }
 
-        // Signal has no per-audience choices — a profile is visible to anyone
-        // you message — so its one profile-shaped question takes this row.
         when {
             "profile" in keys -> rowProfile.setOnClickListener {
                 chooseThreeWay(R.string.privacy_profile_photo, "profile")
@@ -129,8 +126,6 @@ class PrivacyActivity : BaseActivity() {
             .show()
     }
 
-    // Telegram derives "who can see me online" from the last-seen answer, so
-    // only an account that says it has the follow-up is asked for it.
     private fun chooseLastSeenAndOnline() {
         if (!loaded) return
         if ("online" !in keys) {

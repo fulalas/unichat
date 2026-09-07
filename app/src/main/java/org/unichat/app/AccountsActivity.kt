@@ -12,10 +12,6 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.SwitchCompat
 
-/**
- * Every protocol is listed whether or not it is linked: the old overflow entry
- * hid itself once two accounts existed, which made a third protocol unusable.
- */
 class AccountsActivity : BaseActivity(), Bridge.UiListener {
 
     private lateinit var list: LinearLayout
@@ -34,10 +30,6 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
         render()
     }
 
-    // Kept per protocol so a state change repaints one row. Rebuilding the whole
-    // list tore the switch down from inside its own OnCheckedChangeListener, and
-    // an account-state event landing mid-gesture destroyed the thumb under the
-    // finger.
     private val rows = HashMap<String, View>()
 
     private fun render() {
@@ -72,8 +64,6 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
             enabled -> getString(R.string.account_active)
             else -> getString(R.string.account_paused)
         }
-        // Signal keeps the contact list behind the account PIN, and registering
-        // leaves it locked, so the recovery has to be reachable from here.
         if (proto == ProtoPicker.SG && linked) {
             row.setOnClickListener {
                 startActivity(Intent(this, SignalPinActivity::class.java))
@@ -94,8 +84,6 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
             if (linked) View.VISIBLE else View.GONE
         val toggle = row.findViewById<SwitchCompat>(R.id.accountSwitch)
         toggle.visibility = if (linked) View.VISIBLE else View.GONE
-        // Set the state before the listener, or restoring it here fires the
-        // listener and immediately toggles the account again.
         toggle.setOnCheckedChangeListener(null)
         toggle.isChecked = enabled
         toggle.setOnCheckedChangeListener { _, checked -> setEnabled(proto, checked) }
@@ -128,10 +116,6 @@ class AccountsActivity : BaseActivity(), Bridge.UiListener {
 
     private fun remove(proto: String, name: String) {
         Accounts.of(proto).logout()
-        // Do NOT delete the protocol's directory here: logout only queues work on
-        // that protocol's own executor, so wiping the tree from this thread pulled
-        // the files out from under a running TDLib and an open Signal sqlite
-        // handle. Each protocol clears its own storage as part of logging out.
         Prefs.clearProtoEnabled(this, proto)
         Toast.makeText(this, getString(R.string.account_removed, name), Toast.LENGTH_SHORT).show()
         render()

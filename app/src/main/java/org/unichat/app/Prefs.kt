@@ -34,26 +34,16 @@ object Prefs {
     fun setFontScale(ctx: Context, scale: Float) =
         prefs(ctx).edit().putFloat(KEY_FONT, scale.coerceIn(FONT_MIN, FONT_MAX)).apply()
 
-    // Persisted, unlike Bridge's in-memory copy, because search uses it to tell
-    // you it really did read everything — an answer that must survive a
-    // restart.
     fun historyComplete(ctx: Context, chatId: String): Boolean =
         prefs(ctx).getBoolean(KEY_COMPLETE + chatId, false)
 
     fun setHistoryComplete(ctx: Context, chatId: String) =
         prefs(ctx).edit().putBoolean(KEY_COMPLETE + chatId, true).apply()
 
-    // A deleted or re-linked account re-syncs from nothing, and a search still
-    // promising it had read everything would be exactly the false comfort this
-    // replaced.
     fun clearHistoryComplete(ctx: Context, chatId: String) {
         prefs(ctx).edit().remove(KEY_COMPLETE + chatId).apply()
     }
 
-    // Takes a predicate rather than clearing the lot: unlinking one account
-    // must not touch the chats of an account that is still linked. Drafts and
-    // anchors included because a re-linked account inherited the old sync's
-    // message text and anchors pointing at ids that no longer exist.
     fun clearChatPrefsWhere(ctx: Context, matches: (String) -> Boolean) {
         val p = prefs(ctx)
         val e = p.edit()
@@ -75,10 +65,6 @@ object Prefs {
         e.apply()
     }
 
-    // Persisted because it otherwise costs a getMe round trip after TDLib
-    // authorizes: a share sheet that starts the process asks for it in the same
-    // breath, and got "tg:0" — a target that cannot be sent to and opens an
-    // empty chat.
     fun tgSelfId(ctx: Context): Long = prefs(ctx).getLong(KEY_TG_SELF, 0L)
 
     fun setTgSelfId(ctx: Context, id: Long) =
@@ -99,8 +85,6 @@ object Prefs {
     fun setSgDiscoverable(ctx: Context, on: Boolean) =
         prefs(ctx).edit().putBoolean(KEY_SG_DISCOVERABLE, on).apply()
 
-    // Honoured locally only: the account record that would publish it lives in
-    // the storage service, which this account cannot write yet.
     fun sgReadReceipts(ctx: Context): Boolean =
         prefs(ctx).getBoolean(KEY_SG_READ_RECEIPTS, true)
 

@@ -41,19 +41,9 @@ private const val UNREAD_REACTION_PAGE = 100
     private val listed = ConcurrentHashMap.newKeySet<Long>()
 
     private val executor = Executors.newSingleThreadExecutor()
-    // Unbounded paging work — export, sync-all, seek, the initial chat-list
-    // load. These occupy a thread for minutes at a time, so they must not sit
-    // on `executor`, where they would stall opening a chat, muting or logging
-    // out for the whole run.
     private val pager = Executors.newSingleThreadExecutor()
-    // On the pager, downloads queued behind the startup chat-list load and every
-    // history page — with a blocking request each, a screenful of photos took
-    // minutes to appear.
     private val downloader = Executors.newFixedThreadPool(3)
 
-    // Kept off Io.executor, the app-wide serial worker every screen's DB reads
-    // share: one request() can block for 15s, which would stall the chat list
-    // behind it.
     val io: java.util.concurrent.ExecutorService = Executors.newSingleThreadExecutor()
 
     internal fun <T> async(work: () -> T, onResult: (T) -> Unit) = io.execute {
@@ -64,54 +54,25 @@ private const val UNREAD_REACTION_PAGE = 100
     private val pending = ConcurrentHashMap<Long, Pair<CountDownLatch, Array<JSONObject?>>>()
     private val nextExtra = AtomicLong(1)
 
-    // openChat is fire-and-forget and TDLib rejects it until it is authorized, so
-    // a cold start straight onto a chat (notification tap, share) lost the open
-    // for the whole visit — and with it every typing/recording action, which
-    // TDLib delivers for a private chat only while the chat is open. Keep what
-    // the screens asked for and replay it once TDLib is ready.
     @Volatile private var ready = false
     @Volatile private var readyLatch = CountDownLatch(1)
     private val openCounts = ConcurrentHashMap<String, Int>()
 
     private val readInbox = ConcurrentHashMap<Long, Long>()
     private val readOutbox = ConcurrentHashMap<Long, Long>()
-    // A set of waiting messages per file id, not a single one: TDLib dedups
-    // files by remote id, so the same sticker or a re-sent photo shares one file
-    // id across messages, and keeping only the last one left the earlier bubbles
-    // stuck on a spinner forever.
     private val fileTargets = ConcurrentHashMap<Int, MutableSet<Pair<String, String>>>()
     private val historyBusy = CopyOnWriteArraySet<String>()
     private val historyExhausted = CopyOnWriteArraySet<String>()
-    // Messages already re-fetched once by the placeholder repair. A content
-    // type this build still does not map re-stores the SAME "[Type]" text, so
-    // without this it was deleted and re-inserted on every chat open and every
-    // history page — churning rowids (the order tiebreaker), rewriting its
-    // reactions, and eating the repair budget that stale voice notes need.
     private val repairAttempted: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    // updateMessageContent re-fetches the message off the serial executor, so a
-    // logout wipe or a deletion can land while its request is in flight. Both
-    // bump this from the executor (or ahead of queueing onto it) and the store
-    // is dropped once its generation has moved on — otherwise the re-fetch
-    // re-inserted the message after the wipe, which showed up as a ghost chat
-    // from the account just unlinked, and brought a deleted message back.
     private val refetchGen = AtomicLong(0)
 
     fun hasSession(): Boolean = appContext?.let { Prefs.tgLinked(it) } == true
 
-    // Empty, never "tg:0", while the id is unknown: callers either compare it
-    // (no chat matches "") or offer it as a send target, and a target of tg:0
-    // fails the send and opens an empty chat.
     fun selfId(): String = if (myId == 0L) "" else idFor(myId)
 
-    // Blocking; worker threads only. A share sheet starts the process and asks
-    // for its send targets straight away, so leaving out the notes-to-self entry
-    // (or offering it as tg:0) is what the first share of a session used to get.
     fun selfIdBlocking(): String {
         selfId().let { if (it.isNotEmpty()) return it }
-        // Short budgets: this runs on Io.executor, the serial worker every
-        // screen's DB reads share, so waiting out the full request timeout here
-        // freezes the rest of the app rather than just this picker.
         if (!awaitReady(5_000)) return ""
         if (myId == 0L) fetchMe(3_000)
         return selfId()
@@ -127,10 +88,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 .getPackageInfo(context.packageName, 0).versionName ?: appVersion
         }
         clientId = TdJson.createClientId()
-        // Errors only. TDLib's default dumps every query, every message body and
-        // every contact into logcat: thousands of lines a second, which costs
-        // real CPU, leaks the address book to any log reader, and evicts the
-        // app's own lines from the buffer within seconds.
         send(JSONObject().put("@type", "setLogVerbosityLevel").put("new_verbosity_level", 1))
         Thread({ receiveLoop() }, "tg-receive").start()
         send(JSONObject().put("@type", "getOption").put("name", "version"))
@@ -141,8 +98,6 @@ private const val UNREAD_REACTION_PAGE = 100
         if (id >= 0) TdJson.send(id, obj.toString())
     }
 
-    // Blocking; never on the login path — the auth requests themselves run
-    // before this can be satisfied and would sit here until the timeout.
     private fun awaitReady(timeoutMs: Long = 20_000): Boolean {
         if (ready) return true
         if (!hasSession()) return false
@@ -226,12 +181,6 @@ private const val UNREAD_REACTION_PAGE = 100
             "authorizationStateReady" -> {
                 ctx?.let { Prefs.setTgLinked(it, true) }
                 readyLatch.countDown()
-                // `ready` flips on the executor, where openChat and closeChat
-                // run. Flipped here instead, an openChat already queued could
-                // read it and send the open that this replay also sends, leaving
-                // TDLib one open ahead of us — and the chat open for good, since
-                // only one close ever follows. The guard also keeps a repeated
-                // authorizationStateReady from replaying everything twice.
                 executor.execute {
                     if (!ready) {
                         ready = true
@@ -239,19 +188,12 @@ private const val UNREAD_REACTION_PAGE = 100
                     }
                 }
                 Bridge.notifyTgAuth("ready", "")
-                // Reapply a pause chosen in Manage accounts: TDLib comes up
-                // online every run, so the setting has to be pushed each time.
                 appContext?.let {
                     if (!Prefs.protoEnabled(it, ProtoPicker.TG)) setNetworkEnabled(false)
                 }
                 onReady()
             }
             "authorizationStateClosed" -> {
-                // logout completed: TDLib wiped its database AND its files
-                // directory, so every cached path/id below now points at
-                // something that no longer exists. Left in place they surfaced
-                // as the previous account's avatars, a permanently "exhausted"
-                // history and a stale selfId after the next login.
                 ready = false
                 readyLatch = CountDownLatch(1)
                 openCounts.clear()
@@ -276,18 +218,12 @@ private const val UNREAD_REACTION_PAGE = 100
                     Bridge.db.clearTgData()
                     Bridge.notifyChatsChanged()
                 }
-                // a fresh client is needed after close
                 clientId = TdJson.createClientId()
                 send(JSONObject().put("@type", "getOption").put("name", "version"))
             }
         }
     }
 
-    // Every auth step goes through request(), not send(): TDLib reports a wrong
-    // code / wrong password / rejected number as an error object, and an error
-    // carries the "@extra" of the request it answers. Sent fire-and-forget it
-    // matched no update and was dropped, so a mistyped code left the login
-    // screen waiting forever with no way to retry.
     private fun authStep(req: JSONObject, failState: String) {
         if (request(req) == null) {
             Bridge.notifyTgAuth(failState, lastError.ifEmpty { "" })
@@ -296,16 +232,12 @@ private const val UNREAD_REACTION_PAGE = 100
 
     @Volatile private var lastError: String = ""
 
-    // TDLib's error "message" is a code, not a sentence: the ones a person can
-    // act on are translated here, anything else is shown behind a label so it
-    // stays diagnosable.
     fun authErrorText(ctx: Context, message: String): String = when {
         message.isEmpty() -> ctx.getString(R.string.tg_auth_failed)
         message.startsWith("PHONE_NUMBER_INVALID") -> ctx.getString(R.string.tg_err_phone_invalid)
         message.startsWith("PHONE_CODE_INVALID") -> ctx.getString(R.string.tg_err_code_invalid)
         message.startsWith("PHONE_CODE_EXPIRED") -> ctx.getString(R.string.tg_err_code_expired)
         message.startsWith("PASSWORD_HASH_INVALID") -> ctx.getString(R.string.tg_err_password_invalid)
-        // FLOOD_WAIT_<seconds>: the wait is the only part worth reading.
         message.startsWith("FLOOD_WAIT_") ->
             message.removePrefix("FLOOD_WAIT_").toIntOrNull()?.let {
                 ctx.resources.getQuantityString(R.plurals.tg_err_flood, it, it)
@@ -341,8 +273,6 @@ private const val UNREAD_REACTION_PAGE = 100
         appContext?.let { Prefs.setTgLinked(it, false) }
     }
 
-    // TDLib has no disconnect: telling it the device is offline is how you stop
-    // it talking to the network without logging out and losing the session.
     fun setNetworkEnabled(enabled: Boolean) = executor.execute {
         send(
             JSONObject().put("@type", "setNetworkType").put(
@@ -385,10 +315,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 Bridge.notifyAccountState(ProtoPicker.TG, state)
             }
             "updateNewChat" -> onNewChat(obj.getJSONObject("chat"))
-            // A photo change invalidates the path we memoised for that chat —
-            // TDLib writes the new picture to a different file and deletes the
-            // old one, so without this the list kept showing the previous photo
-            // (or the initials placeholder once the file was gone).
             "updateChatPhoto" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
                 avatarPaths.remove(chatId)
@@ -396,8 +322,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 Bridge.notifyChatsChanged()
             }
             "updateChatTitle" -> {
-                // renameChat, not upsertChat: the latter writes `archived` too,
-                // and passing a placeholder false here un-archived the chat
                 Bridge.db.renameChat(idFor(obj.getLong("chat_id")), obj.optString("title"))
                 Bridge.notifyChatsChanged()
             }
@@ -414,11 +338,6 @@ private const val UNREAD_REACTION_PAGE = 100
             "updateMessageContent" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
                 val msgId = obj.getLong("message_id")
-                // pager, not executor: a live-location peer emits this every few
-                // seconds, and each blocking getMessage on the serial executor
-                // stalled chat opens and logout for minutes on a slow network.
-                // Only the request, though: the store goes back onto the
-                // executor, guarded by the generation read here.
                 val gen = refetchGen.get()
                 pager.execute {
                     val fresh = request(
@@ -432,7 +351,7 @@ private const val UNREAD_REACTION_PAGE = 100
                     }
                 }
             }
-            "updateMessageEdited" -> { /* content update arrives separately */ }
+            "updateMessageEdited" -> {  }
             "updateMessageSendSucceeded" -> {
                 val msg = obj.getJSONObject("message")
                 val oldId = obj.getLong("old_message_id")
@@ -443,14 +362,11 @@ private const val UNREAD_REACTION_PAGE = 100
             }
             "updateMessageSendFailed" -> {
                 val msg = obj.getJSONObject("message")
-                // No toast here: onMessageSendFailed raises one for the first
-                // failure only, and this one fired again for every retry.
                 Bridge.onMessageSendFailed(
                     idFor(msg.getLong("chat_id")), obj.getLong("old_message_id").toString()
                 )
             }
             "updateDeleteMessages" -> {
-                // is_permanent=false events are cache drops, not real deletions
                 if (obj.optBoolean("is_permanent")) {
                     val chatId = idFor(obj.getLong("chat_id"))
                     val ids = obj.getJSONArray("message_ids")
@@ -480,10 +396,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 Bridge.db.markReadUpTo(idFor(raw), upTo, incoming = false)
                 Bridge.notifyChat(idFor(raw))
             }
-            // TDLib publishes the account's own id as an option as soon as it
-            // authorizes, straight from its local database — no getMe round trip,
-            // which is what the first share of a cold start would have had to
-            // wait for.
             "updateOption" -> {
                 if (obj.optString("name") == "my_id") {
                     val id = obj.optJSONObject("value")?.optLong("value") ?: 0L
@@ -502,36 +414,23 @@ private const val UNREAD_REACTION_PAGE = 100
                 val action = obj.getJSONObject("action").optString("@type")
                 val st = when (action) {
                     "chatActionTyping" -> "typing"
-                    // The sender's client reports recording only while the mic is
-                    // held; the upload that follows is a separate action, so
-                    // dropping it blanked the indicator for the rest of the note.
                     "chatActionRecordingVoiceNote", "chatActionUploadingVoiceNote" -> "recording"
                     "chatActionCancel" -> "paused"
                     else -> return
                 }
                 Bridge.onChatState(chatId, idFor(uid), st)
             }
-            // The recipient played our voice note. TDLib reports this with its
-            // own update — the content itself does not change, so no
-            // updateMessageContent follows and the unplayed dot stayed on.
             "updateMessageContentOpened" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
                 Bridge.db.setPlayed(chatId, obj.getLong("message_id").toString())
                 Bridge.notifyChat(chatId)
             }
-            // Archive moves while the app runs (and often a chat's initial
-            // archive placement, after updateNewChat) arrive only here, not
-            // through updateNewChat's positions.
             "updateChatPosition" -> {
                 val p = obj.getJSONObject("position")
-                // order is int64, which TDLib's JSON interface encodes as a string
                 val present = p.optString("order", "0") != "0"
                 if (present) listed.add(obj.getLong("chat_id"))
                 val archived = when (p.getJSONObject("list").optString("@type")) {
                     "chatListArchive" -> present
-                    // Leaving the main list is also how a chat looks while it is
-                    // being archived, so the archive position that follows has
-                    // to be ruled out before calling it a deletion.
                     "chatListMain" -> if (present) false else {
                         checkChatGone(obj.getLong("chat_id"))
                         return
@@ -557,9 +456,6 @@ private const val UNREAD_REACTION_PAGE = 100
         }
     }
 
-    // The initial load reports every chat with no positions before it places
-    // them, so without the `listed` gate every startup ran this for the whole
-    // chat list and one transient empty answer wiped a live chat and its media.
     private fun checkChatGone(raw: Long) {
         if (raw !in listed) return
         val id = idFor(raw)
@@ -588,14 +484,9 @@ private const val UNREAD_REACTION_PAGE = 100
         readOutbox[raw] = chat.optLong("last_read_outbox_message_id")
         val last = chat.optJSONObject("last_message")
         Bridge.db.upsertChat(id, title, archived, last?.optLong("date") ?: 0)
-        // Unconditional: writing only muted=true kept a chat unmuted from
-        // another client while this app was offline muted here forever.
         val muted = chat.optJSONObject("notification_settings")?.optInt("mute_for", 0) ?: 0
         Bridge.db.setMuted(id, muted > 0)
         last?.let { storeMessage(it) }
-        // The count only arrives as an update when it CHANGES; the value that
-        // was already there when the app was last killed ships here instead, so
-        // reading it only from the update missed the whole point of the sweep.
         if (chat.optInt("unread_reaction_count") > 0) fetchUnreadReactions(id)
         val type = chat.optJSONObject("type")?.optString("@type") ?: ""
         if (type == "chatTypeBasicGroup" || type == "chatTypeSupergroup") {
@@ -609,10 +500,6 @@ private const val UNREAD_REACTION_PAGE = 100
         listOf(user.optString("first_name"), user.optString("last_name"))
             .filter { it.isNotEmpty() }.joinToString(" ")
 
-    // Memo for parseMessage's per-sender name lookup: a history page parses up
-    // to 100 messages from the same few senders, and each one was a SQLite
-    // point query on the executor. Written through by every tg contacts write
-    // (onUser, onNewChat's group upsert), cleared on logout.
     private val contactNames = ConcurrentHashMap<String, String>()
 
     private fun onUser(user: JSONObject) {
@@ -624,10 +511,6 @@ private const val UNREAD_REACTION_PAGE = 100
             isSelf = uid == myId, isGroup = false,
             isSaved = user.optBoolean("is_contact"),
         )
-        // updateUserStatus only fires when a status CHANGES; the status a
-        // contact already has arrives here, with the user. Reading it only from
-        // the update meant anyone who simply stayed offline never got a
-        // last-seen at all.
         applyUserStatus(idFor(uid), user.optJSONObject("status"))
         Bridge.notifyContactsChangedInternal()
     }
@@ -648,11 +531,6 @@ private const val UNREAD_REACTION_PAGE = 100
         )
     }
 
-    // Free of DB writes on purpose: a search renders the window around a hit
-    // WITHOUT storing it. Dropping a far-back window into the history would
-    // leave an island with a gap on either side of it, and pagination anchors
-    // on the oldest stored row — which is exactly how a chat ends up jumping
-    // over months of messages.
     private fun parseMessage(msg: JSONObject): MessageRow? {
         val rawChat = msg.getLong("chat_id")
         val chatId = idFor(rawChat)
@@ -672,10 +550,6 @@ private const val UNREAD_REACTION_PAGE = 100
         val content = msg.optJSONObject("content") ?: return null
         var msgType = ""
         var text = ""
-        // Resolved once, by the same navigation the download path uses. Each
-        // media branch used to re-walk its own content shape, so the stored
-        // reference and the fetched file could drift apart — the failure
-        // startDownload's comment below describes.
         var fileId = fileOf(content)?.optInt("id")?.toString() ?: ""
         var listened = false
         var latitude = 0.0
@@ -714,18 +588,11 @@ private const val UNREAD_REACTION_PAGE = 100
                 if (sticker.optJSONObject("format")?.optString("@type") == "stickerFormatWebp") {
                     msgType = "sticker"
                 } else {
-                    // animated/video stickers have no still frame to show, so the
-                    // row is text and must not claim a downloadable file
                     fileId = ""
                     val emoji = sticker.optString("emoji").ifEmpty { "🩹" }
                     text = appContext?.getString(R.string.sticker_with_emoji, emoji) ?: emoji
                 }
             }
-            // A message that is just emoji comes as its own content type with the
-            // plain characters in `emoji`; without this it fell through to the
-            // generic placeholder and rendered as "[AnimatedEmoji]". Falling back
-            // to the placeholder when `emoji` is absent keeps the row
-            // recognisable to the repair pass instead of blank.
             "messageAnimatedEmoji", "messageDice" ->
                 text = content.optString("emoji").ifEmpty { placeholderFor(content) }
             "messageLocation" -> {
@@ -737,17 +604,11 @@ private const val UNREAD_REACTION_PAGE = 100
             "messageCall" -> msgType = "call"
             "messageContact" -> {
                 msgType = "contact"
-                // same "name\nphone" body the WhatsApp bridge builds, so the
-                // renderer and add-to-contacts action are protocol-blind
                 content.optJSONObject("contact")?.let { c ->
                     val phone = c.optString("phone_number")
                         .let { if (it.isNotEmpty() && !it.startsWith("+")) "+$it" else it }
-                    // line 1 is always the name header (the number when there
-                    // is no name), so later lines are phones by construction
                     val name = fullName(c).ifEmpty { phone }
                     text = listOf(name, phone).filter { it.isNotEmpty() }.joinToString("\n")
-                    // contact rows never download, so file_id is free to carry
-                    // the shared user's id — what "Message" opens a chat with
                     c.optLong("user_id").takeIf { it != 0L }?.let { fileId = it.toString() }
                 }
             }
@@ -764,10 +625,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 it.optLong("chat_id") == rawChat
             ) {
                 quotedId = it.optLong("message_id").toString()
-                // TDLib answers a reply with a bare message id and expects the
-                // client to look the message up itself. What it does hand over,
-                // when either is there, is the fragment the sender picked out and
-                // the content of a message from another chat.
                 quotedText = markedText(it.optJSONObject("quote")?.optJSONObject("text"))
                 it.optJSONObject("content")?.let { quoted ->
                     if (quotedText.isEmpty()) {
@@ -796,19 +653,12 @@ private const val UNREAD_REACTION_PAGE = 100
             quotedText = quotedText, quotedType = quotedType,
             senderName = senderName,
             forwarded = msg.optJSONObject("forward_info") != null,
-            // Carried on the row, not only applied to the stored one: a
-            // search window renders messages the database never held, and
-            // without this every voice note in it drew the unplayed dot.
             played = listened,
         )
     }
 
     private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
         val row = parseMessage(msg) ?: return
-        // TDLib reports its own copy of a message it has not sent yet, which
-        // would sit beside the row the app staged. The staged row is re-keyed to
-        // TDLib's id as soon as sendMessage answers, so "no row under this id"
-        // means this update is the duplicate, not the original.
         if (row.fromMe && msg.optJSONObject("sending_state")
                 ?.optString("@type") == "messageSendingStatePending" &&
             !Bridge.db.hasMessage(row.chatId, row.id)
@@ -819,33 +669,19 @@ private const val UNREAD_REACTION_PAGE = 100
             row,
             notify = notify,
             fetchMedia = notify && !row.fromMe && !row.isRead,
-            // Telegram bumps even for an edit: an edited message reaches us
-            // through the same update as a new one, and skipping the bump left
-            // the chat list ordered by whenever it was first seen.
             bump = true,
         ) {
-            // upsertMessage leaves the file columns alone, so a path TDLib
-            // already has is applied separately
             if (row.filePath.isNotEmpty()) {
                 Bridge.db.setFileState(row.chatId, row.id, row.filePath, row.fileStatus)
             }
-            // unconditional, not only when interaction_info is present: a
-            // message whose last reaction was removed comes back carrying none,
-            // and skipping it left the stale rows in place
             applyReactions(row.chatId, row.id, msg.optJSONObject("interaction_info"), preview = false)
-            // upsertMessage deliberately never writes `played`, so apply it here
             if (row.played) Bridge.db.setPlayed(row.chatId, row.id)
-            // nor msg_type, so rows stored before video notes had their own type
-            // keep saying "video" until the message is read back
             if (row.msgType == "videonote") {
                 Bridge.db.setMsgType(row.chatId, row.id, row.msgType)
             }
         }
     }
 
-    // For the pager/worker paths, which have no catch-all like the update
-    // loop's: one unexpected message shape killed the process there, and the
-    // re-fetch on the next chat open made it a crash loop.
     private fun storeMessageSafe(msg: JSONObject) {
         try { storeMessage(msg) } catch (e: Exception) { Log.e(TAG, "message store failed", e) }
     }
@@ -860,9 +696,6 @@ private const val UNREAD_REACTION_PAGE = 100
         val file = fileOf(content) ?: return null
         val local = file.optJSONObject("local") ?: return null
         if (!local.optBoolean("is_downloading_completed")) return null
-        // TDLib can still report a path whose file is gone (our own sends
-        // reference the staging copy, which is swept after a day) — a row that
-        // claims a dead path renders a play button that plays nothing
         val path = local.optString("path")
         return if (usable(path)) path else null
     }
@@ -883,10 +716,6 @@ private const val UNREAD_REACTION_PAGE = 100
             else -> null
         }
 
-    // The only reaction catch-up that reaches a private chat: TDLib refuses to
-    // poll reactions there (need_poll_dialog_message_reactions), and the count
-    // arrives on connect, so this is what recovers a reaction added while the
-    // app was dead — including on messages far older than any page we re-read.
     private fun fetchUnreadReactions(chatId: String) = io.execute {
         val answer = request(
             JSONObject().put("@type", "searchChatMessages")
@@ -903,10 +732,6 @@ private const val UNREAD_REACTION_PAGE = 100
         for (i in 0 until arr.length()) {
             val m = arr.optJSONObject(i) ?: continue
             val msgId = m.optLong("id").toString()
-            // Skipped, never stored: requestHistoryPage anchors the next page on
-            // the OLDEST row held, so inserting a message from years back moves
-            // the anchor past everything between and the gap can never be paged
-            // in again.
             if (!Bridge.db.hasMessage(chatId, msgId)) continue
             val info = m.optJSONObject("interaction_info") ?: continue
             if (applyReactions(chatId, msgId, info, preview = false)) changed = true
@@ -917,17 +742,11 @@ private const val UNREAD_REACTION_PAGE = 100
     private fun onInteractionInfo(obj: JSONObject) {
         val chatId = idFor(obj.getLong("chat_id"))
         val msgId = obj.getLong("message_id").toString()
-        // Gated: view and forward counts land in this update too, and the app
-        // stores neither, so rebinding for them is a query and a bind for nothing.
         if (applyReactions(chatId, msgId, obj.optJSONObject("interaction_info"), preview = true)) {
             Bridge.notifyChatRow(chatId, msgId)
         }
     }
 
-    // Called both for the live update AND when a message is stored: a message
-    // fetched from history already carries its reactions in interaction_info,
-    // and reading them only from the update meant every reaction that predated
-    // this session stayed invisible.
     private fun applyReactions(
         chatId: String, msgId: String, info: JSONObject?, preview: Boolean,
     ): Boolean {
@@ -937,27 +756,16 @@ private const val UNREAD_REACTION_PAGE = 100
             val r = arr!!.getJSONObject(i)
             val emoji = r.getJSONObject("type").optString("emoji")
             if (emoji.isEmpty()) continue
-            // One row per reaction TYPE, not per reacting user: the per-user
-            // senders aren't listed here, and expanding total_count (a
-            // server-controlled int32) meant a popular post issued tens of
-            // thousands of inserts on the single thread that dispatches every
-            // update and delivers every blocking response.
             val count = r.optInt("total_count", 1)
             wanted["tg:r:$emoji"] = if (count > 1) "$emoji$count" else emoji
         }
         if (Bridge.db.reactionsOf(chatId, msgId).toMap() == wanted) return false
         Bridge.db.clearReactions(chatId, msgId)
         for ((sender, label) in wanted) Bridge.db.upsertReaction(chatId, msgId, sender, label)
-        // Only the live update is a fresh event; replaying history must not
-        // rewrite the chat's preview line with an old reaction.
         if (preview) Bridge.notifyChatsChanged()
         return true
     }
 
-    // Asked of the server: the Db rows for a Telegram message are one per
-    // reaction TYPE with an aggregate count (see applyReactions), so they cannot
-    // answer this — and a channel or a big group may refuse to say at all, which
-    // reads here as nobody. Blocking; worker threads only.
     fun reactionSenders(chatId: String, msgId: String): List<Pair<String, String>> {
         val mid = msgId.toLongOrNull() ?: return emptyList()
         val answer = request(
@@ -983,8 +791,6 @@ private const val UNREAD_REACTION_PAGE = 100
 
     fun downloadFile(msg: MessageRow): Boolean {
         val fid = msg.fileId.toIntOrNull() ?: return false
-        // the whole hand-off, DB write included: this is reached from
-        // onBindViewHolder, so nothing here may touch SQLite on the main thread
         downloader.execute {
             Bridge.db.setFileState(msg.chatId, msg.id, "", 1)
             startDownload(msg, fid)
@@ -992,13 +798,6 @@ private const val UNREAD_REACTION_PAGE = 100
         return true
     }
 
-    // The stored id is never used to fetch. A TDLib file id is an index into the
-    // session that issued it, and TDLib hands the same small integers out again
-    // to unrelated files in later runs — so a stored id can now name a totally
-    // different photo, which downloaded happily and was written onto this
-    // message as if it belonged to it. That is how one file ended up rendering
-    // in four messages across four different chats. Asking the message which
-    // file it has is the only answer that cannot be stale.
     private fun startDownload(msg: MessageRow, storedFid: Int) {
         val mid = msg.id.toLongOrNull() ?: return failDownload(msg)
         val fresh = request(
@@ -1014,30 +813,18 @@ private const val UNREAD_REACTION_PAGE = 100
         if (!issueDownload(msg, fid)) failDownload(msg)
     }
 
-    // A file TDLib already holds is finished here and now: downloadFile answers
-    // with the completed file and no updateFile follows, because nothing changed
-    // — waiting for one left the bubble on its spinner for good.
     private fun issueDownload(msg: MessageRow, fid: Int): Boolean {
         val target = Pair(msg.chatId, msg.id)
         fileTargets.computeIfAbsent(fid) { ConcurrentHashMap.newKeySet() }.add(target)
         val res = request(downloadRequest(fid))
         if (res == null) {
-            // Registration is not left behind on failure: these ids get reused,
-            // so a dangling target would receive whatever unrelated file lands
-            // on that id next.
             fileTargets[fid]?.remove(target)
             return false
         }
         var answer = res
         val claimed = completedAt(answer)
         if (claimed != null && !usable(claimed)) {
-            // TDLib still believes in a local copy that is gone, and answers
-            // every request with it instead of fetching anything. deleteFile
-            // drops that belief, so the retry really goes to the server.
             request(JSONObject().put("@type", "deleteFile").put("file_id", fid))
-            // an update for this id may have landed while those two blocking
-            // calls ran, and any completion drops the whole entry — re-register,
-            // or the real completion would arrive with nowhere to land
             answer = request(downloadRequest(fid)) ?: run {
                 fileTargets[fid]?.remove(target)
                 return false
@@ -1047,9 +834,6 @@ private const val UNREAD_REACTION_PAGE = 100
         val done = completedAt(answer)
         if (done != null) {
             if (!usable(done)) {
-                // still "downloaded" onto nothing even after deleteFile: TDLib
-                // will send no update either, so returning true would leave the
-                // row spinning at status 1 for the rest of the run
                 fileTargets[fid]?.remove(target)
                 return false
             }
@@ -1064,12 +848,6 @@ private const val UNREAD_REACTION_PAGE = 100
         return local.optString("path")
     }
 
-    // TDLib calls a file "downloaded" from its own bookkeeping, which outlives
-    // the file itself: our sends point at the cacheDir staging copy that the
-    // daily sweep deletes. Writing such a path back onto the message re-created
-    // the dead reference the caller had just cleared, and bind → download →
-    // "complete" → bind went round for good, so a path that does not resolve
-    // counts as no download at all.
     private fun usable(path: String) = path.isNotEmpty() && java.io.File(path).exists()
 
     private fun downloadRequest(fid: Int) = JSONObject().put("@type", "downloadFile")
@@ -1091,8 +869,6 @@ private const val UNREAD_REACTION_PAGE = 100
             local.optBoolean("is_downloading_completed") -> {
                 fileTargets.remove(fid)
                 val path = local.optString("path")
-                // "completed" onto a path that no longer resolves is a failure,
-                // not a download — see usable()
                 val ok = usable(path)
                 for ((chatId, msgId) in targets) {
                     fileDone(chatId, msgId, if (ok) path else "", if (ok) 2 else 3)
@@ -1105,13 +881,6 @@ private const val UNREAD_REACTION_PAGE = 100
                     for ((chatId, msgId) in targets) Bridge.postDownloadProgress(chatId, msgId, pct)
                 }
             }
-            // Neither active nor completed. That alone is not a failure: TDLib
-            // parks a transfer whenever the network drops or its queue is busy
-            // and resumes it by itself. can_be_downloaded is the only field
-            // that says the file is genuinely unreachable, so everything else
-            // stays pending with its targets registered — dropping them here
-            // left the eventual completion nowhere to land, and the bubble read
-            // "failed" with the file already on disk.
             !local.optBoolean("can_be_downloaded", true) -> {
                 fileTargets.remove(fid)
                 for ((chatId, msgId) in targets) fileDone(chatId, msgId, "", 3)
@@ -1124,15 +893,7 @@ private const val UNREAD_REACTION_PAGE = 100
             JSONObject().put("@type", "inputMessageReplyToMessage").put("message_id", it)
         }
 
-    // TDLib mints its own ids and takes none, so the staged row is re-keyed to
-    // the one returned here. The message is not sent yet — that is
-    // updateMessageSendSucceeded.
     private fun sendMessage(chatId: String, content: JSONObject, quotedId: String = ""): String {
-        // A share sheet can start this process and reach a send before TDLib has
-        // opened its database; until then every request is answered
-        // "Unauthorized", and the shared file was dropped on the floor. Bounded
-        // well under the 20s default: sends are dispatched on Bridge's single
-        // send thread, so this wait holds up every other chat's sends too.
         if (!awaitReady(6_000)) return ""
         val req = JSONObject().put("@type", "sendMessage")
             .put("chat_id", chatIdOf(chatId))
@@ -1143,10 +904,6 @@ private const val UNREAD_REACTION_PAGE = 100
         return if (id != 0L) id.toString() else ""
     }
 
-    // Telegram keeps bold/italic in entities beside the text, WhatsApp keeps
-    // them as markers inside it. One text is stored for both, in WhatsApp's
-    // form, so the markers turn into entities here and back in markedText —
-    // sending them as they are made other Telegram clients show the asterisks.
     private fun formattedText(text: String, mentions: List<Mention> = emptyList()): JSONObject {
         val (plain, marks) = Markup.parse(text)
         val ft = JSONObject().put("@type", "formattedText").put("text", plain)
@@ -1162,12 +919,8 @@ private const val UNREAD_REACTION_PAGE = 100
                 )
             )
         }
-        // resolved against the text as it will be sent, markers already gone:
-        // an entity offset counts characters TDLib will see, not the ones typed
         for (h in mentionHits(plain, mentions)) {
             val uid = chatIdOf(h.id)
-            // TDLib rejects the whole message over entities that half-overlap
-            // each other, which a bold run ending inside a mention would
             if (uid <= 0 || marks.any { half(it, h.start, h.end) }) continue
             spans.add(
                 Triple(
@@ -1189,8 +942,6 @@ private const val UNREAD_REACTION_PAGE = 100
         return ft.put("entities", entities)
     }
 
-    // Only what a quote card needs to name: a reply from another chat carries
-    // its content, and the row it belongs to is never stored or downloaded.
     private fun typeOf(contentType: String): String = when (contentType) {
         "messagePhoto" -> "image"
         "messageSticker" -> "sticker"
@@ -1207,9 +958,6 @@ private const val UNREAD_REACTION_PAGE = 100
         (m.start < start && m.end > start && m.end < end) ||
             (m.start > start && m.start < end && m.end > end)
 
-    // A supergroup only answers this for members allowed to see the list, and
-    // one page is taken on purpose — a channel with thousands of subscribers is
-    // not something to enumerate on a profile screen.
     fun groupMembers(chatId: String): List<String> {
         val chat = request(
             JSONObject().put("@type", "getChat").put("chat_id", chatIdOf(chatId))
@@ -1238,8 +986,6 @@ private const val UNREAD_REACTION_PAGE = 100
         return ids
     }
 
-    // Blocking. Null means the request itself failed, which the caller must not
-    // keep paying for once per remaining member.
     fun cacheUser(userId: String): String? {
         val user = request(
             JSONObject().put("@type", "getUser").put("user_id", chatIdOf(userId))
@@ -1259,8 +1005,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 "textEntityTypeItalic" -> false
                 else -> null
             } ?: continue
-            // offsets are UTF-16 units, same as a Kotlin String's, but they
-            // describe the server's copy — a truncated one must not crash us
             val start = e.optInt("offset")
             val end = start + e.optInt("length")
             if (start < 0 || end <= start || end > plain.length) continue
@@ -1282,12 +1026,6 @@ private const val UNREAD_REACTION_PAGE = 100
         quotedId,
     )
 
-    // This TDLib schema wraps media files in inputPhoto/inputVideo/… objects
-    // (not bare InputFile — that parses as null and the send fails with
-    // "InputFile is not specified").
-    // Telegram's own view-once: the recipient's client destroys the media as
-    // soon as it is closed. Only photo and video take it, and only in a private
-    // chat — anywhere else TDLib rejects the whole send.
     private fun selfDestruct(content: JSONObject, chatId: String, viewOnce: Boolean): JSONObject {
         if (!viewOnce || isGroupId(chatId)) return content
         return content.put(
@@ -1351,11 +1089,6 @@ private const val UNREAD_REACTION_PAGE = 100
             quotedId,
         )
 
-    // TDLib names a document after the basename of the file it is given, and
-    // attachments are staged as "<prefix>_<millis>_<name>", so the recipient saw
-    // that internal name. The link/copy made here lives in a per-send directory
-    // that Bridge.cleanStaleCache reclaims by age — the upload continues after
-    // this call returns, so it cannot be deleted here.
     fun sendDocument(chatId: String, path: String, fileName: String = "", quotedId: String = ""): String {
         val src = java.io.File(path)
         val safe = safeDisplayFileName(fileName.ifEmpty { src.name })
@@ -1398,9 +1131,6 @@ private const val UNREAD_REACTION_PAGE = 100
             ),
     )
 
-    // TDLib takes the card's fields directly, so only the first number travels
-    // as the contact's own — the rest ride along in the vCard, which is what
-    // Telegram itself does with a multi-number card.
     fun sendContact(chatId: String, name: String, numbers: List<String>): String {
         val parts = name.trim().split(" ", limit = 2)
         return sendMessage(
@@ -1446,17 +1176,12 @@ private const val UNREAD_REACTION_PAGE = 100
         return res != null
     }
 
-    // TDLib delivers its queued send whenever the network comes back, so a
-    // retry that just sends again hands the peer two copies; deleting the queued
-    // message cancels it. False means TDLib had already sent it and the caller
-    // must not send again — revoke=false would delete only the user's own copy
-    // of a message the peer keeps. Blocking, so the answer can gate that.
     fun cancelQueuedSend(chatId: String, msgId: String): Boolean {
         val mid = msgId.toLongOrNull() ?: return false
         val msg = request(
             JSONObject().put("@type", "getMessage")
                 .put("chat_id", chatIdOf(chatId)).put("message_id", mid)
-        ) ?: return true // TDLib has no such message: nothing queued, nothing sent
+        ) ?: return true
         if (msg.optJSONObject("sending_state")?.optString("@type")
             != "messageSendingStatePending"
         ) {
@@ -1467,9 +1192,6 @@ private const val UNREAD_REACTION_PAGE = 100
         return true
     }
 
-    // The cancel comes back as a permanent deletion, and letting that through
-    // dropped the row the retry was re-keying: the message disappeared from the
-    // chat with its resend already on the way.
     private val cancelledSends: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     fun deleteMessages(chatId: String, msgIds: List<String>, revoke: Boolean) {
@@ -1482,8 +1204,6 @@ private const val UNREAD_REACTION_PAGE = 100
         )
     }
 
-    // A supergroup or channel refuses deleteChatHistory while you are a member
-    // (both can_be_deleted_* are false), so leaving is what removes it.
     fun deleteChatAsync(chatId: String) = pager.execute {
         if (!deleteChat(chatId)) Bridge.toastUi(R.string.delete_chat_failed)
     }
@@ -1491,8 +1211,6 @@ private const val UNREAD_REACTION_PAGE = 100
     private fun deleteChat(chatId: String): Boolean {
         val raw = chatIdOf(chatId)
         val chat = request(JSONObject().put("@type", "getChat").put("chat_id", raw))
-        // request() returns null for a 15s timeout as much as for a refusal.
-        // Reading that as "not deletable" dropped the user out of a group.
         if (chat == null) {
             Log.w(TAG, "delete chat: getChat failed")
             return false
@@ -1535,13 +1253,7 @@ private const val UNREAD_REACTION_PAGE = 100
         }
     }
 
-    // TDLib requires a private chat to exist (createPrivateChat) before
-    // anything can be sent to it. "" means the number has no Telegram account
-    // or is not visible to us.
     fun createChatByPhone(number: String): String {
-        // A failed request is not an answer: reported as "" it became "Not on
-        // Telegram", which is the one thing it must never say for a lookup that
-        // never happened.
         val user = request(
             JSONObject().put("@type", "searchUserByPhoneNumber").put("phone_number", number)
         ) ?: return Bridge.NUMBER_LOOKUP_FAILED
@@ -1557,19 +1269,12 @@ private const val UNREAD_REACTION_PAGE = 100
         return if (id != 0L) idFor(id) else ""
     }
 
-    // Required, not an optimisation: for a private chat TDLib's
-    // DialogActionManager drops every incoming typing/recording action unless
-    // the dialog is open (or the peer's last-seen is exact), and
-    // supergroups/channels only receive updates at all while open — which is
-    // why chat actions never appeared before this was wired up.
     fun openChat(chatId: String) = executor.execute {
         openCounts.merge(chatId, 1) { a, b -> a + b }
         if (ready) sendOpenChat(chatId)
     }
 
     fun closeChat(chatId: String) = executor.execute {
-        // only if we are the ones holding it open: an unmatched close is an
-        // error inside TDLib, and there is no open of ours for it to release
         val held = openCounts.containsKey(chatId)
         openCounts.compute(chatId) { _, n -> if (n == null || n <= 1) null else n - 1 }
         if (ready && held) {
@@ -1580,8 +1285,6 @@ private const val UNREAD_REACTION_PAGE = 100
     private fun sendOpenChat(chatId: String) =
         send(JSONObject().put("@type", "openChat").put("chat_id", chatIdOf(chatId)))
 
-    // openMessageContent is what clears the unplayed dot on the SENDER's side;
-    // viewMessages alone only marks the message read.
     fun markVoicePlayed(chatId: String, msgId: String) = executor.execute {
         val mid = msgId.toLongOrNull() ?: return@execute
         send(
@@ -1623,10 +1326,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 .put("chat_id", chatIdOf(chatId))
                 .put(
                     "notification_settings",
-                    // Every field TDLib parses must be sent: absent Bools decode
-                    // as false and absent ints as 0, so a partial object would
-                    // also pin this chat's sound to "none" and turn its previews
-                    // off, account-wide, with no way back from the unmute.
                     JSONObject().put("@type", "chatNotificationSettings")
                         .put("use_default_mute_for", false)
                         .put("mute_for", if (muted) 2147483647 else 0)
@@ -1654,10 +1353,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 if (count > 0) Bridge.notifyChat(chatId)
                 onDone?.invoke(count)
             } finally {
-                // released before the re-sync below: that is another blocking
-                // round-trip, and holding the slot across it made a scroll
-                // arriving in the window fail historyBusy.add and be dropped,
-                // leaving the user stuck at the top edge with no new page
                 historyBusy.remove(chatId)
             }
             io.execute { syncPlayedState(chatId) }
@@ -1667,10 +1362,6 @@ private const val UNREAD_REACTION_PAGE = 100
     private fun fetchHistory(chatId: String, fromMsgId: Long, limit: Int): Int =
         fetchHistoryPage(chatId, fromMsgId, limit).first
 
-    // The returned oldest id is what a full walk anchors its next page on:
-    // anchoring on the oldest row in the DB instead only ever extends the
-    // history backwards, so a hole between two already-synced stretches could
-    // never be filled.
     private fun fetchHistoryPage(chatId: String, fromMsgId: Long, limit: Int): Pair<Int, Long> {
         val res = request(
             JSONObject().put("@type", "getChatHistory")
@@ -1691,13 +1382,7 @@ private const val UNREAD_REACTION_PAGE = 100
     }
 
     fun requestInitialHistory(chatId: String) {
-        // messageCount too: this is called from ChatActivity.onCreate, on the
-        // main thread
         io.execute {
-            // Only a chat with nothing to show is filled on `pager` under the
-            // busy slot. The refresh of an already-filled chat runs here
-            // instead: on `pager` it blocked the next "load older" behind a
-            // 30s request, and under the slot that page was dropped outright.
             if (Bridge.db.messageCount(chatId) < 60) {
                 if (historyBusy.add(chatId)) {
                     pager.execute {
@@ -1726,7 +1411,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 .put("sender_id", JSONObject.NULL)
                 .put("from_message_id", fromMessageId)
                 .put("offset", 0)
-                // the server caps this at 100 and may return fewer than asked
                 .put("limit", limit.coerceIn(1, 100))
                 .put("filter", JSONObject.NULL),
             timeoutMs = 30_000,
@@ -1740,14 +1424,8 @@ private const val UNREAD_REACTION_PAGE = 100
         return SearchPage(ids, res.optInt("total_count"), res.optLong("next_from_message_id"))
     }
 
-    // Asked of the server with a photo filter rather than sifted out of a slice
-    // of history: a search window holds ~50 messages, of which only a handful
-    // are pictures, so an album built from it ran out after a swipe or two.
-    // Blocking; worker threads only.
     fun chatPhotos(chatId: String, fromMsgId: String, newer: Boolean?, limit: Int = 49): List<MessageRow> {
         val id = fromMsgId.toLongOrNull() ?: return emptyList()
-        // TDLib's bounds, as in contextWindow: the offset may not pass -99, the
-        // limit not 100, and the limit has to cover the offset
         val n = limit.coerceIn(1, 49)
         val offset = if (newer == false) 0 else -n
         val count = if (newer == false) n else n * 2 + 1
@@ -1769,8 +1447,6 @@ private const val UNREAD_REACTION_PAGE = 100
         return preferStored(chatId, rows)
     }
 
-    // prefer the stored row: it knows about a file already on this phone,
-    // which the parsed one only does when TDLib still holds it locally
     private fun preferStored(chatId: String, rows: List<MessageRow>): List<MessageRow> {
         val stored = Bridge.db.messagesByIds(chatId, rows.mapTo(HashSet()) { it.id }).associateBy { it.id }
         return rows.map { stored[it.id] ?: it }.sortedWith(MESSAGE_ORDER)
@@ -1778,15 +1454,11 @@ private const val UNREAD_REACTION_PAGE = 100
 
     fun contextWindow(chatId: String, msgId: String, radius: Int = 25): List<MessageRow> {
         val id = msgId.toLongOrNull() ?: return emptyList()
-        // TDLib's own bounds: the offset may not go past -99 and the limit not
-        // past 100, and the limit must cover the offset
         val r = radius.coerceIn(1, 49)
         val res = request(
             JSONObject().put("@type", "getChatHistory")
                 .put("chat_id", chatIdOf(chatId))
                 .put("from_message_id", id)
-                // negative offset also returns messages NEWER than the hit, so it
-                // sits in the middle of the window instead of at the top of it
                 .put("offset", -r)
                 .put("limit", r * 2 + 1)
                 .put("only_local", false),
@@ -1805,8 +1477,6 @@ private const val UNREAD_REACTION_PAGE = 100
             JSONObject().put("@type", "getChatHistory")
                 .put("chat_id", chatIdOf(chatId))
                 .put("from_message_id", id)
-                // asking for the anchor plus n is the only way TDLib walks
-                // forwards from a message
                 .put("offset", if (newer) -n else 0)
                 .put("limit", if (newer) n + 1 else n)
                 .put("only_local", false),
@@ -1817,19 +1487,13 @@ private const val UNREAD_REACTION_PAGE = 100
         for (i in 0 until arr.length()) {
             val row = parseMessageSafe(arr.getJSONObject(i)) ?: continue
             val rowId = row.id.toLongOrNull() ?: continue
-            // the anchor itself comes back in the "newer" answer
             if (if (newer) rowId > id else rowId < id) rows.add(row)
         }
         return preferStored(chatId, rows)
     }
 
-    // Blocks until the file lands. The ordinary download path writes progress
-    // onto the message's row, which a search window does not have — those
-    // messages are shown without being stored.
     fun downloadNow(chatId: String, msgId: String): String {
         val mid = msgId.toLongOrNull() ?: return ""
-        // resolved from the message, never from a stored id: TDLib file ids
-        // belong to the session that issued them
         val fresh = request(
             JSONObject().put("@type", "getMessage")
                 .put("chat_id", chatIdOf(chatId)).put("message_id", mid)
@@ -1845,23 +1509,9 @@ private const val UNREAD_REACTION_PAGE = 100
         return if (usable(path)) path else ""
     }
 
-    // A message carries is_listened only when it is fetched, and paging only
-    // ever reaches BACKWARD past what is already stored, so a note stored before
-    // its recipient listened would keep its dot for good. Run on every chat open
-    // and every page, so it converges as you scroll.
     private fun syncPlayedState(chatId: String) {
-        // Every request below is answered "Unauthorized" until TDLib comes up,
-        // and this runs from the chat's onCreate — on a cold start the whole
-        // sweep used to no-op with nothing logged, leaving the repair to
-        // whenever the user next paged history.
         if (!awaitReady()) return
-        // Ahead of the getMessages sweep, not after it: that one reads TDLib's
-        // own store, so it cannot repair what the store itself has wrong, and
-        // its early returns used to skip this entirely.
         var changed = refreshOwnListened(chatId)
-        // Two repairs share one round-trip because TDLib caps getMessages at
-        // 100; the budget is split so placeholders can never starve the contact
-        // repair.
         val stale = (Bridge.db.placeholderMessageIds(chatId, 30) +
             Bridge.db.emptyContactSenders(chatId, 10).map { it.first })
             .filter { repairAttempted.add("$chatId/$it") }
@@ -1874,7 +1524,6 @@ private const val UNREAD_REACTION_PAGE = 100
         )
         val msgs = res?.optJSONArray("messages") ?: JSONArray()
         for (i in 0 until msgs.length()) {
-            // a message the server no longer has comes back as a null entry
             val m = msgs.optJSONObject(i) ?: continue
             val msgId = m.optLong("id").toString()
             val content = m.optJSONObject("content") ?: continue
@@ -1892,27 +1541,12 @@ private const val UNREAD_REACTION_PAGE = 100
         if (changed) Bridge.notifyChat(chatId)
     }
 
-    // getMessages above answers from TDLib's own store, which never learns that
-    // the other side listened to a voice note WE sent: the server's update is
-    // dropped outright unless that message happens to be loaded in memory at the
-    // time (MessagesManager::read_message_content_from_updates), so a chat the
-    // app had not opened kept is_listened false for good. searchChatMessages is
-    // the way back to the server — passing a sender is what makes TDLib skip its
-    // message database. Our own messages are picked out here rather than with
-    // searchChatMessages' sender_id: Telegram answers INPUT_FILTER_INVALID for a
-    // sender combined with a filter outside a group.
-    // Once per chat per run: the walk costs a server round trip per page, and a
-    // note the other side never listened to keeps the list non-empty forever.
     private val listenedSwept: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private fun refreshOwnListened(chatId: String): Boolean {
         val pending = Bridge.db.unplayedAudioIds(chatId, 200, fromMeOnly = true).toHashSet()
         if (pending.isEmpty() || chatId in listenedSwept) return false
         val remaining = pending.toMutableSet()
-        // The oldest pending id decides how far back to page: the answer comes
-        // newest first, so once a page ends below it every one has been seen.
-        // A single page only reached the newest 100 messages we sent, which for
-        // a busy chat is a few days and never the notes further back.
         val oldest = pending.mapNotNull { it.toLongOrNull() }.minOrNull() ?: return false
         var changed = false
         var from = 0L
@@ -1943,14 +1577,8 @@ private const val UNREAD_REACTION_PAGE = 100
                 if (Bridge.db.setPlayed(chatId, msgId) > 0) changed = true
             }
             if (last == 0L || last <= oldest) { reachedEnd = true; break }
-            // The answer's own cursor: from_message_id is inclusive at offset 0,
-            // so reusing the last id re-read one message per page and a page of
-            // exactly that message could never advance.
             from = res.optLong("next_from_message_id").takeIf { it != 0L } ?: last
         }
-        // Only a walk that reached the end of the chat counts. Read off the
-        // round counter instead, a request that timed out on the FIRST page
-        // marked the chat swept and disabled the repair for the whole run.
         if (remaining.isEmpty() || reachedEnd) listenedSwept.add(chatId)
         return changed
     }
@@ -1963,9 +1591,6 @@ private const val UNREAD_REACTION_PAGE = 100
         return Bridge.asymptoticProgress(syncAllRounds)
     }
 
-    // Deliberately restarts from the newest message rather than resuming from
-    // the oldest row held: only a full walk closes gaps left in the middle by
-    // partial syncs, which is the point of asking for all messages.
     fun syncAllHistory(chatId: String): Boolean {
         if (syncAllChat != null && syncAllChat != chatId) return false
         if (syncAllChat == chatId) return true
@@ -1973,7 +1598,7 @@ private const val UNREAD_REACTION_PAGE = 100
         syncAllRounds = 0
         historyExhausted.remove(chatId)
         Bridge.notifySyncAll(chatId, 0)
-        pager.execute { syncAllStep(chatId, 0L) } // 0 = start at the newest
+        pager.execute { syncAllStep(chatId, 0L) }
         return true
     }
 
@@ -1990,8 +1615,6 @@ private const val UNREAD_REACTION_PAGE = 100
                 syncAllChat = null
                 Bridge.notifySyncAll(chatId, 100)
             }
-            // no older anchor than the one we asked from: the walk cannot
-            // advance, so treat it as the end rather than looping on it
             oldest == 0L || oldest == fromId -> {
                 historyExhausted.add(chatId)
                 syncAllChat = null
@@ -2019,27 +1642,16 @@ private const val UNREAD_REACTION_PAGE = 100
             var complete = true
             var messages = 0
             var success = false
-            // try/finally around the whole run: a throw from the paging loop or
-            // the writer (SQLite, malformed JSON, OOM on a huge chat) used to
-            // leave exportChatId set, which made every later export return false
-            // for the rest of the process and left the UI waiting on a
-            // completion event that never came.
             try {
                 val before = Bridge.db.messageCount(chatId)
                 var lastAnchor = -1L
                 while (true) {
                     val fromId = Bridge.db.oldestMessage(chatId)?.id?.toLongOrNull() ?: 0L
-                    // Same guard as syncAllStep and seekMessage: a page that
-                    // does not move the stored oldest id would be re-fetched
-                    // forever, pinning a pager thread on a blocking request per
-                    // round and never releasing exportChatId.
                     if (fromId == lastAnchor) { complete = false; break }
                     lastAnchor = fromId
                     val count = fetchHistory(chatId, fromId, 100)
                     if (count < 0) { complete = false; break }
                     if (count == 0) { historyExhausted.add(chatId); break }
-                    // measured against the store, not summed per page: pages
-                    // overlap and re-deliver, and the store dedups by id
                     exportCount = Bridge.db.messageCount(chatId) - before
                     Bridge.postChatExportProgress(chatId, exportCount)
                 }
@@ -2071,12 +1683,7 @@ private const val UNREAD_REACTION_PAGE = 100
                     Bridge.notifySeek(chatId, targetId, true)
                     return@execute
                 }
-                // the same page fetch the history walk uses, rather than a
-                // second hand-built getChatHistory whose own oldest-id rule had
-                // already drifted from it
                 val (count, oldest) = fetchHistoryPage(chatId, anchor, 100)
-                // no page, an empty one, or one that did not reach further back:
-                // paging again would re-fetch the same messages forever
                 if (count <= 0 || oldest == 0L || oldest == anchor) break
                 anchor = oldest
                 Bridge.notifyChat(chatId)
@@ -2089,16 +1696,7 @@ private const val UNREAD_REACTION_PAGE = 100
 
     fun avatarPath(chatId: String, big: Boolean = false, cachedOnly: Boolean = false): String {
         val key = chatId + if (big) "/big" else ""
-        // Checked, not trusted: TDLib's bookkeeping outlives the file (see
-        // usable), and nothing but a photo change drops this entry — so once
-        // the file was gone the memo handed the dead path back forever, the
-        // decode failed, and that contact's avatar never came back.
         if (!big) avatarPaths[key]?.let { if (usable(it)) return it else avatarPaths.remove(key) }
-        // Nothing memoised and the caller cannot afford to wait. Everything past
-        // this point is a blocking TDLib round-trip, and the two cached-only
-        // callers are the avatar decode pool and the single notify thread, both
-        // of which promise not to block — asking here delayed alerts and starved
-        // WhatsApp avatar decoding behind a Telegram request.
         if (cachedOnly) return ""
         val chat = request(
             JSONObject().put("@type", "getChat").put("chat_id", chatIdOf(chatId))
@@ -2127,8 +1725,6 @@ private const val UNREAD_REACTION_PAGE = 100
 
     class PeerInfo(val phone: String, val username: String, val bio: String)
 
-    // Blocking; worker threads only. Null for anything that is not a user — a
-    // group's or channel's raw id is negative.
     fun peerInfo(chatId: String): PeerInfo? {
         val uid = chatIdOf(chatId)
         if (uid <= 0) return null
@@ -2141,9 +1737,6 @@ private const val UNREAD_REACTION_PAGE = 100
         )
     }
 
-    // TDLib moved a user's handle into a `usernames` object (a user can hold
-    // several) and kept the old flat `username` for older schemas; read both so
-    // the field doesn't silently go blank on a TDLib bump either way.
     private fun usernameOf(user: JSONObject?): String {
         if (user == null) return ""
         user.optJSONObject("usernames")?.optJSONArray("active_usernames")?.let {

@@ -24,11 +24,6 @@ object AudioPlayer {
         private set
     var currentChatId: String = ""
         private set
-    /**
-     * Message the current clip belongs to. The file path cannot identify it:
-     * Telegram serves one file for every copy of the same voice note, so a note
-     * forwarded twice into a chat gives several rows the SAME path.
-     */
     var currentMsgId: String = ""
         private set
     var earpiece: Boolean = false
@@ -87,9 +82,6 @@ object AudioPlayer {
         stopInternal(endSession = false)
         val commMode = useEarpiece
         val context = appContext ?: return
-        // Held outside the try so a failure part-way through setup still
-        // releases the player: `player` is null here (stopInternal above
-        // cleared it), so the catch's stopInternal cannot reach this instance.
         var fresh: ExoPlayer? = null
         try {
             val p = ExoPlayer.Builder(context).build()
@@ -106,7 +98,7 @@ object AudioPlayer {
             requestFocus(commMode)
             p.play()
             player = p
-            fresh = null // ownership transferred; stopInternal releases it now
+            fresh = null
             currentPath = path
             currentChatId = chatId
             currentMsgId = msgId
@@ -181,13 +173,6 @@ object AudioPlayer {
         }
     }
 
-    /**
-     * [userInitiated] false is the focus listener pausing us because something
-     * else took the audio — that must KEEP the request, since regaining focus is
-     * what resumes the clip. A real pause gives the focus back instead, so the
-     * music or podcast this voice note interrupted is not left silent for as
-     * long as the clip sits paused.
-     */
     fun pause(userInitiated: Boolean = true) {
         val p = player ?: return
         if (isPlaying) {
@@ -205,8 +190,6 @@ object AudioPlayer {
             val path = currentPath ?: return
             play(path, currentChatId, currentMsgId, p.currentPosition.toInt())
         } else {
-            // re-requested, not assumed: a permanent loss (another app took over
-            // the audio) is what paused this clip in the first place
             requestFocus(earpiece && ownsAudioMode)
             p.play()
             notifyState()
@@ -226,10 +209,6 @@ object AudioPlayer {
         notifyState()
     }
 
-    // True only while WE hold the device in MODE_IN_COMMUNICATION. The mode is
-    // global: resetting it unconditionally meant finishing a voice note pulled
-    // any other app's ongoing call (or VoIP session) back to MODE_NORMAL, and
-    // starting one on the media route did the same before it even played.
     private var ownsAudioMode = false
 
     fun endSession() {
@@ -238,9 +217,6 @@ object AudioPlayer {
         sessionChatId = ""
         earpiece = false
         releaseAudioMode()
-        // Focus follows the route: it is deliberately kept across a chain of
-        // voice messages (stopInternal(endSession = false)), so whatever was
-        // playing before doesn't resume for the gap between two clips.
         abandonFocus()
         if (wasActive) refreshServiceState()
     }
@@ -251,20 +227,8 @@ object AudioPlayer {
     private var focusRequest: AudioFocusRequest? = null
     private var focusComm = false
 
-    // A clip paused because something more important took focus resumes by
-    // itself once that is over — but only for a transient loss. A permanent one
-    // means the user moved to another audio app, where a voice note starting
-    // again on its own would be a surprise.
     private var resumeOnFocusGain = false
 
-    // A listener of its own per focus request, and only the current generation
-    // acts. play() rebuilding the player on another output (the proximity switch
-    // to the earpiece) abandons the focus request and takes a new one, and the
-    // loss the framework then reports lands on the abandoned request's listener,
-    // after play() has already returned — acting on it paused the clip the user
-    // had just put to their ear. Suppressing it by a flag cleared on the next
-    // main-loop turn instead swallowed genuine losses delivered in that turn,
-    // leaving the clip playing over whatever had taken the audio.
     private var focusGen = 0
 
     private fun newFocusListener(): AudioManager.OnAudioFocusChangeListener {
@@ -295,9 +259,6 @@ object AudioPlayer {
 
     private fun requestFocus(commMode: Boolean) {
         val am = audioManager ?: return
-        // The request is reused while the route is unchanged: every clip of a
-        // chain asks for focus, and abandoning in between would let the
-        // interrupted app resume for the gap between two voice notes.
         val held = focusRequest
         val req = if (held != null && focusComm == commMode) held else {
             abandonFocus()
@@ -306,16 +267,11 @@ object AudioPlayer {
                 else AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
             )
                 .setAudioAttributes(focusAttributes(commMode))
-                // ducked speech is speech the user has to replay, so ask to be
-                // paused instead of turned down
                 .setWillPauseWhenDucked(true)
                 .setOnAudioFocusChangeListener(newFocusListener())
                 .build()
                 .also { focusRequest = it; focusComm = commMode }
         }
-        // A refusal is not treated as a failure to play: it is rare (something
-        // holds focus exclusively), the user just tapped play, and refusing
-        // would leave a dead button with nothing on screen to explain it.
         if (am.requestAudioFocus(req) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             android.util.Log.w("AudioPlayer", "audio focus denied")
         }
@@ -349,9 +305,6 @@ object AudioPlayer {
 
     private fun applyRoute(commMode: Boolean) {
         val am = audioManager ?: return
-        // Ear playback always takes this path (see play): it is what puts the
-        // clip on the earpiece and the volume keys on the call stream, and the
-        // only case that touches the global audio mode.
         if (commMode) {
             am.mode = AudioManager.MODE_IN_COMMUNICATION
             ownsAudioMode = true
@@ -382,10 +335,6 @@ object AudioPlayer {
     }
 
     private fun notifyState() {
-        // A throwing listener is a bug in that listener, not a reason to
-        // silently detach it: dropping the chat-screen hook here used to freeze
-        // the play/pause icon and seekbar for the rest of the screen's life,
-        // with nothing logged.
         try { onStateChanged?.invoke() } catch (e: Exception) {
             android.util.Log.e("AudioPlayer", "onStateChanged listener threw", e)
         }

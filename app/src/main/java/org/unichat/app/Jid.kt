@@ -3,25 +3,16 @@ package org.unichat.app
 fun isGroupId(id: String): Boolean =
     id.endsWith("@g.us") || id.startsWith("tg:-") || isSgGroupId(id)
 
-// A Signal 1:1 chat is keyed by the other party's ACI — or by their PNI, marked
-// with a "pni:" tag, when contact discovery did not return an ACI. Either way it
-// is a UUID; a group is keyed by a base64 group identifier, which is not.
 fun isSgGroupId(id: String): Boolean {
     if (!id.startsWith(Signal.PREFIX)) return false
-    // Both spellings: rows written before the prefix was corrected use
-    // lowercase, and only one can match at the front.
     val bare = id.removePrefix(Signal.PREFIX)
         .removePrefix(Signal.PNI_PREFIX)
         .removePrefix("pni:")
     return bare.length != 36
 }
 
-// A phone JID is the only id kind that holds a real phone number; a contact's
-// @lid alias and a group's @g.us id do not.
 fun isPhoneId(id: String): Boolean = id.endsWith("@s.whatsapp.net")
 
-// Any non-phone id is returned unchanged: prefixing '+' to a LID rendered it as
-// a plausible-looking but entirely fake phone number in the chat title.
 fun phoneLabel(id: String): String =
     if (isPhoneId(id)) "+" + id.substringBefore("@") else id
 
@@ -31,10 +22,6 @@ fun ChatRow.displayLabel(): String =
 fun senderLabel(names: Map<String, String>, senderId: String, senderName: String): String =
     names[senderId]?.takeIf { it.isNotEmpty() } ?: senderName.ifEmpty { phoneLabel(senderId) }
 
-// An @mention as it travels on the wire: the mentioned user's bare id digits.
-// Since WhatsApp moved groups to LIDs those digits are a 15-digit @lid, which
-// reads as pure noise in a bubble. Anchored so an email/handle ("a@1234567")
-// is left alone.
 private val MENTION = Regex("(?<![A-Za-z0-9])@(\\d{7,})")
 
 fun hasMention(text: String): Boolean = text.contains('@') && MENTION.containsMatchIn(text)
@@ -56,12 +43,6 @@ class Mention(val label: String, val id: String)
 
 class MentionHit(val start: Int, val end: Int, val id: String)
 
-// A message that already went on the wire carries bare ids, not the "@Name" the
-// composer typed, so resending it has to read them back out — without this a
-// retried mention reached the group as plain text and never notified the
-// person. [known] decides which id form the digits stand for: a group mention
-// is a @lid, a one-to-one one is a phone jid, and the digits alone cannot tell
-// them apart.
 fun storedMentions(text: String, known: (String) -> Boolean): List<Mention> =
     MENTION.findAll(text).map { m ->
         val digits = m.groupValues[1]
@@ -69,11 +50,6 @@ fun storedMentions(text: String, known: (String) -> Boolean): List<Mention> =
         Mention("@$digits", if (known(lid)) lid else "$digits@s.whatsapp.net")
     }.distinctBy { it.id }.toList()
 
-// Matched on the member's name, not their id, so a draft that outlived the
-// screen still resolves. Longest name first and on word boundaries: "mail@Bob"
-// is an address and "@Bobby" is someone else. [Search] folding is one character
-// in, one out, so an offset into the folded name still points at the same
-// character of the raw text.
 fun mentionHits(text: String, members: List<Mention>): List<MentionHit> {
     if (!text.contains('@')) return emptyList()
     val hits = ArrayList<MentionHit>()
@@ -94,10 +70,6 @@ fun mentionHits(text: String, members: List<Mention>): List<MentionHit> {
     return hits.sortedBy { it.start }
 }
 
-// On the wire the body carries the mentioned person's own digits (WhatsApp
-// clients draw the chip by matching them against MentionedJID), so the composed
-// names are spliced out — back to front, or every offset after the first splice
-// would be wrong.
 fun waMentionText(text: String, members: List<Mention>): Pair<String, List<String>> {
     val hits = mentionHits(text, members)
     if (hits.isEmpty()) return text to emptyList()
@@ -112,9 +84,6 @@ fun selfProtocol(ctx: android.content.Context, chatId: String): String {
     if (chatId.isEmpty()) return ""
     for (i in Accounts.ALL.indices) {
         val account = Accounts.ALL[i]
-        // No isLinked() check: an unlinked account has no self id, so a
-        // non-empty chat id cannot match one — and asking would cost a bridge
-        // call per chat row, which is what this is called from.
         if (chatId == account.selfId()) return account.label(ctx)
     }
     return ""
@@ -128,9 +97,6 @@ fun ChatRow.displayLabelWithProto(ctx: android.content.Context): String {
     return if (proto.isEmpty()) displayLabel() else "${displayLabel()} ($proto)"
 }
 
-// Always from the STORED name, never from a caller's extra: the chat list
-// hands over a label it has already decorated with the protocol, and
-// decorating that again produced "Rafael (Telegram) (Telegram)".
 fun displayNameWithProto(ctx: android.content.Context, chatId: String): String {
     val proto = selfProtocol(ctx, chatId)
     return Bridge.db.displayName(chatId).let { if (proto.isEmpty()) it else "$it ($proto)" }

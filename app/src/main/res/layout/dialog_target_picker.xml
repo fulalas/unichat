@@ -18,8 +18,6 @@
         android:textColor="@color/text_primary"
         android:textColorHint="@color/text_secondary" />
 
-    <!-- height is set in code to half the screen, so the search box and the
-         dialog buttons stay visible whatever the chat count -->
     <ListView
         android:id="@+id/pickerList"
         android:layout_width="match_parent"

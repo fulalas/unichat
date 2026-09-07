@@ -92,9 +92,6 @@
                 android:importantForAccessibility="no"
                 android:visibility="gone" />
 
-            <!-- wrap_content with a 20dp floor, not a fixed 20dp square: the
-                 adapter writes the three-character "99+" overflow string here,
-                 which did not fit and clipped exactly the busiest chats -->
             <TextView
                 android:id="@+id/unreadBadge"
                 android:layout_width="wrap_content"

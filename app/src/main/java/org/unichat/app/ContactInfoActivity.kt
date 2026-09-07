@@ -50,9 +50,6 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
 
     private fun loadMembers() {
         if (!isGroup) return
-        // Io.lookup, not the shared worker: both protocols ask their server for
-        // the member list, and on Telegram every unnamed member costs another
-        // round trip, none of which may sit in front of a screen's DB reads.
         Io.lookup.execute {
             val members = Bridge.groupMembers(chatId)
             runOnUiThread {
@@ -69,8 +66,6 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
         header.visibility = View.VISIBLE
         val list = findViewById<android.view.ViewGroup>(R.id.membersList)
         list.removeAllViews()
-        // a WhatsApp group holds up to 1024, and every row here is inflated on
-        // the main thread: the count above stays honest, the list is cut short
         for (member in members.take(MEMBER_ROWS)) {
             val row = layoutInflater.inflate(R.layout.item_member, list, false)
             val avatar = row.findViewById<ImageView>(R.id.memberAvatar)
@@ -81,11 +76,6 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * CLEAR_TOP drops this screen and hands the new chat to the singleTop
-     * ChatActivity already in the task, so Back leaves for the chat list instead
-     * of walking back through the group's profile.
-     */
     private fun openMemberChat(member: Bridge.Member) {
         startActivity(
             android.content.Intent(this, ChatActivity::class.java)
@@ -119,8 +109,6 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /** The 160dp header is the most this avatar is ever drawn at, so a
-     *  server-sized photo is never decoded whole just to draw it small. */
     private val avatarPx by lazy { (160 * resources.displayMetrics.density).toInt() }
 
     private fun loadAvatar() = AvatarLoader.loadBig(this, chatId, avatarPx) { bmp ->

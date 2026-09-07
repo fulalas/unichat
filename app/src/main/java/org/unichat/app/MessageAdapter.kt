@@ -56,9 +56,6 @@ class MessageAdapter(
         private val DIFF = object : DiffUtil.ItemCallback<MessageRow>() {
             override fun areItemsTheSame(a: MessageRow, b: MessageRow) = a.id == b.id
             override fun areContentsTheSame(a: MessageRow, b: MessageRow): Boolean {
-                // incoming rows never render read state (only outgoing show a
-                // delivery tick), so a mark-read flip on entry shouldn't force
-                // every unread incoming row to rebind
                 if (!a.fromMe && a.isRead != b.isRead) return a == b.copy(isRead = a.isRead)
                 return a == b
             }
@@ -77,15 +74,7 @@ class MessageAdapter(
     fun selectedCount(): Int = selection.count
 
     fun selectedMessages(): List<MessageRow> {
-        // Built once per list version instead of scanning the whole loaded window
-        // on every call: this runs per drag-select row crossing, and in search
-        // mode that window can hold thousands of rows.
         val byId = rowsById ?: messages.associateBy { it.id }.also { rowsById = it }
-        // Timestamps are whole seconds, so a burst of messages ties and the sort
-        // fell back to the order rows were tapped — dragging or tapping from the
-        // bottom up forwarded them reversed. Display position breaks the tie the
-        // same way the chat itself does. A row the loaded window no longer holds
-        // has no position and stays ordered by its time alone.
         val order = orderById ?: HashMap<String, Int>(messages.size).also { m ->
             for (i in messages.indices) m[messages[i].id] = i
             orderById = m
@@ -115,10 +104,6 @@ class MessageAdapter(
 
     private val differ = AsyncListDiffer(this, DIFF)
     private val messages: List<MessageRow> get() = differ.currentList
-    // AsyncListDiffer applies a submit asynchronously: refreshRows used to
-    // resubmit differ.currentList, and while a submit was still diffing that
-    // bumped the generation and silently dropped the newer list — new messages
-    // vanished until the next full submit
     private var submitted: List<MessageRow> = emptyList()
     private var names: Map<String, String> = emptyMap()
 
@@ -148,11 +133,6 @@ class MessageAdapter(
         onCommitted: (() -> Unit)? = null,
     ) {
         val hadRows = differ.currentList.isNotEmpty()
-        // A reply that arrives before the message it quotes renders "Message",
-        // and when that message syncs in the reply row itself is unchanged, so
-        // nothing else would ask for a redraw. The whole window used to redraw
-        // for it: in a reply-heavy group that is every image reloaded and every
-        // span rebuilt per incoming reply.
         val namesChanged = hadRows && newNames != names
         val staleQuotes = if (hadRows && !namesChanged) {
             (newQuoteNames.keys + quoteNames.keys)
@@ -164,10 +144,6 @@ class MessageAdapter(
         quoteNames = newQuoteNames
         submitted = newMessages
         differ.submitList(newMessages) {
-            // dropped here, not before submitList: the differ applies the new
-            // list asynchronously, and selectedMessages() runs on every
-            // selection change — in that window it would rebuild and cache the
-            // map from the list that is still on its way out
             rowsById = null
             orderById = null
             if (namesChanged && itemCount > 0) {
@@ -200,14 +176,10 @@ class MessageAdapter(
     }
 
     private fun applyAudioState(holder: Holder, msg: MessageRow) {
-        // by message, not by path: one Telegram file can back several rows, and
-        // matching on the path lit up every copy as "playing"
         val current = AudioPlayer.currentMsgId == msg.id && AudioPlayer.currentChatId == msg.chatId
         val downloading = isDownloading(msg)
         holder.audioButton.visibility = if (downloading) View.GONE else View.VISIBLE
         holder.audioSpinner.visibility = if (downloading) View.VISIBLE else View.GONE
-        // setImageResource reloads the drawable even for an unchanged id, and this
-        // runs 4x/second per visible row for the whole clip
         val icon = when {
             msg.filePath.isEmpty() -> R.drawable.ic_download
             current && AudioPlayer.isPlaying -> R.drawable.ic_pause
@@ -245,12 +217,6 @@ class MessageAdapter(
         refreshDownloadState(recycler, msgId)
     }
 
-    // A tap that starts a transfer changes nothing the list rebinds on — the
-    // status write happens later, on the transport's own worker — so the row
-    // must be told directly. Without this, only video showed anything, and that
-    // only because progress callbacks kept arriving; every other type sat
-    // unchanged until the file landed, so a second tap looked like the only way
-    // to make it move.
     fun refreshDownloadState(recycler: RecyclerView, msgId: String) {
         for (i in 0 until recycler.childCount) {
             val holder = recycler.getChildViewHolder(recycler.getChildAt(i)) as? Holder ?: continue
@@ -265,17 +231,9 @@ class MessageAdapter(
         }
     }
 
-    // Both signals, because neither covers the other: Bridge's claim is taken on
-    // the tap, while file_status is written later on the transport's own worker
-    // (so a status-only test showed nothing for the first moments after a tap),
-    // and a search-window row carries a status with no claim behind it at all.
     private fun isDownloading(msg: MessageRow): Boolean {
         val live = msg.filePath.isEmpty() &&
             (Bridge.isDownloading(msg.chatId, msg.id) || msg.fileStatus == 1)
-        // A percentage is only ever a label for a live transfer, never proof of
-        // one: a download that reached 40% and then failed kept its entry, so
-        // the row spun for good and a document read "Downloading 40%" where it
-        // should have read "Download failed".
         if (!live) downloadPct.remove(msg.id)
         return live
     }
@@ -305,20 +263,8 @@ class MessageAdapter(
         if (pct != null) holder.videoProgress.progress = pct
     }
 
-    // Retries a previously-failed download (fileStatus == 3): history media that
-    // failed before the media-retry recovery existed would be stuck at that
-    // status forever otherwise. Bridge throttles it to one retry per failure.
     private fun maybeAutoDownload(msg: MessageRow) {
-        // A stored path outlives its file: our own Telegram sends reference the
-        // cacheDir staging copy, which the daily sweep deletes after a day. The
-        // row went on claiming "downloaded", so nothing here ever re-fetched it
-        // and the bubble stayed blank for good. A vanished file is not a
-        // download — Bridge drops the dead reference and fetches it again.
         val gone = msg.filePath.isNotEmpty() && !File(msg.filePath).exists()
-        // Status 1 included: it survives a process death mid-transfer, and
-        // skipping it left a row showing a spinner for a download that had
-        // stopped existing, which nothing would ever restart. Bridge's in-flight
-        // claim keeps this from disturbing a transfer that IS running.
         val pending = msg.fileStatus == 0 || msg.fileStatus == 1 || msg.fileStatus == 3
         if (gone || (msg.filePath.isEmpty() && pending)) onNeedDownload(msg, false)
     }
@@ -373,8 +319,6 @@ class MessageAdapter(
         val sendFailedBadge: ImageView = view.findViewById(R.id.sendFailedBadge)
         var flashFade: Runnable? = null
         var current: MessageRow? = null
-        // one instance per holder, so a touch on another row can't clobber this
-        // row's in-flight link press
         internal val linkMovement = LinkPressMovement()
         var quoteDelegateRect: android.graphics.Rect? = null
         var audioIconRes: Int = 0
@@ -384,8 +328,6 @@ class MessageAdapter(
         var cappedForWidth: Int = -1
     }
 
-    // a long chat full of GIFs would otherwise keep dozens of decoders ticking
-    // in the recycler pool
     override fun onViewRecycled(holder: Holder) {
         super.onViewRecycled(holder)
         ImageLoader.clearAnimating(holder.image)
@@ -401,9 +343,6 @@ class MessageAdapter(
         holder.quotePreview.maxWidth = maxWidth
         holder.image.maxWidth = maxWidth
         holder.image.maxHeight = (metrics.heightPixels * 0.5f).toInt()
-        // the card sits inside the padded bubble, so it caps slightly narrower
-        // than the bubble itself or a long title would push the bubble wider
-        // than every other one in the chat
         val cardWidth = maxWidth - (24 * metrics.density).toInt()
         holder.linkSite.maxWidth = cardWidth
         holder.linkTitle.maxWidth = cardWidth
@@ -412,10 +351,6 @@ class MessageAdapter(
 
     override fun onAttachedToRecyclerView(recyclerView: RecyclerView) {
         super.onAttachedToRecyclerView(recyclerView)
-        // A rotation (or a multi-window resize) re-lays the list out without
-        // rebinding it, so the visible rows would keep the previous width's caps
-        // and their already-decoded images. Posted: a notify during a layout
-        // pass is rejected outright.
         recyclerView.addOnLayoutChangeListener { v, left, _, right, _, oldLeft, _, oldRight, _ ->
             val oldWidth = oldRight - oldLeft
             if (oldWidth == 0 || right - left == oldWidth) return@addOnLayoutChangeListener
@@ -434,14 +369,7 @@ class MessageAdapter(
         }
         holder.image.clipToOutline = true
 
-        // Handlers are attached once here, not on each bind: each reads
-        // holder.current, so no lambda is allocated per row per rebind.
 
-        // Every row listener goes through this gate. The retry check used to be
-        // copied into each listener and the audio seekbar was written without
-        // it, which played back — and offered to download — a voice note that
-        // never left the device. Only the taps that must still reach the actions
-        // menu opt out.
         fun tappedRow(retryIfFailed: Boolean = true): MessageRow? {
             val m = holder.current
             if (selectionMode) {
@@ -454,10 +382,6 @@ class MessageAdapter(
             }
             return m
         }
-        // A voice note that failed to send is still on disk, and the retry gate
-        // above swallowed its play tap: it could not be heard back until the
-        // send finally went through. Only the audio controls opt out, and only
-        // while the recording is actually there.
         fun playableWhileFailed(h: Holder): Boolean {
             val m = h.current ?: return false
             return m.sendFailed && Bridge.fileOnDisk(m)
@@ -523,14 +447,10 @@ class MessageAdapter(
         holder.audioRow.setOnLongClickListener(longPress)
         holder.image.setOnClickListener {
             val m = tappedRow() ?: return@setOnClickListener
-            // a path whose file is gone opens an empty viewer: fetch instead
             if (Bridge.fileOnDisk(m)) {
                 onImageClick(m)
             } else {
                 onNeedDownload(m, true)
-                // the tap's own row, repainted here: these two handlers do not
-                // go through ChatActivity's download-with-toast path, so nothing
-                // else showed the spinner until a progress callback landed
                 applyImageState(holder, m)
             }
         }
@@ -567,13 +487,9 @@ class MessageAdapter(
             tappedRow()?.let(onVideoOpen)
         }
         holder.videoRow.setOnLongClickListener(longPress)
-        // on the frame, not the icon: the icon is hidden while the spinner runs,
-        // and a gone view takes no taps
         holder.audioButtonFrame.setOnClickListener {
             val m = tappedRow(retryIfFailed = !playableWhileFailed(holder))
                 ?: return@setOnClickListener
-            // the stored path can be stale (a swept Telegram staging copy);
-            // re-download instead of "playing" a file that is no longer there
             if (Bridge.fileOnDisk(m)) {
                 AudioPlayer.playPause(m.filePath, m.chatId, m.id)
             } else {
@@ -598,8 +514,6 @@ class MessageAdapter(
                 } else if (Bridge.fileOnDisk(m)) {
                     AudioPlayer.play(m.filePath, m.chatId, m.id, sb?.progress ?: 0)
                 } else {
-                    // same stale-path rule as the play button: "playing" a swept
-                    // staging copy silently did nothing
                     onNeedDownload(m, true)
                     applyAudioState(holder, m)
                 }
@@ -612,17 +526,9 @@ class MessageAdapter(
 
     private fun highlighted(ctx: android.content.Context, raw: String): CharSequence {
         val styled = Markup.render(resolveMentions(raw, names))
-        // the markers are gone from the rendered text, so the search offsets
-        // have to be taken against it and not against the stored message
         val full = styled.toString()
         val q = foldedQuery
         if (q.isEmpty() || q.length > full.length) return styled
-        // Spans are set on the ORIGINAL string, and Search.fold is 1:1, so a
-        // match offset means the same character in both. Folding `full` into a
-        // lowercase copy and reusing those offsets breaks for any character
-        // whose lowercase form has a different length (Turkish 'İ' U+0130
-        // lowercases to two chars): every later offset shifted and setSpan ran
-        // past the end of the Spannable — a crash while scrolling results.
         var idx = Search.indexOf(full, q)
         if (idx < 0) return styled
         val sp = SpannableString(styled)
@@ -683,11 +589,6 @@ class MessageAdapter(
         else -> ""
     }
 
-    /**
-     * Telegram gives one row per reaction TYPE, with its own count baked into
-     * the label ("👍3"); WhatsApp gives one row per person. Reading the count
-     * off each row makes both add up to the number of people who reacted.
-     */
     private fun reactionSummary(csv: String): String {
         var total = 0
         val emojis = LinkedHashSet<String>()
@@ -713,9 +614,9 @@ class MessageAdapter(
             val cp = s.codePointAt(i)
             val n = Character.charCount(cp)
             when {
-                cp == 0x200D -> joined = true // ZWJ: the next emoji joins the previous one
+                cp == 0x200D -> joined = true
                 cp == 0xFE0F || cp == 0xFE0E || cp == 0x20E3 || cp in 0x1F3FB..0x1F3FF -> {}
-                cp in 0x1F1E6..0x1F1FF -> { // regional indicators: a pair is one flag
+                cp in 0x1F1E6..0x1F1FF -> {
                     count++
                     val next = i + n
                     if (next < s.length && s.codePointAt(next) in 0x1F1E6..0x1F1FF) {
@@ -728,10 +629,6 @@ class MessageAdapter(
                     cp in 0x25AA..0x25FE || cp in 0x3297..0x3299 -> {
                     if (joined) joined = false else count++
                 }
-                // keycap sequences (#/*/0-9 + optional VS16 + U+20E3): the base
-                // is a plain ASCII character, so it used to fall into the `else`
-                // below and disqualify the whole message — a lone "1️⃣" rendered
-                // small and inside a bubble unlike every other single emoji
                 cp == 0x23 || cp == 0x2A || cp in 0x30..0x39 -> {
                     var j = i + n
                     if (j < s.length && s.codePointAt(j) == 0xFE0F) j += 1
@@ -740,7 +637,7 @@ class MessageAdapter(
                         i = j + 1
                         continue
                     }
-                    return 0 // a bare digit/#/* is ordinary text
+                    return 0
                 }
                 Character.isWhitespace(cp) -> {}
                 else -> return 0
@@ -816,8 +713,6 @@ class MessageAdapter(
                 holder.senderName.visibility = View.GONE
             }
         }
-        // only write layoutParams when the gravity actually changed: setLayoutParams
-        // unconditionally requests a layout pass that escapes the current one
         if (holder.bubbleGravity != gravity) {
             holder.bubbleGravity = gravity
             params.gravity = gravity
@@ -825,9 +720,6 @@ class MessageAdapter(
         }
 
         holder.imageFrame.visibility = View.GONE
-        // a holder reused in-place for a non-image row (DiffUtil change) keeps
-        // any previous animation attached and hidden; stop and release it. Image
-        // rows are handled by load(), which keeps or replaces the drawable.
         if (msg.msgType !in PICTURE_TYPES) ImageLoader.clearAnimating(holder.image)
         holder.audioRow.visibility = View.GONE
         holder.audioMeta.visibility = View.GONE
@@ -869,8 +761,6 @@ class MessageAdapter(
             val stored = quoteNames[msg.quotedId]
             val text = msg.quotedText.ifEmpty { stored?.text.orEmpty() }
             val type = msg.quotedType.ifEmpty { stored?.msgType.orEmpty() }
-            // through previewLabel, not the stored text: a voice note keeps its
-            // duration there, and a quote card reading "0:14" says nothing
             val body = Markup.render(
                 previewLabel(ctx, type, resolveMentions(text, names), emoji = false)
                     .ifEmpty { ctx.getString(R.string.message_label) }
@@ -912,8 +802,6 @@ class MessageAdapter(
                 holder.audioUnplayedDot.visibility = if (msg.played) View.GONE else View.VISIBLE
                 holder.audioRow.minimumWidth = holder.text.maxWidth
                 holder.audioSeek.isEnabled = msg.filePath.isNotEmpty()
-                // before the state pass, so a download it starts is already
-                // claimed by the time the spinner is decided
                 maybeAutoDownload(msg)
                 applyAudioState(holder, msg)
             }
@@ -929,7 +817,6 @@ class MessageAdapter(
                 val label = msg.text.ifEmpty { ctx.getString(R.string.location_label) }
                 holder.text.text = highlighted(ctx, "📍 $label")
             }
-            // rows stored before contact cards carried a body keep the label
             "contact" -> {
                 if (msg.text.isEmpty()) {
                     holder.text.text = previewLabel(ctx, msg.msgType, "", emoji = true)
@@ -956,11 +843,6 @@ class MessageAdapter(
             }
         }
 
-        // linkify here instead of android:autoLink, which would re-install the
-        // stock movement method on every setText over LinkPressMovement.
-        // Pre-checked: the WEB_URLS pattern is a large regex and this runs on
-        // every bind of every visible text row, where the vast majority of
-        // messages contain no URL at all.
         val linkable = holder.text.visibility == View.VISIBLE && mayContainUrl(holder.text.text)
         if (linkable) {
             android.text.util.Linkify.addLinks(holder.text, android.text.util.Linkify.WEB_URLS)
@@ -975,8 +857,6 @@ class MessageAdapter(
         bindLinkPreview(holder, msg, linkable)
     }
 
-    // Only plain text rows: a caption under a photo already has its own picture
-    // above it, and a card under that reads as a second attachment.
     private fun bindLinkPreview(holder: Holder, msg: MessageRow, linkable: Boolean) {
         fun hide() {
             holder.linkPreview.visibility = View.GONE
@@ -994,10 +874,6 @@ class MessageAdapter(
             onNeedLinkPreview(url)
             return
         }
-        // Only THIS row is no longer waiting. Dropping the whole set (which an
-        // earlier revision did) lost the other rows sharing this link: a
-        // routine rebind between the fetch landing and onLinkPreviewReady
-        // running left every one of them card-less until scrolled away and back.
         previewWaiters[url]?.let {
             it.remove(msg.id)
             if (it.isEmpty()) previewWaiters.remove(url)
@@ -1016,8 +892,6 @@ class MessageAdapter(
             holder.linkImage.setImageDrawable(null)
         } else {
             holder.linkImage.visibility = View.VISIBLE
-            // No height cap: capping would either cut the picture or box it in,
-            // and this app never crops an image.
             LinkPreview.loadImage(row.imagePath, holder.linkImage, holder.linkTitle.maxWidth)
         }
     }
@@ -1027,11 +901,6 @@ class MessageAdapter(
         if (text.isNotEmpty()) view.text = text
     }
 
-    // Extracting a URL means running a large regex, so the answer is kept per
-    // message body: a row is re-bound on every scroll past it, and in search
-    // mode the loaded window holds thousands of them. Keyed on the text rather
-    // than the message id, so an edited message is re-read and two people
-    // sharing one link share the entry.
     private val urlCache = LruCache<String, String>(512)
 
     private fun urlOf(msg: MessageRow): String? {
@@ -1051,8 +920,6 @@ class MessageAdapter(
         }
     }
 
-    // Cheap necessary-condition test for Patterns.AUTOLINK_WEB_URL: it only ever
-    // matches text containing a "." (a host label separator).
     private fun mayContainUrl(text: CharSequence?): Boolean {
         if (text == null) return false
         for (i in text.indices) if (text[i] == '.') return true
@@ -1062,12 +929,6 @@ class MessageAdapter(
 
 internal class HighlightSpan : ForegroundColorSpan(0xFFFFFFFF.toInt())
 
-// autoLink must stay off in the layout: TextView's autoLink path re-installs
-// the stock movement method on every setText.
-//
-// One instance per holder (not a shared singleton): its gesture state is not
-// tied to a widget, so sharing it would let a touch on one row clobber another
-// row's in-flight press (RecyclerView splits multi-pointer events across rows).
 internal class LinkPressMovement : android.text.method.LinkMovementMethod() {
     var pressedLink: android.text.style.URLSpan? = null
         private set
@@ -1088,9 +949,6 @@ internal class LinkPressMovement : android.text.method.LinkMovementMethod() {
         return buffer.getSpans(off, off, android.text.style.URLSpan::class.java).firstOrNull()
     }
 
-    // Handles link opening itself instead of deferring to the stock
-    // LinkMovementMethod: that one clamps a tap to the nearest character, so
-    // touching empty bubble space beside/after a link's line would open it.
     override fun onTouchEvent(
         widget: TextView, buffer: Spannable, event: android.view.MotionEvent,
     ): Boolean {
@@ -1129,20 +987,12 @@ internal class LinkPressMovement : android.text.method.LinkMovementMethod() {
 }
 
 object ImageLoader {
-    // memory-sized (KB): a count-based cache of software bitmaps could pin
-    // hundreds of MB before ever evicting. Sized through the shared helper, so
-    // this and AvatarLoader's cache have one documented combined budget instead
-    // of two independent maxMemory/8 caches (a quarter of the heap between them).
     private val cache = newBitmapCache(12)
     private val animCache = object : LruCache<String, AnimatedImageDrawable>(8) {
         override fun entryRemoved(
             evicted: Boolean, key: String, oldValue: AnimatedImageDrawable,
             newValue: AnimatedImageDrawable?,
         ) {
-            // An evicted entry is no longer reachable for reuse, so nothing will
-            // ever stop it: it kept ticking and holding its decoded frame
-            // buffers until GC. Only when unattached — a drawable still bound to
-            // a visible bubble (callback set) must keep playing.
             if (oldValue.callback == null) oldValue.stop()
         }
     }
@@ -1153,8 +1003,6 @@ object ImageLoader {
 
     private val waiting = PendingViews<Boolean>()
 
-    // The tag is rewritten on every bind, so a recycled holder must not be
-    // painted with the decode it started.
     private fun stillOn(view: ImageView, path: String) = (view.tag as? Tag)?.path == path
 
     private fun deliverBitmap(path: String, bitmap: Bitmap) {
@@ -1167,11 +1015,6 @@ object ImageLoader {
         }
     }
 
-    // An AnimatedImageDrawable cannot be shared between views, so it goes to the
-    // first view still bound to this path and every other waiter is re-queued
-    // for a decode of its own: dropping them left those bubbles blank until the
-    // next rebind, since this instance is attached now and animCache only hands
-    // back a detached one.
     private fun deliverAnimated(path: String, drawable: AnimatedImageDrawable, targetPx: Int) {
         var served = false
         var claimed = false
@@ -1187,8 +1030,6 @@ object ImageLoader {
             applyBounds(view, drawable.intrinsicWidth, drawable.intrinsicHeight, w.payload)
             view.setImageDrawable(drawable)
             drawable.start()
-            // cache only after it's attached (callback now set) so a concurrent
-            // bind can't grab and re-attach this same instance to a second view
             animCache.put(path, drawable)
         }
         if (claimed) dispatchDecode(path, targetPx)
@@ -1219,8 +1060,6 @@ object ImageLoader {
             imageView.setImageBitmap(cached)
             return
         }
-        // Reused only while unattached: a live callback means another bubble is
-        // showing it, and an AnimatedImageDrawable can't be shared.
         val reuse = animCache.get(path)
         if (reuse != null && reuse.callback == null) {
             clearAnimating(imageView)
@@ -1229,36 +1068,18 @@ object ImageLoader {
             reuse.start()
             return
         }
-        // Only flash the placeholder when this holder is now showing a
-        // *different* message (RecyclerView recycled it). A sent
-        // image swaps its path from the staging cache file to the permanent
-        // media copy after upload, and that re-decodes identical bytes for the
-        // same message — keep the current bitmap on screen and swap it in place
-        // once decoding finishes, instead of blinking the placeholder.
         if (prev?.msgId != msg.id) {
             clearAnimating(imageView)
             applyBounds(imageView, 0, 0, sticker)
             imageView.setImageResource(R.drawable.image_placeholder)
         }
-        // The decode target is the widest the bubble can actually draw: a fixed
-        // 1080 minimum meant a 4000x3000 photo decoded at 2000x1500 (~12MB) for a
-        // view about 840px wide, so a handful of photos filled the cache and
-        // scrolling back re-decoded everything.
         val targetPx = if (sticker) 512 else imageView.maxWidth.coerceAtLeast(512)
-        // a decode for this file may already be running; then we are only queued on it
         if (waiting.await(path, imageView, sticker)) dispatchDecode(path, targetPx)
     }
 
     private fun dispatchDecode(path: String, targetPx: Int) {
         executor.execute {
             var delivering = false
-            // Deliberately does NOT read imageView.tag: this is a worker
-            // thread and View is not thread-safe. Staleness is judged from
-            // the waiting list instead — a view recycled onto another row
-            // still holds a live reference, so a file that just went
-            // off-screen may still be decoded, but deliverBitmap re-checks
-            // the tag on the main thread and won't paint it, and the result
-            // lands in the cache for the next bind either way.
             val queued = waiting.peek(path)
             try {
                 if (queued.isEmpty()) return@execute
@@ -1272,14 +1093,9 @@ object ImageLoader {
                     ImageDecoder.decodeDrawable(ImageDecoder.createSource(File(path))) { decoder, info, _ ->
                         val sample = sampleSize(info.size.width, info.size.height, targetPx)
                         if (sample > 1) decoder.setTargetSampleSize(sample)
-                        // static images stay software-allocated so their bitmap is
-                        // readable and safe to cache/share across recycled views;
-                        // animated ones keep the default (hardware) allocator
                         if (!info.isAnimated) decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                     }
                 } catch (e: Throwable) {
-                    // includes OutOfMemoryError (an Error, not an Exception): drop
-                    // this image instead of letting it kill the decode worker
                     android.util.Log.w("ImageLoader", "decode failed for $path", e)
                     return@execute
                 }
@@ -1292,9 +1108,6 @@ object ImageLoader {
                     main.post { deliverAnimated(path, drawable, targetPx) }
                 }
             } finally {
-                // Only this run's own waiters are dropped; anything queued after
-                // its peek could not claim a decode of its own, so it is
-                // re-dispatched here instead of starving on the placeholder.
                 if (!delivering && waiting.settle(path, queued).isNotEmpty()) {
                     dispatchDecode(path, targetPx)
                 }
@@ -1321,9 +1134,6 @@ object ImageLoader {
         }
     }
 
-    // Detaching releases the decoded frame buffers, so a recycled or hidden
-    // bubble isn't holding onto them. Static bitmaps are left in place — they
-    // are cheap and shared via the cache.
     fun clearAnimating(imageView: ImageView) {
         val d = imageView.drawable
         if (d is AnimatedImageDrawable) {
@@ -1338,10 +1148,6 @@ object ImageLoader {
         return sample
     }
 
-    // Deliberately not Io.executor, the app-wide serial worker every screen's DB
-    // reads share: a viewer-sized decode runs for hundreds of milliseconds, and
-    // queueing three of them (ViewPager2 keeps neighbours bound) stalled the
-    // chat list and the open chat behind the swipe.
     fun decodeAsync(path: String, maxDim: Int, onDone: (Bitmap?) -> Unit) {
         executor.execute {
             val bitmap = decodeSampled(path, maxDim)
@@ -1350,11 +1156,6 @@ object ImageLoader {
     }
 
     fun decodeSampled(path: String, maxDim: Int): Bitmap? {
-        // Catch Throwable like load() does: a large photo can throw
-        // OutOfMemoryError, and callers run this on the shared app-wide Io
-        // executor via execute(), where an escaping Error reaches the thread's
-        // uncaught handler and takes down the process (along with the single
-        // worker every other screen's DB reads are queued on).
         return try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(path, bounds)

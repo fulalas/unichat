@@ -7,16 +7,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-// MAIN-THREAD ONLY: the shared SimpleDateFormats and scratch Calendars are not
-// thread-safe.
 object TimeFormat {
-    // Locale and zone are tracked, not just the 24h setting: Android does not
-    // necessarily restart the process on a system or per-app locale change, so
-    // formatters built once at object init kept rendering weekday and month
-    // names in the previous language. SimpleDateFormat and Calendar also capture
-    // TimeZone.getDefault() at construction, so after a zone change (travel,
-    // auto time zone) every clock time, separator, Today/Yesterday decision and
-    // dayStamp() rollover stayed in the old zone.
     private var use24h: Boolean? = null
     private var locale: Locale = Locale.getDefault()
     private var zoneId: String = TimeZone.getDefault().id
@@ -24,9 +15,6 @@ object TimeFormat {
     private var dayFmt = SimpleDateFormat("EEE", locale)
     private var dateFmt = localised("ddMMyyyy", locale)
 
-    // Field order is per-language (dd/MM/yyyy here, MM/dd/yyyy in en-US, yyyy.MM.dd
-    // in zh), so the skeleton has to be resolved against the locale instead of
-    // hardcoding one pattern.
     private fun localised(skeleton: String, loc: Locale) = SimpleDateFormat(
         android.text.format.DateFormat.getBestDateTimePattern(loc, skeleton), loc
     )
@@ -47,9 +35,6 @@ object TimeFormat {
             calA = Calendar.getInstance()
             calB = Calendar.getInstance()
         }
-        // The day period sits before the clock in some languages (zh renders
-        // 上午9:30, not 9:30 上午), so the 12h form has to come from the locale
-        // too, not from a fixed "h:mm a".
         timeFmt = localised(if (h24) "Hm" else "hm", loc)
     }
 
@@ -85,8 +70,6 @@ object TimeFormat {
         return when (days) {
             0 -> clock(epochSeconds)
             1 -> context.getString(R.string.yesterday)
-            // 2..6, not < 7: a negative delta means a clock-skewed future stamp,
-            // which must fall through to the absolute date
             in 2..6 -> dayFmt.format(then.time)
             else -> dateFmt.format(then.time)
         }
@@ -133,12 +116,6 @@ object TimeFormat {
     private fun dayStampOf(c: Calendar): Int =
         c.get(Calendar.YEAR) * 1000 + c.get(Calendar.DAY_OF_YEAR)
 
-    /**
-     * Julian day, not DAY_OF_YEAR: the old 999/0 sentinel for the cross-year
-     * case got it wrong both ways — a Dec 31 message read on Jan 1 rendered as
-     * a date instead of "Yesterday", and a clock-skewed future stamp rendered
-     * as "Today".
-     */
     private fun daysBetween(from: Calendar, to: Calendar): Int =
         (julianDay(to) - julianDay(from)).toInt()
 

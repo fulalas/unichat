@@ -63,10 +63,6 @@
             android:contentDescription="@string/cancel" />
     </LinearLayout>
 
-    <!-- How far back the search actually reached. WhatsApp chats are searched
-         locally, over what has been synced, so the answer "no matches" is only
-         true for that stretch — this says which stretch, and offers to go
-         further. Telegram searches the server, so it never appears there. -->
     <LinearLayout
         android:id="@+id/searchCoverageRow"
         android:layout_width="match_parent"

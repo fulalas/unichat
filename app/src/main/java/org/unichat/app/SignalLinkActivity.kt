@@ -7,11 +7,6 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 
-// Linking as a second device is the only setup that shows the account's own
-// contact list: the main device hands over the account key, which is what that
-// list is encrypted with. Registering a number instead makes this app the main
-// device with a fresh key, and then only people who can be found by phone
-// number ever appear.
 class SignalLinkActivity : BaseActivity(), Bridge.UiListener {
 
     private lateinit var qr: ImageView
@@ -40,16 +35,12 @@ class SignalLinkActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onDestroy() {
         Bridge.removeListener(this)
-        // Leaving means the code on screen will never be scanned; the socket
-        // would otherwise sit there until it timed out, and a second visit
-        // would start a competing attempt.
         if (isFinishing && !Signal.hasSession()) Signal.stopLink()
         super.onDestroy()
     }
 
     override fun onQrCode(proto: String, code: String) {
         if (proto != ProtoPicker.SG) return
-        // The encode plus a 512x512 IntArray is too much for the main thread.
         Io.executor.execute {
             val bitmap = renderQr(code, 512)
             runOnUiThread {

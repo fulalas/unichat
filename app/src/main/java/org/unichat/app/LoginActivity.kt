@@ -14,12 +14,6 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 
-/**
- * The caller says which protocol it wants (see [intent]); without that, "Link"
- * on the Telegram row used to land on the WhatsApp QR. Signal has no panel here
- * because registering as a primary device needs its own screen — its tab opens
- * that screen instead, which is also the only way a first run can reach it.
- */
 class LoginActivity : BaseActivity(), Bridge.UiListener {
 
     companion object {
@@ -51,9 +45,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
 
     private var showing = ProtoPicker.WA
 
-    /** A link is only an event for a protocol still in here, so the repeated
-     *  "connected" a live account keeps sending cannot re-trigger the
-     *  just-linked flow while the user is mid-way through another form. */
     private val pending = LinkedHashSet<String>()
 
     private var awaitingSetup: String? = null
@@ -105,12 +96,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onResume() {
         super.onResume()
-        // A protocol set up on its own screen — Signal — comes back linked with
-        // no event this screen listens for, so the just-linked step would never
-        // run and the first run was left on the QR with no way to the chat list.
-        // Only the one we sent the user to: Signal writes its link flag on its
-        // own thread, so sweeping every account here announced one linked days
-        // ago as if it had just happened.
         val proto = awaitingSetup ?: return
         awaitingSetup = null
         if (Accounts.of(proto).isLinked()) claimLinked(proto)
@@ -126,16 +111,12 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         return pending.firstOrNull { it in panels } ?: ProtoPicker.WA
     }
 
-    // From [pending], which already knows what is unlinked, rather than asking
-    // every account again — each answer is a bridge call or a prefs read.
     private fun buildTabs() {
         val inflater = LayoutInflater.from(this)
         tabRow.removeAllViews()
         tabs.clear()
         for (proto in pending) {
             val tab = inflater.inflate(R.layout.item_login_tab, tabRow, false) as Button
-            // The gap belongs BETWEEN tabs: kept on the first one it pushed the
-            // whole centred row off centre.
             if (tabRow.childCount == 0) {
                 (tab.layoutParams as LinearLayout.LayoutParams).marginStart = 0
             }
@@ -163,26 +144,16 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             )
             tab.setTypeface(null, if (selected) Typeface.BOLD else Typeface.NORMAL)
         }
-        // The QR socket is a live connection to WhatsApp; open it only once the
-        // panel that shows the code is actually on screen. Linking Telegram
-        // used to open it too, for a QR nobody was looking at.
         if (proto == ProtoPicker.WA && proto in pending && !qrStarted) {
             qrStarted = true
             Bridge.startQrLogin()
         }
         statusText.text = when {
             proto == ProtoPicker.TG -> tgStatusForState(Tg.authState)
-            // Re-read rather than left behind: the bridge does not re-emit its
-            // state, so coming back to this tab would otherwise replace the one
-            // message that explains why the QR cannot work.
             Bridge.state == "outdated" -> getString(R.string.state_outdated)
             Bridge.state == "store_broken" -> getString(R.string.state_store_broken)
             else -> getString(R.string.login_waiting)
         }
-        // renderStep, not the "ready" path: switching to this tab with Telegram
-        // already linked used to re-enter the just-linked flow, bouncing back to
-        // the WhatsApp tab or finishing the screen. Linking is an event, not
-        // something a tab tap replays.
         if (proto == ProtoPicker.TG) renderStep(currentTgUiState())
     }
 
@@ -228,11 +199,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    /**
-     * Leaving right away made it impossible to link a second account in the
-     * same sitting, so this screen stays while it still has a protocol to offer
-     * (and is the first-run screen, not the "Link account" one).
-     */
     private fun onLinked(proto: String) {
         WmService.start(this)
         buildTabs()
@@ -277,8 +243,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onQrCode(proto: String, code: String) {
         if (proto != ProtoPicker.WA) return
-        // The encode plus a 512x512 IntArray used to run inline on the main
-        // thread on every QR rotation (~20-30s apart for the whole screen).
         Io.executor.execute {
             val bitmap = renderQr(code, 512)
             runOnUiThread {
@@ -317,9 +281,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
     }
 
     override fun onTgAuth(state: String, message: String) {
-        // A rejected phone/code/password: TDLib's error answers the request but
-        // changes no authorization state, so without this the button stayed
-        // disabled and the screen was stuck until it was reopened.
         if (state.endsWith("_failed")) {
             tgSendCodeButton.isEnabled = true
             tgVerifyButton.isEnabled = true
@@ -329,8 +290,6 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
             Toast.makeText(this, text, Toast.LENGTH_LONG).show()
             return
         }
-        // Telegram connects before it is authorised, so a live socket says
-        // nothing about the link; this is the only signal that it is done.
         if (state == "ready") {
             claimLinked(ProtoPicker.TG)
             return
@@ -367,45 +326,28 @@ class LoginActivity : BaseActivity(), Bridge.UiListener {
     }
 
     override fun onAccountState(proto: String, state: String) {
-        // WhatsApp only ever reports "connected" with a session in hand, so for
-        // it that is the link signal.
         if (proto == ProtoPicker.WA && state == "connected") {
             claimLinked(proto)
             return
         }
         if (proto != ProtoPicker.WA) return
-        // Shown whichever tab is up, and never cleared: an outdated bridge means
-        // the QR will never work, and the state is not re-emitted when the user
-        // comes back to the WhatsApp tab.
         if (state == "outdated") {
             statusText.text = getString(R.string.state_outdated)
             return
         }
-        // The device store could not be reopened after the unlink, so the QR
-        // below can never succeed — say so instead of leaving it spinning.
         if (state == "store_broken") {
             statusText.text = getString(R.string.state_store_broken)
             return
         }
-        // Otherwise only the WhatsApp panel takes its status from the
-        // connection. Telegram connects before it is authorised and keeps
-        // reporting connection changes afterwards, so letting them through here
-        // wiped the prompt — or the "wrong code" — onTgAuth had just put up.
         if (showing != ProtoPicker.WA) return
         statusText.text = when (state) {
             "connecting" -> getString(R.string.login_waiting)
             "disconnected" -> getString(R.string.state_disconnected)
-            // every state is mapped explicitly so internal tokens (e.g.
-            // "logged_out", the expected state on this screen) never show raw
             else -> ""
         }
     }
 
     private fun goToMain() {
-        // The bridge repeats state events with no same-state dedup and this
-        // listener stays registered until onDestroy (which lags finish()), so a
-        // second event would otherwise start MainActivity — and the service —
-        // twice.
         if (leaving) return
         leaving = true
         WmService.start(this)

@@ -2,18 +2,8 @@ package org.unichat.app
 
 import java.text.Normalizer
 
-/**
- * Folding must stay strictly one character in, one character out, so an offset
- * into folded text still points at the same character of the raw text — the
- * message highlighter sets its spans on the raw string. A character whose
- * lower-case or decomposed form is longer than itself (Turkish 'İ' U+0130, the
- * 'ﬁ' ligature) keeps only its first character; shifting later offsets used to
- * push setSpan past the end of the Spannable.
- */
 object Search {
 
-    // Nothing above U+2000 carries marks this strips; below it are Latin
-    // (including Extended Additional, i.e. Vietnamese), Greek and Cyrillic.
     private const val TABLE_SIZE = 0x2000
 
     private val table: CharArray by lazy {
@@ -46,12 +36,6 @@ object Search {
         return String(out)
     }
 
-    /**
-     * [foldedNeedle] must already be through [fold]; [haystack] is raw and is
-     * deliberately not folded up front, because the chat scan runs this over
-     * thousands of messages per keystroke and almost every one fails on the
-     * first character.
-     */
     fun indexOf(haystack: String, foldedNeedle: String, from: Int = 0): Int {
         if (foldedNeedle.isEmpty()) return -1
         var i = from.coerceAtLeast(0)

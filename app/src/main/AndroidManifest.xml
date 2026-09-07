@@ -4,9 +4,6 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- specialUse rather than dataSync: the companion-device connection must
-         stay up indefinitely, and dataSync foreground services are capped at
-         ~6h/24h from Android 15 on (the platform kills the app afterwards). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -26,11 +23,6 @@
         android:localeConfig="@xml/locales_config"
         android:supportsRtl="true">
 
-<!-- Rotation must never reset anything (an in-progress voice recording, a
-             dialog, scroll position, a login QR round): every activity handles
-             rotation-related config changes itself instead of being recreated.
-             The layouts have no orientation-specific variants, so a re-layout
-             of the existing view tree is all a rotation needs. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -105,11 +97,6 @@
             android:exported="true"
             android:excludeFromRecents="true"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden">
-            <!-- SEND_MULTIPLE alongside SEND: without it UniChat simply did not
-                 appear in the chooser for a multi-item share (e.g. picking
-                 several photos in the gallery), with no way for the user to
-                 tell why. The narrower text/image filters are kept so the
-                 chooser can still rank us on specificity. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <action android:name="android.intent.action.SEND_MULTIPLE" />

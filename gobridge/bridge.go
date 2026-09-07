@@ -35,8 +35,6 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-// Callbacks arrive on arbitrary Go threads; the app must dispatch to its own
-// threads as needed.
 type EventListener interface {
 	OnStateChanged(state string)
 	OnQrCode(code string)
@@ -73,13 +71,6 @@ const (
 
 type conn struct {
 	id int
-	// The live client, behind an atomic pointer: resetDevice replaces it after a
-	// logout or a remote unlink, while callers on other goroutines (every
-	// exported function, the event dispatcher, the login loop) read it. As a
-	// plain field that was an unsynchronised read/write of the same word — a
-	// data race, and one where a call already in flight kept using the old,
-	// poisoned client and failed with ErrDeviceDeleted instead of retrying on
-	// the fresh one. Always go through getClient()/setClient().
 	clientPtr atomic.Pointer[whatsmeow.Client]
 	container *sqlstore.Container
 	path      string
@@ -91,18 +82,9 @@ type conn struct {
 	loginActive     bool
 	loginGen int
 	qrReady  bool
-	// pairing codes die with the login socket (~160s), so the login loop
-	// re-requests one for this number on every new socket round
 	pendingPairPhone string
 	pairSentRound    int
 	loginRound       int
-	// A history response carrying messages names its chat, but an empty
-	// end-of-history sync names no conversation, so it is attributed to this
-	// slot. The app keeps at most one on-demand request in flight (enforced
-	// app-side), which makes the single slot unambiguous even for empty
-	// responses. historyForExport is sticky (not cleared on consume) so a
-	// duplicate/late page is still routed away from local storage until the
-	// next request changes the mode.
 	historyChat      string
 	historyForExport bool
 	historyActive    bool
@@ -110,10 +92,6 @@ type conn struct {
 	contactsSyncing bool
 }
 
-// A sleeping phone has to receive the push, wake, and re-upload, so this is
-// generous; when it elapses the download is failed (status 3) and the pending
-// entry dropped, so the bubble never stays stuck "downloading" forever and the
-// mediaRetries map can't accumulate entries for requests that go unanswered.
 const mediaRetryTimeout = 60 * time.Second
 
 type pendingMediaRetry struct {
@@ -125,11 +103,6 @@ type pendingMediaRetry struct {
 	timer         *time.Timer
 }
 
-// Publish-if-absent: two concurrent DownloadFile calls for the same message
-// (the bind-time auto-download vs tap race downloadToPath documents) both pass
-// the hasPendingMediaRetry guard, and letting the second overwrite the first
-// orphaned a timer that later failed a download the phone's answer had
-// already delivered.
 func (c *conn) setPendingMediaRetry(msgId string, r *pendingMediaRetry) bool {
 	mx.Lock()
 	defer mx.Unlock()
@@ -210,7 +183,6 @@ func getConn(connId int) *conn {
 	return conns[connId]
 }
 
-// Never read clientPtr directly: resetDevice swaps it from another goroutine.
 func (c *conn) getClient() *whatsmeow.Client { return c.clientPtr.Load() }
 
 func (c *conn) setClient(client *whatsmeow.Client) { c.clientPtr.Store(client) }
@@ -220,18 +192,6 @@ func (c *conn) log(level int, msg string) {
 	c.listener.OnLog(level, msg)
 }
 
-// Transitions are delivered in the order they were recorded. The callback used
-// to be made after releasing mx, so two racing writers (a Kotlin thread calling
-// Connect/Logout, whatsmeow's event goroutine, the login loop) could record
-// "connecting" then "connected" yet deliver them the other way round. Nothing
-// corrects that afterwards: the
-// transition is deduplicated against c.state, so no further callback fires
-// until the next genuine change, and the app's onStateChanged is
-// last-write-wins — the UI sat on the loser indefinitely.
-//
-// Delivery is done by whichever goroutine finds the queue idle; a writer that
-// arrives mid-drain just enqueues, which also keeps a listener that calls back
-// into setState from deadlocking.
 func (c *conn) setState(state string) {
 	mx.Lock()
 	if c.state == state {
@@ -275,10 +235,6 @@ type bridgeLogger struct {
 	mod string
 }
 
-// Debugf is intentionally a no-op: whatsmeow logs every sent/received node
-// at debug level, and formatting + crossing the gomobile boundary for each
-// one is pure overhead in production. The bridge's own debug lines go
-// through c.log(LogDebug, ...) directly and are unaffected.
 func (l *bridgeLogger) Debugf(msg string, args ...interface{}) {}
 func (l *bridgeLogger) Infof(msg string, args ...interface{}) {
 	l.c.log(LogInfo, l.mod+": "+fmt.Sprintf(msg, args...))
@@ -348,8 +304,6 @@ func Init(dataDir string, listener EventListener) int {
 		return -1
 	}
 	c.setClient(client)
-	// off the caller's thread: Init already blocks the first Activity behind the
-	// store migrations, and this only reclaims disk
 	go sweepPartialMedia(c)
 	return connId
 }
@@ -506,11 +460,6 @@ func loginLoop(c *conn, gen int) {
 				c.setState("disconnected")
 				return
 			default:
-				// NOT fatal: several QR-channel events are informational and
-				// leave the channel open (the passkey-pairing ones already exist
-				// upstream). Treating any unknown event as a terminal failure
-				// aborted login with a bare "Disconnected" and abandoned a still
-				// live socket. Log it and keep reading.
 				c.log(LogWarning, "qr channel event (ignored) "+evt.Event)
 			}
 		}
@@ -620,37 +569,20 @@ func Logout(connId int) {
 	ctx := context.TODO()
 	if err := c.getClient().Logout(ctx); err != nil {
 		c.log(LogWarning, fmt.Sprintf("logout error %v", err))
-		// whatsmeow skips BOTH the disconnect and the local store wipe when the
-		// server logout fails (needs a live authenticated socket to send the
-		// unlink request; fails when offline or mid-reconnect). That would leave
-		// the device still paired locally, so HasSession stays true and the app
-		// bounces back to the chat list on a dead session instead of the login
-		// screen. Force the local cleanup so a logout always takes effect here.
 		c.getClient().Disconnect()
 		if err := c.getClient().Store.Delete(ctx); err != nil {
 			c.log(LogError, fmt.Sprintf("store delete after failed logout %v", err))
 		}
 	}
 	ok := c.resetDevice()
-	// logged_out first either way: the account really is gone, and that is what
-	// moves the app off the chat list. StateStoreBroken then says the client
-	// could not be rebuilt, so the login screen explains the dead QR instead of
-	// showing one that can never succeed.
 	c.setState("logged_out")
 	if !ok {
 		c.setState(StateStoreBroken)
 	}
 }
 
-// Kotlin matches on this exact word (LoginActivity).
 const StateStoreBroken = "store_broken"
 
-// A logout — ours or a remote unlink (events.LoggedOut) — poisons the device's
-// in-memory stores, so the old client can never pair again (Connect fails with
-// ErrDeviceDeleted). Rebuilding here makes a re-login work without restarting
-// the app. The per-session caches otherwise leak into the next account: stale
-// read watermarks marked its incoming messages already-read, and an armed
-// media-retry timer fired into the new session.
 func (c *conn) resetDevice() bool {
 	ctx := context.TODO()
 	c.getClient().Disconnect()
@@ -665,11 +597,6 @@ func (c *conn) resetDevice() bool {
 	c.historyActive = false
 	c.historyForExport = false
 	mx.Unlock()
-	// Answers whether the client really was replaced. Both failures used to
-	// return quietly, leaving the poisoned client in place while Logout went on
-	// to report "logged_out": the app moved to the login screen and every QR
-	// round after that failed with ErrDeviceDeleted for the rest of the
-	// process, with nothing but a log line to say why.
 	deviceStore, err := c.container.GetFirstDevice(ctx)
 	if err != nil {
 		c.log(LogError, fmt.Sprintf("dev store error after logout %v", err))
@@ -714,12 +641,6 @@ func GetSelfId(connId int) string {
 	return strFromJid(*client.Store.ID)
 }
 
-// The id comes from the app, which staged its row under it before calling: a
-// receipt, reaction or edit landing before the send returns needs a row to
-// attach to.
-// whatsmeow's default is 75s, and nothing is known about the message until the
-// ack arrives — a minute of silence with no mark and no retry. Retrying early is
-// safe: it goes out under the same message id, which the server deduplicates.
 const sendAckTimeout = 8 * time.Second
 
 func sendWithEcho(c *conn, chatJid types.JID, msgID string, message *waE2E.Message, what string) string {
@@ -756,9 +677,6 @@ func SendTextMessage(connId int, chatId string, msgId string, text string, menti
 		return ""
 	}
 	message := &waE2E.Message{Conversation: &text}
-	// The @digits in the body are only decoration: what actually notifies the
-	// mentioned person is MentionedJID, and Conversation cannot carry a
-	// ContextInfo at all — so a mention forces the extended shape.
 	if mentions := splitIds(mentionedIds); len(mentions) > 0 {
 		message = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 			Text:        proto.String(text),
@@ -778,10 +696,6 @@ func splitIds(ids string) []string {
 	return out
 }
 
-// One member per line, "<chat id>\t<mention jid>". They differ: a group
-// addresses its members by LID, which is what a mention's digits must match,
-// while a chat with that person belongs under their phone number — opening a
-// @lid chat would fork a second thread for someone already listed there.
 func GetGroupMembers(connId int, chatId string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -937,8 +851,6 @@ func mediaEditMessage(fileId string, caption string) *waE2E.Message {
 		vid.Caption = proto.String(caption)
 		return &waE2E.Message{VideoMessage: vid}
 	}
-	// "ptv" lands here on purpose: a round video note carries no caption in
-	// WhatsApp, so there is nothing an edit could legitimately change.
 	return nil
 }
 
@@ -1003,11 +915,6 @@ func EditMessage(connId int, chatId string, msgId string, newText string, origTi
 	if c.getClient().Store.ID != nil {
 		senderId = strFromJid(*c.getClient().Store.ID)
 	}
-	// Update locally, keeping the original timestamp/order (timeSent 0).
-	// isRead is FALSE, not true: for an outgoing message it means "the peer read
-	// it", and the app's upsert raises is_read monotonically — passing true made
-	// editing your own unread message permanently show the read double-tick, with
-	// no later receipt able to correct it. false cannot downgrade a real receipt.
 	c.listener.OnMessage(chatId, msgId, senderId, newText, true, 0, false, "", "", 0, 0, false, true, "", "", "", "", false)
 	return true
 }
@@ -1046,8 +953,6 @@ func echoSentMessage(c *conn, chatJid types.JID, resp whatsmeow.SendResponse, me
 	handleMessageFull(c, messageInfo, message, false, false, false, false, true)
 }
 
-// The echo is kept and flagged rather than deleted: a send that failed used to
-// take its bubble away with it, so the message the user wrote was simply gone.
 func failEcho(c *conn, chatJid types.JID, msgID string) {
 	c.listener.OnMessageSendFailed(getChatId(c.getClient(), &chatJid, nil), msgID)
 }
@@ -1084,9 +989,6 @@ func sendMedia(c *conn, chatId string, msgID string, filePath string, msgType st
 		return ""
 	}
 	message, ext := build(uploaded)
-	// Default ack timeout, not the short one the text path uses: a media send
-	// that times out skips finishMediaSend, leaving the row on the cacheDir
-	// staging copy that gets swept — no bytes behind a message the peer has.
 	resp, err := client.SendMessage(context.Background(), chatJid, message,
 		whatsmeow.SendRequestExtra{ID: msgID})
 	if err != nil {
@@ -1099,13 +1001,6 @@ func sendMedia(c *conn, chatId string, msgID string, filePath string, msgType st
 	return resp.ID
 }
 
-// The plain Upload takes the whole plaintext as a []byte and allocates a
-// second, encrypted copy of it, so an outgoing video or document — picked by
-// the user, with no size limit anywhere in the path — cost about twice its size
-// in the heap of a mobile process, held until the send completed. UploadReader
-// streams both passes through a scratch file instead; it is named like
-// downloadToPath's temp files so sweepPartialMedia reclaims it if the process
-// is killed mid-send.
 func uploadFile(c *conn, client *whatsmeow.Client, msgId string, filePath string,
 	mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
 	var resp whatsmeow.UploadResponse
@@ -1130,11 +1025,6 @@ func uploadFile(c *conn, client *whatsmeow.Client, msgId string, filePath string
 	return client.UploadReader(context.Background(), src, tmp, mediaType)
 }
 
-// The wrapper, not only the inner bit: an official client sends a view-once
-// photo as a ViewOnceMessageV2 (a voice note as the V2Extension), which is why
-// the receive path above had to learn that a wrapped voice note carries no
-// ViewOnce bit of its own. whatsmeow's send path unwraps all three to derive
-// the stanza's type, so handing it a wrapped message is supported.
 func wrapViewOnce(msg *waE2E.Message, extension bool) *waE2E.Message {
 	if extension {
 		return &waE2E.Message{
@@ -1217,10 +1107,6 @@ func SendVideoMessage(connId int, chatId string, msgId string, filePath string, 
 		})
 }
 
-// The app deletes the staged source once the send returns, so the echo's path
-// must be swapped for a permanent copy. If the copy fails, the file state is
-// reset instead so the bubble re-downloads via the fileId recorded by
-// echoSentMessage rather than pointing forever at the soon-deleted staging file.
 func finishMediaSend(c *conn, chatJid types.JID, msgId string, ext string, srcPath string) {
 	chatId := getChatId(c.getClient(), &chatJid, nil)
 	if localPath := copyToMedia(c, msgId, ext, srcPath); localPath != "" {
@@ -1291,9 +1177,6 @@ func SendDocumentMessage(connId int, chatId string, msgId string, filePath strin
 		})
 }
 
-// The fileId crosses gomobile and is stored per message row, and DownloadFile
-// never reads the thumbnail bytes or the ContextInfo — whose quoted message
-// can embed its own thumbnail — so carrying them bloated it several-fold.
 func encodeFileId(kind string, m proto.Message) string {
 	m = proto.Clone(m)
 	switch t := m.(type) {
@@ -1405,10 +1288,6 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 		return fail("download", err)
 	}
 
-	// media has expired on WhatsApp's servers, which is common for old
-	// history media even though the phone still holds it: ask the phone to
-	// re-upload it. Its answer arrives later as an *events.MediaRetry,
-	// handled by handleMediaRetryEvent.
 	chatJid, jerr := types.ParseJID(chatId)
 	if jerr != nil {
 		return fail("download", err)
@@ -1433,16 +1312,6 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 		ext:           ext,
 		total:         total,
 	}
-	// Arm the timer BEFORE publishing the entry. It used to be assigned after
-	// setPendingMediaRetry, so the field was written without mx while
-	// handleMediaRetryEvent read it under mx — a data race whose losing side
-	// left a live timer nobody could stop, which then reported a failed download
-	// for one that had actually succeeded.
-	//
-	// Give up if the phone never answers: fail the download so the bubble leaves
-	// "downloading" and becomes retryable, and drop the pending entry. (If the
-	// answer arrives first, takePendingMediaRetry here finds nothing and this is
-	// a no-op; handleMediaRetryEvent stops the timer on success.)
 	pending.timer = time.AfterFunc(mediaRetryTimeout, func() {
 		if _, ok := c.takePendingMediaRetry(msgId); ok {
 			c.log(LogWarning, fmt.Sprintf("media retry timed out: chat=%s msg=%s", chatId, msgId))
@@ -1474,12 +1343,6 @@ func downloadToPath(c *conn, chatId string, msgId string, downloadable whatsmeow
 	if err != nil {
 		return "", err
 	}
-	// Download into a distinct temp file and rename on success, instead of
-	// writing the final path in place. Two concurrent attempts for the same
-	// message (a bind-time auto-download and a tap, or a media-retry answer
-	// racing a manual retry) derive the SAME deterministic path: in-place they
-	// truncated each other's output, and either one's failure cleanup unlinked
-	// the other's good file. Rename within the directory is atomic.
 	tmp := fmt.Sprintf("%s.part%d", path, time.Now().UnixNano())
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -1579,8 +1442,6 @@ func mediaPath(c *conn, msgId string, ext string) (string, error) {
 	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
 		return "", err
 	}
-	// the extension is remote-controlled too, so it gets the same treatment as
-	// the id (the leading '.' is added here, not allowed through)
 	cleanExt := ""
 	if ext != "" {
 		cleanExt = "." + safeName(strings.TrimPrefix(ext, "."), false)
@@ -1588,8 +1449,6 @@ func mediaPath(c *conn, msgId string, ext string) (string, error) {
 	return dir + "/" + safeName(msgId, false) + cleanExt, nil
 }
 
-// allowDot keeps '.', which the avatar cache needs because a chat id contains
-// one and media paths must not, so the extension stays the only dot there.
 func safeName(s string, allowDot bool) string {
 	return strings.Map(func(r rune) rune {
 		switch {
@@ -1624,8 +1483,6 @@ func copyToMedia(c *conn, msgId string, ext string, srcPath string) string {
 		err = cerr
 	}
 	if err != nil {
-		// a truncated copy is worse than none: the bubble would render a broken
-		// file instead of re-downloading via the recorded fileId
 		os.Remove(path)
 		c.log(LogWarning, fmt.Sprintf("write media error %v", err))
 		return ""
@@ -1649,7 +1506,7 @@ func (p *progressFile) Write(b []byte) (int, error) {
 	if p.total > 0 {
 		pct := int(p.written * 100 / p.total)
 		if pct > 99 {
-			pct = 99 // completion is signalled by OnFileDownloaded
+			pct = 99
 		}
 		if pct > p.lastPct {
 			p.lastPct = pct
@@ -1659,9 +1516,6 @@ func (p *progressFile) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// Seeking back to the start begins a fresh transfer (a retry) or the decrypt
-// pass; reset the counter so a retry re-reports from 0 and decrypt writes (via
-// WriteAt) don't resurrect stale progress.
 func (p *progressFile) Seek(offset int64, whence int) (int64, error) {
 	if offset == 0 && whence == io.SeekStart {
 		p.written = 0
@@ -1676,10 +1530,6 @@ func (p *progressFile) WriteAt(b []byte, off int64) (int, error) { return p.f.Wr
 func (p *progressFile) Truncate(size int64) error                { return p.f.Truncate(size) }
 func (p *progressFile) Stat() (os.FileInfo, error)               { return p.f.Stat() }
 
-// PLACEHOLDER_MESSAGE_RESEND: the phone answers with the full message as a
-// normal live event. The only way to refill a bodyless contact card too
-// recent for on-demand history sync, which skips the stretch already synced
-// to companions.
 func RequestMessageResend(connId int, chatId, senderId, msgId string) bool {
 	c := getConn(connId)
 	if c == nil {
@@ -1733,7 +1583,6 @@ func RequestChatHistory(connId int, chatId string, oldestMsgId string, oldestTim
 	if msg == nil {
 		return false
 	}
-	// register before sending: a fast response must find the entry in place
 	c.setPendingHistory(chatId, forExport)
 	_, err = client.SendMessage(context.Background(), client.Store.ID.ToNonAD(), msg,
 		whatsmeow.SendRequestExtra{Peer: true})
@@ -1793,9 +1642,6 @@ func GetMyAbout(connId int) string {
 	return infos[self].Status
 }
 
-// "" covers both a contact with no About and one whose privacy settings hide
-// it — the two are indistinguishable to a client, so the screen simply shows
-// nothing rather than claiming either.
 func GetUserAbout(connId int, userId string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1813,10 +1659,6 @@ func GetUserAbout(connId int, userId string) string {
 	return infos[jid].Status
 }
 
-// Cannot be mistaken for a chat id, which always carries an '@'. "Not
-// registered" ("") must be told apart from "could not check": reporting the
-// first for the second tells someone their contact is not on WhatsApp when the
-// network merely dropped.
 const ResolveNumberFailed = "failed"
 
 func ResolveNumber(connId int, phone string) string {
@@ -1833,10 +1675,6 @@ func ResolveNumber(connId int, phone string) string {
 		if !r.IsIn {
 			continue
 		}
-		// JID is the "canonical" id, which for most accounts is now a @lid —
-		// and a chat opened under that id showed nothing, because the message
-		// is filed under the phone JID. Prefer the phone JID, which is what
-		// this app keys chats by, and fall back only when there is none.
 		if !r.PhoneNumber.IsEmpty() {
 			return strFromJid(r.PhoneNumber)
 		}
@@ -1878,18 +1716,10 @@ func SetAbout(connId int, text string) bool {
 	if c == nil {
 		return false
 	}
-	// upstream took a bare string until whatsmeow 662b0121; it now takes a
-	// struct whose Text is a pointer, so an empty About ("" — the user clearing
-	// it) still has to be sent as a non-nil pointer to an empty string rather
-	// than as a nil field the server would read as "leave it alone"
 	client := c.getClient()
 	if err := client.SetStatusMessage(context.TODO(),
 		types.SetStatusInput{Text: proto.String(text)}); err != nil {
 		c.log(LogWarning, fmt.Sprintf("about set error %v", err))
-		// The About is set with a GraphQL ("mex") mutation, and a bare
-		// "400 Bad Request" from it does not say whether that channel works for
-		// this client at all; a read-only mex query separates "this mutation is
-		// refused" from "no mex query of ours is accepted".
 		if _, probeErr := client.GetSubscribedNewsletters(context.TODO()); probeErr != nil {
 			c.log(LogWarning, fmt.Sprintf("about set: mex probe query also failed %v", probeErr))
 		} else {
@@ -1915,8 +1745,6 @@ func SetProfilePicture(connId int, jpegPath string) bool {
 		return false
 	}
 	self := client.Store.ID.ToNonAD()
-	// the own profile picture shares the group-photo IQ (namespace
-	// w:profile:picture), targeting our own JID instead of a group.
 	if _, err := client.SetGroupPhoto(context.TODO(), self, data); err != nil {
 		c.log(LogWarning, fmt.Sprintf("set profile picture error %v", err))
 		return false
@@ -2024,9 +1852,6 @@ func MutedChats(connId int, chatIds string) string {
 	return strings.Join(muted, "\n")
 }
 
-// Modern WhatsApp indexes a 1:1 chat under its LID, so an app-state patch keyed
-// by the phone number does not match the phone and other devices; groups keep
-// their @g.us JID.
 func appStateTarget(ctx context.Context, c *conn, jid types.JID) types.JID {
 	if jid.Server == types.DefaultUserServer {
 		if lid, _ := c.getClient().Store.LIDs.GetLIDForPN(ctx, jid); !lid.IsEmpty() {
@@ -2047,9 +1872,6 @@ func SetMute(connId int, chatId string, muted bool) bool {
 	}
 	ctx := context.TODO()
 	target := appStateTarget(ctx, c, jid)
-	// Reports the outcome: this used to be a void function that only logged, so
-	// an offline toggle left the local flag flipped, the server none the wiser,
-	// and nothing to tell the user or trigger a retry.
 	if err := c.getClient().SendAppState(ctx, appstate.BuildMute(target, muted, 0)); err != nil {
 		c.log(LogWarning, fmt.Sprintf("set mute error %v", err))
 		return false
@@ -2057,9 +1879,6 @@ func SetMute(connId int, chatId string, muted bool) bool {
 	return true
 }
 
-// The phone matches a delete against the range it is told about, so a patch
-// with no last message key is accepted and then ignored: the chat stays on
-// every other device.
 func DeleteChat(
 	connId int, chatId string, lastMsgId string, lastMsgFromMe bool, lastMsgSenderId string,
 	lastMsgTime int64, deleteMedia bool,
@@ -2117,8 +1936,6 @@ func requestContacts(c *conn) {
 	selfId := strFromJid(*client.Store.ID)
 	selfName := client.Store.PushName
 	c.listener.OnContact(selfId, selfName, phoneFromUserId(selfId), true, false, true)
-	// our own LID alias, so anything addressed by it (a group message of ours)
-	// resolves to our push name instead of an address-book label
 	selfLid := ""
 	if lid := client.Store.LID; !lid.IsEmpty() {
 		selfLid = strFromJid(lid.ToNonAD())
@@ -2129,10 +1946,6 @@ func requestContacts(c *conn) {
 	if err != nil {
 		c.log(LogWarning, fmt.Sprintf("get contacts error %v", err))
 	} else {
-		// entries keyed by both phone JID and LID JID, so group participants
-		// (addressed by their LID) resolve to the address-book name too.
-		// saved marks real address-book contacts; push-name-only entries are
-		// kept for display but excluded from the contact search.
 		type contactEntry struct {
 			name  string
 			saved bool
@@ -2152,9 +1965,6 @@ func requestContacts(c *conn) {
 			}
 			names[strFromJid(jid)] = contactEntry{name, isSaved(info)}
 			if lid, _ := client.Store.LIDs.GetLIDForPN(ctx, jid); !lid.IsEmpty() {
-				// the LID alias keeps the name (group sender labels) but is
-				// never marked saved: the phone-JID row represents the
-				// contact in search, so the alias would only duplicate it
 				names[strFromJid(lid)] = contactEntry{name, false}
 			}
 		}
@@ -2179,11 +1989,6 @@ func requestContacts(c *conn) {
 			}
 		}
 
-		// our own number can be in the address book too (people save
-		// themselves); emitting it here as a normal contact overwrote the self
-		// row above, losing the push name and the is_self flag — the chat with
-		// yourself was then titled with the address-book label (often just the
-		// number) and showed up in the contact search
 		for userId, e := range names {
 			if userId == selfId || userId == selfLid {
 				continue
@@ -2247,8 +2052,6 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 		}
 	}
 
-	// on any fetch failure, fall back to the (stale) cached file so avatars
-	// don't vanish when offline or on a transient error
 	chatJid, err := types.ParseJID(chatId)
 	if err != nil {
 		return cached
@@ -2258,11 +2061,6 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 	if err != nil || pic == nil || len(pic.URL) == 0 {
 		return cached
 	}
-	// A bounded client, NOT http.DefaultClient: a stalled CDN connection has no
-	// deadline of its own and this runs on caller threads that matter (the
-	// single notification worker, the 2-thread media pool), where one wedged
-	// request blocks everything queued behind it for the process lifetime.
-	// io.ReadAll is capped for the same reason.
 	resp, err := avatarHTTP.Get(pic.URL)
 	if err != nil {
 		return cached
@@ -2271,24 +2069,10 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 	if resp.StatusCode != 200 {
 		return cached
 	}
-	// The extra byte tells "hit the cap" apart from "exactly the cap": the
-	// LimitReader truncates silently, and the cut-off JPEG then replaced the
-	// good cached copy that was the fallback.
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAvatarBytes+1))
 	if err != nil || len(data) > maxAvatarBytes {
 		return cached
 	}
-	// Write to a temp file and rename: os.WriteFile truncates in place, and the
-	// app decodes this very path concurrently — it could read a half-written
-	// file, and the stale copy that would have been the fallback was already
-	// destroyed. Rename is atomic within the directory.
-	//
-	// The temp name carries a nonce, like downloadToPath's ".part<nanos>". With
-	// a fixed ".tmp" two concurrent fetches for the same id interleaved their
-	// writes into one file and renamed a corrupt JPEG over the good cached copy
-	// — reachable because AvatarLoader's pool dedups only within itself, while
-	// ProfileActivity.loadAvatar and Bridge.openAvatar call in from other
-	// executors.
 	tmp := fmt.Sprintf("%s.tmp%d", avatarPath, time.Now().UnixNano())
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		os.Remove(tmp)
@@ -2303,7 +2087,7 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 
 var avatarHTTP = &http.Client{Timeout: 20 * time.Second}
 
-const maxAvatarBytes = 8 << 20 // far beyond any profile picture
+const maxAvatarBytes = 8 << 20
 
 func GetCachedAvatarPath(connId int, chatId string) string {
 	c := getConn(connId)
@@ -2322,7 +2106,6 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 
 	case *events.Connected:
 		c.setState("connected")
-		// announcing our own presence is required to receive others'
 		go func() {
 			if err := c.getClient().SendPresence(context.TODO(), types.PresenceAvailable); err != nil {
 				c.log(LogWarning, fmt.Sprintf("send presence error %v", err))
@@ -2333,10 +2116,6 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 		c.setState("disconnected")
 
 	case *events.LoggedOut:
-		// whatsmeow deletes the local device store when the phone unlinks us,
-		// which permanently poisons this client (Connect then fails with
-		// ErrDeviceDeleted). Rebuild it the way Logout() does, or QR/pair login
-		// could not succeed again until the process was restarted.
 		c.setState("logged_out")
 		if !c.resetDevice() {
 			c.setState(StateStoreBroken)
@@ -2348,9 +2127,6 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 	case *events.StreamReplaced:
 		c.setState("disconnected")
 
-	// whatsmeow marks these three disconnects as expected, so no
-	// events.Disconnected follows them — without these cases the state stayed
-	// "connecting" forever and the UI hung on it.
 	case *events.TemporaryBan:
 		c.log(LogWarning, "temporarily banned: "+evt.String())
 		c.setState("disconnected")
@@ -2365,11 +2141,6 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 
 	case *events.AppStateSyncComplete:
 		if evt.Name == appstate.WAPatchCriticalBlock {
-			// Only if the socket really is up. App-state completion is dispatched
-			// from its own goroutine after IQs that can take a minute, so it could
-			// land after a Disconnected event and claim "connected" for a dead
-			// socket — and because setState suppresses no-op transitions, the
-			// later genuine Connected event then produced no callback at all.
 			if cl := c.getClient(); cl != nil && cl.IsConnected() {
 				c.setState("connected")
 			}
@@ -2406,9 +2177,6 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 		chatId := getChatId(c.getClient(), &evt.JID, nil)
 		c.listener.OnMute(chatId, isMuteActive(evt.Action))
 
-	// Full-sync deletes are skipped: the initial app-state pull replays every
-	// delete the account ever made, which would wipe chats this device has
-	// since re-synced from history.
 	case *events.DeleteChat:
 		if !evt.FromFullSync {
 			c.listener.OnChatDeleted(getChatId(c.getClient(), &evt.JID, nil), evt.DeleteMedia)
@@ -2435,10 +2203,6 @@ func handleMediaRetryEvent(c *conn, evt *events.MediaRetry) {
 	if !ok {
 		return
 	}
-	// The timer is always set: it is armed before the entry is published, so
-	// taking the entry out of the map under mx also gives us a fully
-	// initialised struct. (Kept nil-safe because resetDevice walks the same
-	// field.)
 	if pending.timer != nil {
 		pending.timer.Stop()
 	}
@@ -2456,10 +2220,6 @@ func handleMediaRetryEvent(c *conn, evt *events.MediaRetry) {
 		return
 	}
 	pending.setDirectPath(notif.GetDirectPath())
-	// Off the event goroutine: this is a full media transfer (plus MAC, decrypt
-	// and SHA256 passes), and whatsmeow dispatches events from its serialized
-	// node-handler queue — running it inline stalled every queued message and
-	// receipt for the duration of the download.
 	msgId := evt.MessageID
 	go func() {
 		path, err := downloadToPath(c, pending.chatId, msgId, pending.downloadable, pending.ext, pending.total)
@@ -2487,21 +2247,14 @@ func handleReceipt(c *conn, receipt *events.Receipt) {
 	}
 }
 
-// Counted off the raw key, so an entry this app cannot parse or display still
-// counts — a page of nothing but stubs looked empty, and the walk read that as
-// the end of the history and left everything older unfetched forever.
 func historyPage(msgs []*waHistorySync.HistorySyncMsg) (size int, oldestId string, oldestTime int64, oldestFromMe bool) {
 	for _, syncMessage := range msgs {
 		webMessageInfo := syncMessage.Message
 		id := webMessageInfo.GetKey().GetID()
 		if id == "" {
-			continue // cannot anchor the next page: the app reads "" as exhausted
+			continue
 		}
 		size++
-		// <=, not <: whatsapp timestamps are second-resolution, so a page
-		// routinely ends on several entries sharing the oldest second, and
-		// anchoring on the first of them makes the next page re-deliver that
-		// same second instead of moving past it
 		t := int64(webMessageInfo.GetMessageTimestamp())
 		if oldestId == "" || t <= oldestTime {
 			oldestId, oldestTime, oldestFromMe = id, t, webMessageInfo.GetKey().GetFromMe()
@@ -2565,10 +2318,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 
 		convChatId := getChatId(client, &chatJid, nil)
 		forExport := onDemand && c.exportRouted(convChatId)
-		// answers the request AFTER the page's messages are delivered below;
-		// the true oldest of the page (even a non-displayable entry) anchors
-		// the app's next page request. Fired for every on-demand conversation;
-		// the app ignores it unless it matches the request in flight.
 		answerRequest := func() {
 			if !onDemand {
 				return
@@ -2602,9 +2351,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 		hasMessages := false
 		for _, p := range parsed {
 			isRead := true
-			// only messages that become chat rows may consume the unread
-			// budget; reactions/protocol entries would otherwise eat it and
-			// leave real unread messages marked read
 			if !p.info.IsFromMe && unreadLeft > 0 && isDisplayable(p.msg) {
 				isRead = false
 				unreadLeft--
@@ -2635,9 +2381,6 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 		answerRequest()
 	}
 
-	// an empty on-demand sync means the start of the chat's history was
-	// reached; it names no conversation, so attribute it to the single
-	// outstanding request
 	if onDemand && !answeredPending {
 		if chatId, forExport, ok := c.takePendingHistory(); ok {
 			c.log(LogDebug, fmt.Sprintf("on-demand page empty: chat=%s export=%v", chatId, forExport))
@@ -2654,9 +2397,6 @@ func isDisplayable(msg *waE2E.Message) bool {
 	return ok
 }
 
-// Live group events carry LIDs, while history keys and the local send echo
-// carry phone JIDs. Without normalizing to the phone JID, the same user's
-// reaction can be stored twice and removals can miss the stored row.
 func reactionUserId(c *conn, jid types.JID) string {
 	if jid.Server == types.HiddenUserServer {
 		if pn, _ := c.getClient().Store.LIDs.GetPNForLID(context.TODO(), jid); !pn.IsEmpty() {
@@ -2693,10 +2433,6 @@ func (c *conn) messageIsRead(chatId string, fromMe bool, timeSent time.Time, isS
 	if fromMe {
 		return peerRead || isSelf
 	}
-	// Strictly BEFORE the read watermark. The watermark is the second of the
-	// last message we marked read, and whatsapp timestamps are second-resolution:
-	// with `!After` a brand-new message arriving in that same second counted as
-	// already read, so it produced no unread badge and no notification at all.
 	return isSyncRead || isSelf || timeSent.Before(c.getTimeRead(chatId))
 }
 
@@ -2714,9 +2450,6 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 	}
 
 	isEdited := len(messageInfo.Edit) > 0
-	// a live edit updates an existing row's text in place; it must not change
-	// the row's stored timestamp (which would reorder the chat), so its
-	// delivery carries timeSent 0 and the app keeps the original order
 	editInPlace := false
 	if pm := msg.GetProtocolMessage(); pm != nil {
 		switch pm.GetType() {
@@ -2742,17 +2475,7 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 	if !ok {
 		return
 	}
-	// evt.IsViewOnce (whatsmeow's UnwrapRaw) is the only reliable signal for a
-	// view-once voice message: unlike image/video, the inner AudioMessage
-	// unwrapped from a ViewOnceMessageV2Extension carries no ViewOnce bit of
-	// its own, so getMessageContent's per-type check can't catch it — without
-	// this override it would be treated as ordinary downloadable audio whose
-	// media key was never shared to this (linked) device, and the download
-	// would simply fail silently.
 	if isViewOnce {
-		// keep the context this message carries: replacing the whole struct
-		// dropped the quote it was replying to (and its forwarded flag), leaving
-		// an orphan placeholder bubble with no link back to the original
 		content = msgContent{
 			msgType:    viewOnceType,
 			quotedId:   content.quotedId,
@@ -2778,14 +2501,6 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 		content.quotedType, messageInfo.PushName, content.forwarded)
 }
 
-// The one UndecryptableMessage case that never resolves into a normal
-// *events.Message: a view-once message on a linked/companion device.
-// WhatsApp intentionally never forwards view-once media keys to companion
-// devices, so the phone reports it as permanently unavailable (type
-// "view_once") instead of encrypted content, and no retry
-// will ever turn it into a decryptable one. Every other UndecryptableMessage
-// cause is followed by an automatic retry that arrives as a normal Message
-// event, so this must not emit anything for those.
 func handleUndecryptableMessage(c *conn, evt *events.UndecryptableMessage) {
 	if evt.UnavailableType != events.UnavailableTypeViewOnce {
 		return
@@ -2835,10 +2550,6 @@ func extractQuote(ci *waE2E.ContextInfo) (id string, text string, msgType string
 	return id, qc.text, qc.msgType
 }
 
-// The first line is ALWAYS the header the app treats as the name (a nameless
-// card uses its number), so every following line is a phone by construction.
-// waid is the card's WhatsApp id when the vcard names one — the app's
-// "Message" button opens a chat with it directly, no server lookup.
 func contactText(name, vcard string) (text, waid string) {
 	phones := []string{}
 	seen := map[string]bool{}
@@ -2887,16 +2598,8 @@ func fromContext(ci *waE2E.ContextInfo) msgContent {
 	}
 }
 
-// View-once keys are never shared with linked/companion devices, so it can only
-// be opened on the primary phone and there is nothing here to store or
-// download. Carried as a message TYPE rather than a canned English body so
-// previewLabel owns (and translates) the label.
 const viewOnceType = "viewonce"
 
-// ownSend: the ViewOnce bit governs what the RECIPIENT may do with the media,
-// so on the echo of our own send it must be ignored — the file is on this disk
-// already, and honouring it turned our own outgoing photo into the locked
-// placeholder an incoming view-once gets.
 func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 	if msg == nil {
 		return msgContent{}, false
@@ -2925,8 +2628,6 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 		m.text, m.msgType, m.fileId = vid.GetCaption(), "video", encodeFileId("vid", vid)
 		return m, true
 	}
-	// PTV ("video message" / round video note) is a VideoMessage in a separate
-	// field; treat it like a normal video so it reuses the video download path.
 	if ptv := msg.GetPtvMessage(); ptv != nil {
 		if ptv.GetViewOnce() && !ownSend {
 			return msgContent{msgType: viewOnceType}, true
@@ -2963,9 +2664,6 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 	if arr := msg.GetContactsArrayMessage(); arr != nil {
 		m := fromContext(arr.GetContextInfo())
 		m.msgType = "contact"
-		// several people on one card: no single id for "Message" to open.
-		// A blank line separates people so the app never mistakes the next
-		// person's name for another phone number of the first.
 		var parts []string
 		for _, con := range arr.GetContacts() {
 			if t, _ := contactText(con.GetDisplayName(), con.GetVcard()); t != "" {
@@ -2985,14 +2683,6 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 		msg.GetPollCreationMessageV3() != nil {
 		return msgContent{msgType: "poll"}, true
 	}
-	// A labelled TYPE rather than ok=false for the message kinds this client
-	// can't render: dropping them left an invisible hole in the conversation
-	// (the chat didn't even move up the list, and a reply quoting one showed a
-	// blank quote), which reads as lost messages. These used to carry English
-	// prose ("[Poll]") as their body, which then appeared verbatim
-	// mid-conversation whatever the language, and which the exporter and
-	// previewLabel both had to special-case around; previewLabel (Db.kt) owns
-	// the type -> wording mapping.
 	if live := msg.GetLiveLocationMessage(); live != nil {
 		m := fromContext(live.GetContextInfo())
 		m.msgType = "livelocation"
@@ -3020,8 +2710,6 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 				return getMessageContent(w.GetMessage(), true)
 			}
 		}
-		// an empty wrapper: still a message, and falling out of here reached the
-		// "nothing displayable" return, which drops the row entirely
 		return msgContent{msgType: viewOnceType}, true
 	}
 	if eph := msg.GetEphemeralMessage(); eph != nil {

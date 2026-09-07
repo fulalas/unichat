@@ -17,9 +17,6 @@ object ChatExporter {
         val isGroup = isGroupId(chatId)
         val you = context.getString(R.string.you)
         val time = SimpleDateFormat("dd/MM/yyyy, HH:mm", Locale.US)
-        // use{} on the stream itself: wrapping it first and only then taking
-        // ownership leaked the provider's fd if the writer chain's construction
-        // threw (e.g. OOM on the buffer)
         (context.contentResolver.openOutputStream(uri) ?: throw IOException("no stream")).use { out ->
             BufferedWriter(OutputStreamWriter(out)).use { w ->
                 for (m in messages) {

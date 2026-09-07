@@ -10,23 +10,10 @@ import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
-/**
- * Neither protocol hands us this. WhatsApp puts a preview in the message only
- * when the SENDER's client attached one, and TDLib resolves them behind an
- * option this client does not run, so the page is fetched here — once per URL,
- * however many chats it was shared in — and the answer is stored, including the
- * answer "this link has no preview" (or it would be re-fetched on every bind).
- */
 object LinkPreview {
 
     private const val TAG = "UniChatLinkPreview"
-    // Enough to reach the Open Graph tags of a page that buries them behind
-    // inline script: YouTube's sit ~690 KB in, so the old 512 KB ceiling cut the
-    // read short and every YouTube link came back "no preview". Reading stops at
-    // </head> (see readAtMost), so an ordinary page still costs a few KB.
     private const val MAX_HTML_BYTES = 2 * 1024 * 1024
-    // a <meta charset> is only honoured in the head, and browsers stop looking
-    // for it after the first KB — so the whole 2 MB never has to be decoded
     private const val CHARSET_SNIFF_BYTES = 4 * 1024
     private const val MAX_IMAGE_BYTES = 4 * 1024 * 1024
     private const val CONNECT_TIMEOUT_MS = 12_000
@@ -47,38 +34,21 @@ object LinkPreview {
     )
 
     private val fetcher = Executors.newFixedThreadPool(2)
-    // Decoding gets its own pool: a fetch can hold a thread for minutes (six
-    // redirect hops, each with its own connect and read timeout), and sharing
-    // one pool meant two unreachable hosts stalled every card's picture.
     private val decoder = Executors.newFixedThreadPool(2)
     private val main = Handler(Looper.getMainLooper())
 
-    // A null VALUE is not possible in a ConcurrentHashMap, so a link with no
-    // preview is memoised as a Row with hasPreview=false rather than as an
-    // absent key, which would look like "never asked".
     private val cache = ConcurrentHashMap<String, Row>()
 
-    // Everyone waiting on a URL still being fetched, NOT merely the fact that
-    // one is running: leaving a chat and coming straight back builds a new
-    // adapter whose request would land while the first is in flight, and simply
-    // dropping it left those rows with no card until they were scrolled away
-    // and back. Guarded by its own monitor; touched from the UI and the pool.
     private val waiters = HashMap<String, MutableList<(Row) -> Unit>>()
 
     fun cached(url: String): Row? = cache[url]
 
-    /**
-     * A link typed without a scheme is given one, as Linkify does, so a tap
-     * opens what the text linkifies to.
-     */
     fun firstUrl(text: String): String? {
         if (text.indexOf('.') < 0) return null
         val matcher = android.util.Patterns.WEB_URL.matcher(text)
         while (matcher.find()) {
             val raw = matcher.group()
             val scheme = raw.substringBefore("://", "")
-            // Patterns.WEB_URL also matches bare "8.5" and "file.txt"; only take
-            // something that is either explicitly http(s) or has a real host
             if (scheme.isNotEmpty() && !scheme.equals("http", true) &&
                 !scheme.equals("https", true)
             ) {
@@ -92,10 +62,6 @@ object LinkPreview {
         return null
     }
 
-    /**
-     * [onReady] runs on the main thread, and runs for a negative answer too, so
-     * a caller that hid its card can stop waiting for it.
-     */
     fun request(ctx: Context, url: String, onReady: (Row) -> Unit) {
         cache[url]?.let { onReady(it); return }
         synchronized(waiters) {
@@ -108,8 +74,6 @@ object LinkPreview {
             val row = try {
                 stored(url) ?: fetch(appCtx, url)
             } catch (e: Throwable) {
-                // includes OutOfMemoryError from decoding a hostile image: one
-                // bad link must not take down the fetch pool
                 android.util.Log.w(TAG, "preview failed for $url", e)
                 empty(url)
             }
@@ -123,9 +87,6 @@ object LinkPreview {
 
     private fun stored(url: String): Row? {
         val row = Bridge.db.linkPreview(url) ?: return null
-        // the image is in cacheDir, which Android may reclaim under storage
-        // pressure — a card with a hole where the picture was is worse than one
-        // that briefly has no picture, so re-fetch instead
         if (row.imagePath.isNotEmpty() && !File(row.imagePath).exists()) {
             Bridge.db.forgetLinkPreviewImages(listOf(row.imagePath))
             return null
@@ -133,13 +94,6 @@ object LinkPreview {
         return row
     }
 
-    /**
-     * Only a page that was actually READ is remembered. A link that could not be
-     * reached at all — no connectivity, a timeout, a refused request — answers
-     * "no preview" for this run but is deliberately NOT written down: storing it
-     * would mark every link scrolled past while offline as previewless forever,
-     * since nothing ever expires those rows.
-     */
     private fun fetch(ctx: Context, url: String): Row {
         val html = readText(url) ?: return empty(url)
         val meta = parseMeta(html)
@@ -166,12 +120,6 @@ object LinkPreview {
     private fun absolute(pageUrl: String, ref: String): String =
         runCatching { URL(URL(pageUrl), ref).toString() }.getOrNull() ?: ref
 
-    /**
-     * Follows redirects by hand rather than letting HttpURLConnection do it: it
-     * refuses to follow one that changes scheme, which is exactly what the
-     * http→https hop every site now does is — so a link typed without a scheme
-     * used to land on the redirect page itself, which carries no Open Graph tags.
-     */
     private fun readText(startUrl: String): String? {
         var url = startUrl
         for (hop in 0..MAX_REDIRECTS) {
@@ -191,9 +139,6 @@ object LinkPreview {
                     return null
                 }
                 val bytes = conn.inputStream.use { readAtMost(it, MAX_HTML_BYTES, HEAD_END) }
-                // legacy pages (Shift_JIS, windows-125x) often declare the
-                // encoding only in a <meta> tag; decoding them as UTF-8 wrote
-                // mojibake titles into the Db, where nothing expires them
                 val charset = type.substringAfter("charset=", "").trim()
                     .ifEmpty { sniffCharset(bytes) }.ifEmpty { "UTF-8" }
                 return runCatching { String(bytes, charset(charset)) }
@@ -207,9 +152,6 @@ object LinkPreview {
         return null
     }
 
-    // The URL is sender-chosen and fetched with no interaction, so it must not
-    // be able to reach loopback or LAN addresses (SSRF). open() is called for
-    // every hop, so a public host redirecting inward is refused too.
     private fun privateAddress(a: java.net.InetAddress): Boolean =
         a.isLoopbackAddress || a.isAnyLocalAddress || a.isLinkLocalAddress ||
             a.isSiteLocalAddress ||
@@ -231,30 +173,19 @@ object LinkPreview {
         "<meta[^>]+charset\\s*=\\s*[\"']?\\s*([\\w.:-]+)", RegexOption.IGNORE_CASE
     )
 
-    // ISO-8859-1 maps every byte, and a charset declaration is plain ASCII
     private fun sniffCharset(bytes: ByteArray): String {
         val head = String(bytes, 0, minOf(bytes.size, CHARSET_SNIFF_BYTES), Charsets.ISO_8859_1)
         return META_CHARSET.find(head)?.groupValues?.get(1).orEmpty()
     }
 
-    // matched case-insensitively (see indexOfBytes): a page emitting </HEAD>
-    // defeated the early stop and the whole 2 MB cap was downloaded
     private val HEAD_END = "</head>".toByteArray()
 
-    /**
-     * Everything this class reads lives in the document head, and pages that
-     * bury the Open Graph tags behind hundreds of KB of inline script would
-     * otherwise be downloaded whole — megabytes, on someone's mobile data, for
-     * four lines of metadata.
-     */
     private fun readAtMost(
         input: java.io.InputStream, limit: Int, stopAfter: ByteArray? = null,
     ): ByteArray {
         val out = java.io.ByteArrayOutputStream()
         val buf = ByteArray(16 * 1024)
         var total = 0
-        // the tail of the previous chunk, so a marker split across two reads is
-        // still found without re-scanning everything read so far
         var carry = ByteArray(0)
         while (total < limit) {
             val n = input.read(buf, 0, minOf(buf.size, limit - total))
@@ -274,7 +205,6 @@ object LinkPreview {
     private fun lowerAscii(b: Byte): Byte =
         if (b >= 'A'.code.toByte() && b <= 'Z'.code.toByte()) (b + 32).toByte() else b
 
-    /** [needle] must be lowercase; the haystack is matched case-insensitively. */
     private fun indexOfBytes(haystack: ByteArray, needle: ByteArray, from: Int): Int {
         var i = from.coerceAtLeast(0)
         val last = haystack.size - needle.size
@@ -301,8 +231,6 @@ object LinkPreview {
         "<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
     )
 
-    // Deliberately regex over the raw head rather than a real parser: the app
-    // ships no HTML parser, and everything read here is a handful of meta tags.
     private fun parseMeta(html: String): Map<String, String> {
         val cut = html.indexOf("</head>", ignoreCase = true)
         val head = (if (cut >= 0) html.substring(0, cut) else html).take(MAX_HTML_BYTES)
@@ -319,7 +247,6 @@ object LinkPreview {
                 }
             }
             if (key.isEmpty() || content.isEmpty()) continue
-            // first tag of each kind wins, matching how browsers read them
             if (key.startsWith("og:") || key.startsWith("twitter:")) out.putIfAbsent(key, unescape(content))
         }
         return out
@@ -336,9 +263,6 @@ object LinkPreview {
         "lsquo" to "‘", "rsquo" to "’", "ldquo" to "“", "rdquo" to "”",
     )
 
-    // Deliberately not Html.fromHtml: it parses the value as a block of HTML and
-    // folds every line break into a space, so a description written as separate
-    // paragraphs came out as one run-on line with its words stuck together.
     private fun unescape(text: String): String {
         if (text.indexOf('&') < 0) return text.trim()
         return ENTITY.replace(text) { m ->
@@ -354,17 +278,11 @@ object LinkPreview {
 
     private fun codePoint(value: Int?): String? {
         if (value == null || value > 0x10FFFF) return null
-        // tab and newline are the only controls worth keeping; a page writes
-        // them as entities because an attribute cannot hold them literally
         if (value < 0x20 && value != 0x09 && value != 0x0A) return null
-        if (value in 0xD800..0xDFFF) return null // lone surrogate: not a character
+        if (value in 0xD800..0xDFFF) return null
         return String(Character.toChars(value))
     }
 
-    // YouTube strips the line breaks out of its own og:description when writing
-    // the tag, so the text arrives as
-    // "…at the Apollohttp://livingcolour.comhttp://facebook.com/livingcolour" —
-    // the break is not something this app lost, it is not in the page.
     private val GLUED_URL = Regex("(?<=[^\\s(\\[<\"'])(https?://)")
 
     private fun tidyDescription(text: String): String = GLUED_URL.replace(text, "\n$1")
@@ -376,7 +294,6 @@ object LinkPreview {
             if (!dir.isDirectory && !dir.mkdirs()) return null
             val out = File(dir, fileNameFor(imageUrl))
             out.writeBytes(bytes)
-            // a body that is not a decodable image would render as a blank gap
             if (ImageLoader.decodeSampled(out.path, 64) == null) {
                 out.delete()
                 return null
@@ -434,9 +351,6 @@ object LinkPreview {
                 delivering = true
                 main.post { deliver(path, bmp) }
             } finally {
-                // Only this run's own waiters are dropped; a bubble that queued
-                // after the peek could not claim a decode of its own, so it is
-                // re-dispatched here instead of keeping its blank placeholder.
                 if (!delivering && waiting.settle(path, queued).isNotEmpty()) {
                     dispatchDecode(path, widthPx)
                 }
@@ -453,12 +367,6 @@ object LinkPreview {
         }
     }
 
-    /**
-     * The bounds have to be set explicitly. A match_parent width does not work
-     * inside the card: LinearLayout re-measures a match_parent child with its
-     * FIRST-PASS height pinned as exact, which switches adjustViewBounds off —
-     * the view filled the width while the picture stayed small and centred in it.
-     */
     private fun applyBounds(view: android.widget.ImageView, bmp: Bitmap, widthPx: Int) {
         if (bmp.width <= 0 || bmp.height <= 0 || widthPx <= 0) return
         val lp = view.layoutParams ?: return

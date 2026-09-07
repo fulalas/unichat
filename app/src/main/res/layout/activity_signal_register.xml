@@ -76,8 +76,6 @@
         </LinearLayout>
     </ScrollView>
 
-    <!-- Signal serves the captcha as a web page and returns the token through a
-         signalcaptcha: redirect, so it has to be shown in a WebView. -->
     <WebView
         android:id="@+id/sgCaptcha"
         android:layout_width="match_parent"

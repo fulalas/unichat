@@ -86,8 +86,6 @@ class ChatListAdapter(
         val holder = Holder(view)
         holder.avatar.clipToOutline = true
         holder.avatar.outlineProvider = ViewOutlineProvider.BACKGROUND
-        // set once here, not per bind: they dispatch off holder.current so a
-        // recycled row acts on the chat it currently shows
         holder.itemView.setOnClickListener {
             val chat = holder.current ?: return@setOnClickListener
             if (selectionMode) selection.toggle(chat) else onClick(chat)
@@ -154,13 +152,6 @@ class ChatListAdapter(
             android.content.res.ColorStateList.valueOf(accent)
         holder.itemView.foreground = if (chat.id in selection) selectedTint(accent) else null
         holder.onlineDot.visibility = if (chat.online) View.VISIBLE else View.GONE
-        // WhatsApp only reports presence for contacts it has been asked about,
-        // so the ask happens per visible row (Bridge subscribes once per
-        // contact); Telegram pushes it unprompted. Groups have no presence.
-        // An address-book search result is not an account yet — its id is a
-        // local placeholder. Asking the server about it sent a real presence
-        // subscription and an avatar request per shown row, for a "user" that
-        // does not exist as far as WhatsApp is concerned.
         val real = !PhoneBook.isPhoneEntry(chat.id)
         if (real && !chat.isGroup) Bridge.subscribePresence(chat.id)
         if (real) AvatarLoader.load(chat.id, name, holder.avatar, AvatarLoader.dp(holder.avatar, 44))

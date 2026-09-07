@@ -10,12 +10,6 @@ import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 
-/**
- * Signal allows exactly one primary device per number, so completing this
- * unregisters the official app on that number. That is why a confirmation runs
- * before the code is sent: it is only undone by re-registering there and
- * evicting UniChat in turn.
- */
 class SignalRegisterActivity : BaseActivity() {
 
     private lateinit var phone: EditText
@@ -51,16 +45,10 @@ class SignalRegisterActivity : BaseActivity() {
         verify.setOnClickListener { submitCode() }
     }
 
-    // Every register* call blocks on the network for seconds (two are an SMS
-    // round trip), so backing out mid-flow landed the reply on dead views and a
-    // dead context.
     private fun gone(): Boolean = isFinishing || isDestroyed
 
     override fun onDestroy() {
         super.onDestroy()
-        // A WebView keeps this activity reachable through its own native state
-        // until it is told to let go — and destroying one still in the view
-        // tree logs errors or crashes on some WebView versions.
         (captcha.parent as? android.view.ViewGroup)?.removeView(captcha)
         captcha.destroy()
     }
@@ -80,8 +68,6 @@ class SignalRegisterActivity : BaseActivity() {
     }
 
     private fun startSession() {
-        // The session lives in the bridge and cannot be resumed from the link
-        // screen, so once a code is on its way leaving costs another SMS.
         findViewById<View>(R.id.sgLinkInstead).visibility = View.GONE
         busy(true, R.string.signal_register_starting)
         Signal.registerStart(number) { err ->
@@ -91,11 +77,6 @@ class SignalRegisterActivity : BaseActivity() {
         }
     }
 
-    /**
-     * Signal's captcha page finishes by navigating to a `signalcaptcha:` URL
-     * whose payload is the token. There is no JS bridge to read it from, so the
-     * only way to get it is to intercept that navigation.
-     */
     @SuppressLint("SetJavaScriptEnabled")
     private fun showCaptcha() {
         status.setText(R.string.signal_captcha_prompt)
@@ -103,9 +84,6 @@ class SignalRegisterActivity : BaseActivity() {
         captcha.visibility = View.VISIBLE
         captcha.settings.javaScriptEnabled = true
         captcha.webViewClient = object : WebViewClient() {
-            // Not onPageStarted: the WebView cannot load a signalcaptcha: URL,
-            // and whether onPageStarted fires for a scheme it will not navigate
-            // to varies by WebView version.
             override fun shouldOverrideUrlLoading(
                 view: WebView?, request: android.webkit.WebResourceRequest?,
             ): Boolean {
