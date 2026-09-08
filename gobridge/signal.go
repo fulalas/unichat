@@ -432,7 +432,7 @@ func SignalLogout() {
 	sgMu.Unlock()
 }
 
-func SignalSendTextQuoted(chatId, msgId, text, styles, quotedId, quotedText, quotedSender string) string {
+func SignalSendTextQuoted(chatId, msgId, text, styles, quotedId, quotedText, quotedSender string, preview *Preview) string {
 	c, client, device := sgActive()
 	if client == nil || device == nil {
 		return ""
@@ -454,12 +454,49 @@ func SignalSendTextQuoted(chatId, msgId, text, styles, quotedId, quotedText, quo
 			}
 		}
 	}
+	sgApplyPreview(c, client, dm, preview)
 	msg := signalmeow.WrapDataMessage(dm)
 	msgID := fmt.Sprintf("%d", timestamp)
 	if err := sgSend(c, client, chatId, msg); err != nil {
 		return sgFailSend(c, "send", chatId, msgID, err)
 	}
 	return msgID
+}
+
+var sgPreviewUploads sync.Map
+
+func sgApplyPreview(c *sgConn, client *signalmeow.Client, dm *signalpb.DataMessage, p *Preview) {
+	if p.empty() {
+		return
+	}
+	preview := &signalpb.Preview{Url: proto.String(p.Url)}
+	if p.Title != "" {
+		preview.Title = proto.String(p.Title)
+	}
+	if p.Description != "" {
+		preview.Description = proto.String(p.Description)
+	}
+	dm.Preview = []*signalpb.Preview{preview}
+	if !p.hasImage() {
+		return
+	}
+	key := sha256.Sum256(p.Image)
+	if cached, ok := sgPreviewUploads.Load(key); ok {
+		preview.Image = proto.Clone(cached.(*signalpb.AttachmentPointer)).(*signalpb.AttachmentPointer)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), linkThumbUploadTimeout)
+	defer cancel()
+	ptr, err := client.UploadAttachment(ctx, p.Image)
+	if err != nil {
+		c.log(LogWarning, "link preview upload failed: "+err.Error())
+		return
+	}
+	ptr.ContentType = proto.String("image/jpeg")
+	ptr.Width = proto.Uint32(uint32(p.Width))
+	ptr.Height = proto.Uint32(uint32(p.Height))
+	sgPreviewUploads.Store(key, ptr)
+	preview.Image = proto.Clone(ptr).(*signalpb.AttachmentPointer)
 }
 
 func sgFailSend(c *sgConn, what, chatId, msgID string, err error) string {
@@ -1374,7 +1411,7 @@ func SignalDeleteChat(chatId string, recent string) bool {
 	return true
 }
 
-func SignalEdit(chatId string, msgId string, newText string, styles string, fileIds string) bool {
+func SignalEdit(chatId string, msgId string, newText string, styles string, fileIds string, preview *Preview) bool {
 	c, client, _ := sgActive()
 	if client == nil {
 		return false
@@ -1400,6 +1437,7 @@ func SignalEdit(chatId string, msgId string, newText string, styles string, file
 			dm.Attachments = append(dm.Attachments, ptr)
 		}
 	}
+	sgApplyPreview(c, client, dm, preview)
 	edit := &signalpb.EditMessage{
 		TargetSentTimestamp: &target,
 		DataMessage:         dm,

@@ -3,6 +3,7 @@ package wmbridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -666,24 +667,81 @@ func NewMessageId(connId int) string {
 	return c.getClient().GenerateMessageID()
 }
 
-func SendTextMessage(connId int, chatId string, msgId string, text string, mentionedIds string) string {
-	c := getConn(connId)
-	if c == nil {
-		return ""
+type Preview struct {
+	Url         string
+	Title       string
+	Description string
+	Thumbnail   []byte
+	Image       []byte
+	Width       int
+	Height      int
+}
+
+func (p *Preview) empty() bool { return p == nil || p.Url == "" }
+
+func (p *Preview) hasImage() bool {
+	return len(p.Image) > 0 && p.Width > 0 && p.Height > 0
+}
+
+const linkThumbUploadTimeout = 10 * time.Second
+
+var linkThumbUploads sync.Map
+
+func SendTextMessage(connId int, chatId string, msgId string, text string, mentionedIds string, preview *Preview) string {
+	return SendTextReply(connId, chatId, msgId, text, "", "", "", mentionedIds, preview)
+}
+
+func buildTextMessage(c *conn, text string, ctxInfo *waE2E.ContextInfo, preview *Preview) *waE2E.Message {
+	if ctxInfo == nil && preview.empty() {
+		return &waE2E.Message{Conversation: proto.String(text)}
 	}
-	chatJid, err := types.ParseJID(chatId)
-	if err != nil {
-		c.log(LogWarning, fmt.Sprintf("jid error %v", err))
-		return ""
+	extended := &waE2E.ExtendedTextMessage{
+		Text:        proto.String(text),
+		ContextInfo: ctxInfo,
 	}
-	message := &waE2E.Message{Conversation: &text}
-	if mentions := splitIds(mentionedIds); len(mentions) > 0 {
-		message = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-			Text:        proto.String(text),
-			ContextInfo: &waE2E.ContextInfo{MentionedJID: mentions},
-		}}
+	applyLinkPreview(c, extended, preview)
+	return &waE2E.Message{ExtendedTextMessage: extended}
+}
+
+func applyLinkPreview(c *conn, message *waE2E.ExtendedTextMessage, p *Preview) {
+	if p.empty() {
+		return
 	}
-	return sendWithEcho(c, chatJid, msgId, message, "send")
+	message.MatchedText = proto.String(p.Url)
+	message.PreviewType = waE2E.ExtendedTextMessage_NONE.Enum()
+	if p.Title != "" {
+		message.Title = proto.String(p.Title)
+	}
+	if p.Description != "" {
+		message.Description = proto.String(p.Description)
+	}
+	if len(p.Thumbnail) > 0 {
+		message.JPEGThumbnail = p.Thumbnail
+	}
+	if !p.hasImage() {
+		return
+	}
+	key := sha256.Sum256(p.Image)
+	uploaded, ok := linkThumbUploads.Load(key)
+	if !ok {
+		ctx, cancel := context.WithTimeout(context.Background(), linkThumbUploadTimeout)
+		defer cancel()
+		resp, err := c.getClient().Upload(ctx, p.Image, whatsmeow.MediaLinkThumbnail)
+		if err != nil {
+			c.log(LogWarning, fmt.Sprintf("link thumbnail upload error %v", err))
+			return
+		}
+		uploaded = resp
+		linkThumbUploads.Store(key, resp)
+	}
+	resp := uploaded.(whatsmeow.UploadResponse)
+	message.ThumbnailDirectPath = proto.String(resp.DirectPath)
+	message.ThumbnailSHA256 = resp.FileSHA256
+	message.ThumbnailEncSHA256 = resp.FileEncSHA256
+	message.MediaKey = resp.MediaKey
+	message.MediaKeyTimestamp = proto.Int64(time.Now().Unix())
+	message.ThumbnailWidth = proto.Uint32(uint32(p.Width))
+	message.ThumbnailHeight = proto.Uint32(uint32(p.Height))
 }
 
 func splitIds(ids string) []string {
@@ -761,7 +819,7 @@ func SendContactMessage(connId int, chatId string, msgId string, displayName str
 	return sendWithEcho(c, chatJid, msgId, &message, "send contact")
 }
 
-func SendTextReply(connId int, chatId string, msgId string, text string, quotedId string, quotedText string, quotedSender string, mentionedIds string) string {
+func SendTextReply(connId int, chatId string, msgId string, text string, quotedId string, quotedText string, quotedSender string, mentionedIds string, preview *Preview) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -777,13 +835,11 @@ func SendTextReply(connId int, chatId string, msgId string, text string, quotedI
 		}
 		ctxInfo.MentionedJID = mentions
 	}
-	message := waE2E.Message{
-		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-			Text:        proto.String(text),
-			ContextInfo: ctxInfo,
-		},
+	what := "send"
+	if quotedId != "" {
+		what = "send reply"
 	}
-	return sendWithEcho(c, chatJid, msgId, &message, "send reply")
+	return sendWithEcho(c, chatJid, msgId, buildTextMessage(c, text, ctxInfo, preview), what)
 }
 
 func SendReaction(connId int, chatId string, msgId string, msgSenderId string, msgFromMe bool, emoji string) bool {
@@ -858,25 +914,23 @@ func CanEditMedia(fileId string) bool {
 	return mediaEditMessage(fileId, "") != nil
 }
 
-func applyEditContext(message *waE2E.Message, newText string, ctx *waE2E.ContextInfo) *waE2E.Message {
-	if ctx == nil {
-		return message
-	}
+func applyEditContext(c *conn, message *waE2E.Message, newText string, ctx *waE2E.ContextInfo, preview *Preview) *waE2E.Message {
 	switch {
 	case message.GetImageMessage() != nil:
-		message.ImageMessage.ContextInfo = ctx
+		if ctx != nil {
+			message.ImageMessage.ContextInfo = ctx
+		}
 	case message.GetVideoMessage() != nil:
-		message.VideoMessage.ContextInfo = ctx
+		if ctx != nil {
+			message.VideoMessage.ContextInfo = ctx
+		}
 	default:
-		return &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-			Text:        proto.String(newText),
-			ContextInfo: ctx,
-		}}
+		return buildTextMessage(c, newText, ctx, preview)
 	}
 	return message
 }
 
-func EditMessage(connId int, chatId string, msgId string, newText string, origTimeSent int64, fileId string, quotedId string, quotedText string, quotedSender string, mentionedIds string) bool {
+func EditMessage(connId int, chatId string, msgId string, newText string, origTimeSent int64, fileId string, quotedId string, quotedText string, quotedSender string, mentionedIds string, preview *Preview) bool {
 	c := getConn(connId)
 	if c == nil {
 		return false
@@ -905,7 +959,7 @@ func EditMessage(connId int, chatId string, msgId string, newText string, origTi
 		}
 		ctx.MentionedJID = mentions
 	}
-	message = applyEditContext(message, newText, ctx)
+	message = applyEditContext(c, message, newText, ctx, preview)
 	_, err = c.getClient().SendMessage(context.Background(), chatJid, c.getClient().BuildEdit(chatJid, msgId, message))
 	if err != nil {
 		c.log(LogWarning, fmt.Sprintf("edit message error %v", err))

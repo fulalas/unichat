@@ -1,3 +1,9 @@
+# UniChat 0.59.1
+
+### New
+
+* **Links you send to WhatsApp and Signal contacts now carry a preview card** — title, description and image travel with the message, so the other side sees the same card you see.
+
 # UniChat 0.57.3
 
 ### New

@@ -390,12 +390,13 @@ object Bridge : EventListener {
         ): String {
             val (body, jids) = waMentionText(text, mentions)
             val mentioned = jids.joinToString(",")
+            val preview = LinkPreview.outgoing(body)
             if (quoted == null) {
-                return Wmbridge.sendTextMessage(connId, chatId, msgId, body, mentioned)
+                return Wmbridge.sendTextMessage(connId, chatId, msgId, body, mentioned, preview)
             }
             return Wmbridge.sendTextReply(
                 connId, chatId, msgId, body, quoted.id, quotedPreview(quoted), quoted.senderId,
-                mentioned
+                mentioned, preview
             )
         }
 
@@ -467,9 +468,10 @@ object Bridge : EventListener {
                 byDigits[m.id.substringBefore('@')] = m.id
             }
             for (id in jids) byDigits[id.substringBefore('@')] = id
+            val preview = if (msg.fileId.isEmpty()) LinkPreview.outgoing(body) else null
             return Wmbridge.editMessage(
                 connId, msg.chatId, msg.id, body, msg.timeSent, msg.fileId,
-                qid, qtext, qsender, byDigits.values.joinToString(","),
+                qid, qtext, qsender, byDigits.values.joinToString(","), preview,
             )
         }
 

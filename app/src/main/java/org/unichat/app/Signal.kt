@@ -229,9 +229,13 @@ object Signal : EventListener {
         val (body, styles) = styled(text)
         return Wmbridge.signalSendTextQuoted(
             chatId, msgId, body, styles,
-            quoted?.id.orEmpty(), quoted?.text.orEmpty(), quoted?.senderId.orEmpty()
+            quoted?.id.orEmpty(), quoted?.text.orEmpty(), quoted?.senderId.orEmpty(),
+            preview(body),
         )
     }
+
+    private fun preview(body: String) =
+        LinkPreview.outgoing(body)?.takeIf { it.url.startsWith("https://") }
 
     private fun styled(text: String): Pair<String, String> {
         val (plain, marks) = Markup.parse(text)
@@ -259,7 +263,8 @@ object Signal : EventListener {
         val fileIds =
             if (fileId.isEmpty()) ""
             else (listOf(fileId) + Bridge.db.albumFileIds(chatId, msgId)).joinToString("\n")
-        return Wmbridge.signalEdit(chatId, msgId, body, styles, fileIds)
+        val preview = if (fileId.isEmpty()) preview(body) else null
+        return Wmbridge.signalEdit(chatId, msgId, body, styles, fileIds, preview)
     }
 
     fun markChatRead(chatId: String) = ops {

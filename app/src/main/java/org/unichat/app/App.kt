@@ -8,6 +8,7 @@ class App : Application() {
         super.onCreate()
         AppCompatDelegate.setDefaultNightMode(Prefs.nightMode(this))
         AudioPlayer.init(this)
+        LinkPreview.init(this)
         Bridge.warmUp(this)
         Io.files.execute { Search.fold('á') }
         Signal.init(this)

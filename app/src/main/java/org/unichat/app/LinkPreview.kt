@@ -21,6 +21,13 @@ object LinkPreview {
     private const val MAX_REDIRECTS = 5
     private const val MAX_DESCRIPTION = 320
     const val IMAGE_DIR = "linkprev"
+    private const val SEND_THUMB_PX = 128
+    private const val SEND_THUMB_QUALITY = 60
+    private const val SEND_IMAGE_PX = 1024
+    private const val SEND_IMAGE_QUALITY = 80
+    private const val SEND_WAIT_MS = 2500L
+    private const val NEGATIVE_RETRY_MS = 5 * 60 * 1000L
+    private const val THUMB_CACHE_MAX = 16
 
     private const val USER_AGENT = "TelegramBot (like TwitterBot)"
 
@@ -38,16 +45,100 @@ object LinkPreview {
     private val main = Handler(Looper.getMainLooper())
 
     private val cache = ConcurrentHashMap<String, Row>()
+    private val failedAt = ConcurrentHashMap<String, Long>()
+    private val thumbs = ConcurrentHashMap<String, Thumbnail>()
 
     private val waiters = HashMap<String, MutableList<(Row) -> Unit>>()
 
-    fun cached(url: String): Row? = cache[url]
+    private lateinit var app: Context
 
-    fun firstUrl(text: String): String? {
+    fun init(ctx: Context) {
+        app = ctx.applicationContext
+    }
+
+    fun cached(url: String): Row? {
+        val row = cache[url] ?: return null
+        val failed = failedAt[url] ?: return row
+        if (System.currentTimeMillis() - failed < NEGATIVE_RETRY_MS) return row
+        cache.remove(url)
+        failedAt.remove(url)
+        return null
+    }
+
+    fun prefetch(ctx: Context, text: String) {
+        val (url, end) = findUrl(text) ?: return
+        if (end >= text.length || !(text[end].isWhitespace() || text[end] in "*_")) return
+        if (cached(url) != null) return
+        request(ctx, url) {}
+    }
+
+    fun outgoing(text: String): org.unichat.wmbridge.Preview? {
+        val url = firstUrl(text) ?: return null
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val result = java.util.concurrent.atomic.AtomicReference<Row?>()
+        request(app, url) { result.set(it); latch.countDown() }
+        latch.await(SEND_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        val row = result.get()?.takeIf { it.hasPreview } ?: return null
+        val thumb = thumbnail(row)
+        return org.unichat.wmbridge.Preview().apply {
+            this.url = matchedUrl(text, row.url)
+            title = row.title.ifEmpty { row.site }
+            description = row.description
+            thumbnail = thumb.small
+            image = thumb.full
+            width = thumb.width.toLong()
+            height = thumb.height.toLong()
+        }
+    }
+
+    private fun matchedUrl(text: String, url: String): String {
+        if (text.contains(url)) return url
+        val bare = url.removePrefix("http://")
+        return if (text.contains(bare)) bare else url
+    }
+
+    class Thumbnail(val small: ByteArray, val full: ByteArray, val width: Int, val height: Int)
+
+    private val emptyThumbnail = Thumbnail(ByteArray(0), ByteArray(0), 0, 0)
+
+    private fun thumbnail(row: Row): Thumbnail {
+        if (row.imagePath.isEmpty()) return emptyThumbnail
+        thumbs[row.imagePath]?.let { return it }
+        val decoded = ImageLoader.decodeSampled(row.imagePath, SEND_IMAGE_PX) ?: return emptyThumbnail
+        val full = scaled(decoded, SEND_IMAGE_PX)
+        val small = scaled(full, SEND_THUMB_PX)
+        val thumb = Thumbnail(
+            jpeg(small, SEND_THUMB_QUALITY), jpeg(full, SEND_IMAGE_QUALITY),
+            full.width, full.height,
+        )
+        if (thumbs.size >= THUMB_CACHE_MAX) thumbs.clear()
+        thumbs[row.imagePath] = thumb
+        return thumb
+    }
+
+    private fun scaled(src: Bitmap, maxDim: Int): Bitmap {
+        val longest = maxOf(src.width, src.height)
+        if (longest <= maxDim) return src
+        val ratio = maxDim.toFloat() / longest
+        return Bitmap.createScaledBitmap(
+            src, (src.width * ratio).toInt().coerceAtLeast(1),
+            (src.height * ratio).toInt().coerceAtLeast(1), true,
+        )
+    }
+
+    private fun jpeg(bitmap: Bitmap, quality: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        return out.toByteArray()
+    }
+
+    fun firstUrl(text: String): String? = findUrl(text)?.first
+
+    private fun findUrl(text: String): Pair<String, Int>? {
         if (text.indexOf('.') < 0) return null
         val matcher = android.util.Patterns.WEB_URL.matcher(text)
         while (matcher.find()) {
-            val raw = matcher.group()
+            val raw = matcher.group().trimEnd('*', '_')
             val scheme = raw.substringBefore("://", "")
             if (scheme.isNotEmpty() && !scheme.equals("http", true) &&
                 !scheme.equals("https", true)
@@ -57,13 +148,13 @@ object LinkPreview {
             val withScheme = if (scheme.isEmpty()) "http://$raw" else raw
             val host = runCatching { URL(withScheme).host }.getOrNull().orEmpty()
             if (!host.contains('.')) continue
-            return withScheme
+            return withScheme to matcher.start() + raw.length
         }
         return null
     }
 
     fun request(ctx: Context, url: String, onReady: (Row) -> Unit) {
-        cache[url]?.let { onReady(it); return }
+        cached(url)?.let { onReady(it); return }
         synchronized(waiters) {
             val list = waiters.getOrPut(url) { ArrayList() }
             list.add(onReady)
@@ -71,12 +162,14 @@ object LinkPreview {
         }
         val appCtx = ctx.applicationContext
         fetcher.execute {
-            val row = try {
+            val fetched = try {
                 stored(url) ?: fetch(appCtx, url)
             } catch (e: Throwable) {
                 android.util.Log.w(TAG, "preview failed for $url", e)
-                empty(url)
+                null
             }
+            if (fetched == null) failedAt[url] = System.currentTimeMillis()
+            val row = fetched ?: empty(url)
             cache[url] = row
             val pending = synchronized(waiters) { waiters.remove(url).orEmpty() }
             main.post { for (waiter in pending) waiter(row) }
@@ -94,8 +187,8 @@ object LinkPreview {
         return row
     }
 
-    private fun fetch(ctx: Context, url: String): Row {
-        val html = readText(url) ?: return empty(url)
+    private fun fetch(ctx: Context, url: String): Row? {
+        val html = readText(url) ?: return null
         val meta = parseMeta(html)
         val title = meta["og:title"] ?: meta["twitter:title"] ?: htmlTitle(html) ?: ""
         val description = tidyDescription(

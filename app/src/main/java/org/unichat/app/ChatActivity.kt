@@ -47,6 +47,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         private const val WINDOW_ALBUM_SPAN = 60
         private const val PRESENCE_RESUBSCRIBE_MS = 30_000L
         private const val FOCUS_RECHECK_MS = 400L
+        private const val PREVIEW_PROBE_DELAY_MS = 700L
         private val scrollStates =
             object : LinkedHashMap<String, android.os.Parcelable?>(16, 0.75f, true) {
                 override fun removeEldestEntry(eldest: Map.Entry<String, android.os.Parcelable?>) =
@@ -101,6 +102,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private var replyTarget: MessageRow? = null
     private var editTarget: MessageRow? = null
+    private var previewProbe: Runnable? = null
 
     private lateinit var searchBar: android.view.View
     private lateinit var searchInput: EditText
@@ -381,6 +383,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             override fun afterTextChanged(s: android.text.Editable?) {
                 updateActionButton()
                 updateMentions()
+                prefetchLinkPreview(s?.toString().orEmpty())
             }
         })
         input.customSelectionActionModeCallback = formatMenu
@@ -430,6 +433,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        previewProbe?.let { main.removeCallbacks(it) }
         searchExec.shutdownNow()
         windowMedia.shutdownNow()
     }
@@ -2011,6 +2015,14 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         } catch (e: Exception) {
             Toast.makeText(this, R.string.no_app_for_file, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun prefetchLinkPreview(text: String) {
+        if (text.isEmpty()) return
+        previewProbe?.let { main.removeCallbacks(it) }
+        val probe = Runnable { LinkPreview.prefetch(this, text) }
+        previewProbe = probe
+        main.postDelayed(probe, PREVIEW_PROBE_DELAY_MS)
     }
 
     private fun requestLinkPreview(url: String) {

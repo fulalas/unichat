@@ -29,6 +29,7 @@ class ShareActivity : BaseActivity() {
         val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
         val streams = extraStreams(intent, action)
         val mime = intent.type ?: "*/*"
+        if (!text.isNullOrBlank()) LinkPreview.prefetch(this, text)
 
         io.execute {
             val (labels, ids) = targetChoices()
