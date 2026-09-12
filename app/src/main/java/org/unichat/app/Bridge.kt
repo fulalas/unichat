@@ -8,7 +8,9 @@ import org.unichat.wmbridge.EventListener
 import org.unichat.wmbridge.Wmbridge
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 object Bridge : EventListener {
 
@@ -772,7 +774,7 @@ object Bridge : EventListener {
     private fun stage(
         chatId: String, msgId: String, text: String, msgType: String = "",
         filePath: String = "", quoted: MessageRow? = null,
-        latitude: Double = 0.0, longitude: Double = 0.0,
+        latitude: Double = 0.0, longitude: Double = 0.0, armWatchdog: Boolean = true,
     ): MessageRow {
         val row = MessageRow(
             id = msgId, chatId = chatId, senderId = selfIdOf(chatId), text = text,
@@ -786,7 +788,7 @@ object Bridge : EventListener {
         db.stageOutgoing(row)
         db.bumpChat(chatId, row.timeSent)
         sendQueued.add(chatId + KEY_SEP + msgId)
-        armSendWatchdog(row)
+        if (armWatchdog) armSendWatchdog(row)
         notifyChat(chatId)
         return row
     }
@@ -1227,23 +1229,81 @@ object Bridge : EventListener {
 
     private val batchExecutor = Executors.newSingleThreadExecutor()
 
+    private const val FORWARD_FILE_WAIT_MS = 120_000L
+
+    private val fileWaits = ConcurrentHashMap<String, CountDownLatch>()
+
+    private val forwardExecutor = Executors.newSingleThreadExecutor()
+
     fun forwardMessages(
         targetChatIds: List<String>, messages: List<MessageRow>, onDone: (Boolean) -> Unit,
-    ) = batchExecutor.execute {
-        var sent = false
+    ) = forwardExecutor.execute {
+        val sendable = messages.filter { fetchable(it) }
+        val staged = ArrayList<Pair<MessageRow, MessageRow>>(targetChatIds.size * sendable.size)
         for (target in targetChatIds) {
-            for (m in messages) if (forwardOneBlocking(target, m, null)) sent = true
+            for (m in sendable) {
+                staged.add(m to stage(
+                    target, mintId(target), m.text, m.msgType, m.filePath,
+                    latitude = m.latitude, longitude = m.longitude, armWatchdog = false
+                ))
+            }
+        }
+        var sent = false
+        for ((source, row) in staged) {
+            val ok = try {
+                forwardStagedBlocking(source, row)
+            } catch (e: Exception) {
+                Log.w(TAG, "forward failed for ${row.chatId}", e)
+                markSendFailed(row.chatId, row.id, retry = false)
+                false
+            }
+            if (ok) sent = true
         }
         main.post { onDone(sent) }
     }
 
-    private fun forwardOneBlocking(
-        target: String, m: MessageRow, quoted: MessageRow?, mentions: List<Mention> = emptyList(),
-    ): Boolean {
-        val row = stage(
-            target, mintId(target), m.text, m.msgType, m.filePath, quoted, m.latitude, m.longitude
-        )
-        return sendMediaBlocking(row) { p, id -> sendRow(p, target, id, m, quoted, mentions) }
+    private fun forwardStagedBlocking(source: MessageRow, row: MessageRow): Boolean {
+        val ready = withLocalFile(source)
+        if (ready == null) {
+            markSendFailed(row.chatId, row.id, retry = false)
+            return false
+        }
+        val target = row.chatId
+        if (ready.filePath != row.filePath) db.setFileState(target, row.id, ready.filePath, 2)
+        // Only once the file is here: the watchdog would give up on a row whose
+        // media is still coming down, and mark a send that has not started failed.
+        armSendWatchdog(row)
+        return sendMediaBlocking(row.copy(filePath = ready.filePath)) { p, id ->
+            sendRow(p, target, id, ready, null, emptyList())
+        }
+    }
+
+    private fun fetchable(m: MessageRow): Boolean = m.msgType !in NEEDS_LOCAL_FILE ||
+        m.fileId.isNotEmpty() || storedFile(m.chatId, m.id).isNotEmpty()
+
+    private fun storedFile(chatId: String, msgId: String): String {
+        val path = db.fileState(chatId, msgId).first
+        return if (path.isNotEmpty() && java.io.File(path).exists()) path else ""
+    }
+
+    private fun withLocalFile(m: MessageRow): MessageRow? {
+        if (m.msgType !in NEEDS_LOCAL_FILE) return m
+        storedFile(m.chatId, m.id).let { if (it.isNotEmpty()) return m.copy(filePath = it) }
+        val key = m.chatId + "/" + m.id
+        val latch = fileWaits.computeIfAbsent(key) { CountDownLatch(1) }
+        try {
+            if (!downloadFile(m, userInitiated = true)) return null
+            if (storedFile(m.chatId, m.id).isEmpty()) {
+                latch.await(FORWARD_FILE_WAIT_MS, TimeUnit.MILLISECONDS)
+            }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return null
+        } finally {
+            fileWaits.remove(key)
+        }
+        val path = storedFile(m.chatId, m.id)
+        return if (path.isEmpty()) null else m.copy(filePath = path)
     }
 
     private val presenceSubscribed = ConcurrentHashMap<String, Long>()
@@ -1768,7 +1828,10 @@ object Bridge : EventListener {
         chatIds: List<String>, playChatId: String, msgId: String, filePath: String, status: Int,
     ) {
         val keys = chatIds.map { "$it/$msgId" }
-        for (key in keys) downloading.remove(key)
+        for (key in keys) {
+            downloading.remove(key)
+            fileWaits[key]?.countDown()
+        }
         val requested = keys.count { userRequestedDownloads.remove(it) } > 0
         if (status == 3 && requested) toastUi(R.string.download_failed)
         if (autoPlayKey in keys) {

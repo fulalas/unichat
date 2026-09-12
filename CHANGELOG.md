@@ -1,3 +1,10 @@
+# UniChat 0.59.2
+
+### Fixed
+
+* **Forwarded messages show up in the chat at once and in the order you picked them**, then go out one after the other, and keep their place when the server confirms them.
+* A photo or video that is not on the phone yet is now fetched and forwarded in its place, instead of being left out of the batch.
+
 # UniChat 0.59.1
 
 ### New

@@ -354,10 +354,13 @@ private const val UNREAD_REACTION_PAGE = 100
             "updateMessageEdited" -> {  }
             "updateMessageSendSucceeded" -> {
                 val msg = obj.getJSONObject("message")
-                val oldId = obj.getLong("old_message_id")
+                val oldId = obj.getLong("old_message_id").toString()
                 val chatId = idFor(msg.getLong("chat_id"))
-                Bridge.onMessageSendOk(chatId, oldId.toString())
-                Bridge.db.deleteMessage(chatId, oldId.toString())
+                Bridge.onMessageSendOk(chatId, oldId)
+                // Rename, never delete and re-insert: rows of the same second are
+                // ordered by insertion, so a re-insert moved the message to the
+                // end of the chat and shuffled a batch into confirmation order.
+                Bridge.db.renameMessage(chatId, oldId, msg.getLong("id").toString())
                 storeMessage(msg)
             }
             "updateMessageSendFailed" -> {

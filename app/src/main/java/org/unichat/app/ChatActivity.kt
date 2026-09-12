@@ -2549,14 +2549,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (targets.isEmpty() || msgs.isEmpty()) return
         val ready = ArrayList<MessageRow>()
         var stillSending = false
-        var downloading = false
         for (msg in msgs) {
             if (msg.msgType in LABEL_ONLY_TYPES && msg.text.isBlank()) continue
-            val isFileMedia = msg.msgType in FILE_MEDIA_TYPES
-            if (isFileMedia && Bridge.isSendInFlight(msg)) { stillSending = true; continue }
-            if (isFileMedia && !Bridge.fileOnDisk(msg)) {
-                Bridge.downloadFile(msg, userInitiated = true)
-                downloading = true
+            if (msg.msgType in FILE_MEDIA_TYPES && Bridge.isSendInFlight(msg)) {
+                stillSending = true
                 continue
             }
             ready.add(msg)
@@ -2565,7 +2561,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val toastRes = when {
             ready.isNotEmpty() -> R.string.forwarded
             stillSending -> R.string.still_sending
-            downloading -> R.string.downloading
             else -> R.string.share_failed
         }
         Toast.makeText(this, toastRes, Toast.LENGTH_SHORT).show()
