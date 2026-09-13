@@ -350,13 +350,14 @@ object Signal : EventListener {
     override fun onMessage(
         chatId: String, msgId: String, senderId: String, text: String,
         fromMe: Boolean, timeSent: Long, isRead: Boolean, msgType: String, fileId: String,
-        latitude: Double, longitude: Double,
+        fileSize: Long, latitude: Double, longitude: Double,
         isHistory: Boolean, isEdited: Boolean, quotedId: String, quotedText: String,
         quotedType: String, senderName: String, isForwarded: Boolean,
     ) {
         Bridge.ingestMessage(
             MessageRow(
                 msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId,
+                fileSize = fileSize,
                 edited = isEdited, quotedId = quotedId, quotedText = quotedText,
                 quotedType = quotedType, senderName = senderName,
                 forwarded = isForwarded, latitude = latitude, longitude = longitude
@@ -408,8 +409,11 @@ object Signal : EventListener {
         Bridge.notifyChat(chatId)
     }
 
-    override fun onDownloadProgress(chatId: String, msgId: String, pct: Long) =
-        Bridge.postDownloadProgress(chatId, msgId, pct.toInt())
+    override fun onDownloadProgress(chatId: String, msgId: String, done: Long, total: Long) =
+        Bridge.postDownloadProgress(chatId, msgId, done, total)
+
+    override fun onThumbnail(chatId: String, msgId: String, data: ByteArray) =
+        Bridge.storeThumbnail(chatId, msgId, data)
     override fun onMessageRead(chatId: String, msgId: String) {
         val target = Bridge.db.messageChat(msgId, PREFIX, fromMe = true) ?: return
         Bridge.onMessageRead(target, msgId)

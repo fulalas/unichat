@@ -41,6 +41,7 @@ class MessageAdapter(
     private val onQuoteClick: (MessageRow) -> Unit,
     private val onRetrySend: (MessageRow) -> Unit = {},
     private val onNeedLinkPreview: (String) -> Unit = {},
+    private val onNeedFileSize: (MessageRow) -> Unit = {},
     private val onLinkPreviewClick: (String) -> Unit = {},
     private val onSelectionChanged: () -> Unit = {},
     private val onDragArm: () -> Unit = {},
@@ -52,6 +53,8 @@ class MessageAdapter(
         private const val FLASH_HOLD_MS = 800L
         private const val FLASH_OUT_MS = 1450L
         private const val FLASH_TOTAL_MS = FLASH_IN_MS + FLASH_HOLD_MS + FLASH_OUT_MS
+
+        private val EXTENSION = Regex("[A-Za-z0-9]{1,4}")
 
         private val DIFF = object : DiffUtil.ItemCallback<MessageRow>() {
             override fun areItemsTheSame(a: MessageRow, b: MessageRow) = a.id == b.id
@@ -210,10 +213,10 @@ class MessageAdapter(
 
     private var quoteNames: Map<String, QuotedPreview> = emptyMap()
 
-    private val downloadPct = HashMap<String, Int>()
+    private val downloadBytes = HashMap<String, Pair<Long, Long>>()
 
-    fun setDownloadProgress(recycler: RecyclerView, msgId: String, pct: Int) {
-        downloadPct[msgId] = pct
+    fun setDownloadProgress(recycler: RecyclerView, msgId: String, done: Long, total: Long) {
+        downloadBytes[msgId] = done to total
         refreshDownloadState(recycler, msgId)
     }
 
@@ -223,44 +226,102 @@ class MessageAdapter(
             val msg = holder.current ?: continue
             if (msg.id != msgId || msg.filePath.isNotEmpty()) continue
             when (msg.msgType) {
-                in VIDEO_TYPES -> applyVideoState(holder, msg)
+                "document", in VIDEO_TYPES -> applyFileState(holder, msg)
                 "audio" -> applyAudioState(holder, msg)
-                "document" -> applyDocumentState(holder, msg)
                 in PICTURE_TYPES -> applyImageState(holder, msg)
             }
         }
     }
 
     private fun isDownloading(msg: MessageRow): Boolean {
-        val live = msg.filePath.isEmpty() &&
-            (Bridge.isDownloading(msg.chatId, msg.id) || msg.fileStatus == 1)
-        if (!live) downloadPct.remove(msg.id)
-        return live
+        if (msg.filePath.isNotEmpty()) {
+            downloadBytes.remove(msg.id)
+            return false
+        }
+        return Bridge.isDownloading(msg.chatId, msg.id) || msg.fileStatus == 1
     }
 
     private fun applyImageState(holder: Holder, msg: MessageRow) {
         holder.imageSpinner.visibility = if (isDownloading(msg)) View.VISIBLE else View.GONE
     }
 
-    private fun applyDocumentState(holder: Holder, msg: MessageRow) {
-        val ctx = holder.text.context
-        holder.text.text = highlighted(ctx, "📎 " + msg.text + downloadSuffix(ctx, msg))
+    private fun applyFileState(holder: Holder, msg: MessageRow) {
+        val ctx = holder.fileName.context
+        val downloaded = msg.filePath.isNotEmpty()
+        val downloading = isDownloading(msg)
+        val bytes = downloadBytes[msg.id] ?: storedProgress(msg)
+        val playable = msg.msgType in VIDEO_TYPES
+        val icon = when {
+            downloading -> R.drawable.ic_close
+            downloaded && playable -> R.drawable.ic_play
+            downloaded -> R.drawable.ic_document
+            else -> R.drawable.ic_download
+        }
+        if (holder.fileIconRes != icon) {
+            holder.fileIconRes = icon
+            holder.fileIcon.setImageResource(icon)
+            holder.fileButton.contentDescription = ctx.getString(
+                when (icon) {
+                    R.drawable.ic_close -> R.string.cancel
+                    R.drawable.ic_play -> R.string.play
+                    R.drawable.ic_document -> R.string.open
+                    else -> R.string.download
+                }
+            )
+        }
+        holder.fileProgress.visibility =
+            if (bytes != null && !downloaded) View.VISIBLE else View.GONE
+        holder.fileSpinner.visibility =
+            if (downloading && bytes == null) View.VISIBLE else View.GONE
+        if (bytes != null) holder.fileProgress.progress = percentOf(bytes)
+        holder.fileMeta.text = metaLine(ctx, msg, downloading, bytes)
     }
 
-    private fun applyVideoState(holder: Holder, msg: MessageRow) {
-        val downloaded = msg.filePath.isNotEmpty()
-        val pct = downloadPct[msg.id]
-        val downloading = isDownloading(msg)
-        holder.videoIcon.visibility = if (downloading) View.GONE else View.VISIBLE
-        holder.videoIcon.setImageResource(if (downloaded) R.drawable.ic_play else R.drawable.ic_download)
-        holder.videoButton.contentDescription = holder.videoButton.context.getString(
-            if (downloaded) R.string.play else R.string.download
-        )
-        holder.videoProgress.visibility =
-            if (downloading && pct != null) View.VISIBLE else View.GONE
-        holder.videoSpinner.visibility =
-            if (downloading && pct == null) View.VISIBLE else View.GONE
-        if (pct != null) holder.videoProgress.progress = pct
+    // Survives a restart: the live map is memory-only, the column is not.
+    private fun storedProgress(msg: MessageRow): Pair<Long, Long>? {
+        if (msg.filePath.isNotEmpty() || msg.fileDone <= 0) return null
+        val total = fileSizeOf(msg)
+        return if (total > 0) msg.fileDone to total else null
+    }
+
+    private fun percentOf(bytes: Pair<Long, Long>): Int {
+        val (done, total) = bytes
+        if (total <= 0) return 0
+        return (done * 100 / total).toInt().coerceIn(0, 100)
+    }
+
+    private fun metaLine(
+        ctx: android.content.Context, msg: MessageRow, downloading: Boolean,
+        bytes: Pair<Long, Long>?,
+    ): String {
+        if (msg.filePath.isEmpty() && msg.fileStatus == 3) {
+            return ctx.getString(R.string.download_failed)
+        }
+        if (msg.filePath.isEmpty() && bytes != null) {
+            val total = if (bytes.second > 0) bytes.second else fileSizeOf(msg)
+            if (total > 0) {
+                return ctx.getString(
+                    R.string.download_bytes, formatBytes(bytes.first), formatBytes(total)
+                )
+            }
+        }
+        if (downloading) {
+            val total = fileSizeOf(msg)
+            if (total <= 0) return ctx.getString(R.string.downloading)
+            return ctx.getString(R.string.download_bytes, formatBytes(0), formatBytes(total))
+        }
+        val size = fileSizeOf(msg)
+        val name = if (msg.msgType == "document") msg.text else File(msg.filePath).name
+        val tail = name.substringAfterLast('.', "")
+        val kind = if (EXTENSION.matches(tail)) tail.uppercase() else ""
+        return listOf(if (size > 0) formatBytes(size) else "", kind)
+            .filter { it.isNotEmpty() }.joinToString(" ")
+    }
+
+    private fun fileSizeOf(msg: MessageRow): Long {
+        if (msg.fileSize > 0) return msg.fileSize
+        if (msg.filePath.isEmpty()) return 0
+        return File(msg.filePath).length()
     }
 
     private fun maybeAutoDownload(msg: MessageRow) {
@@ -297,12 +358,14 @@ class MessageAdapter(
         val audioDuration: TextView = view.findViewById(R.id.audioDuration)
         val audioUnplayedDot: View = view.findViewById(R.id.audioUnplayedDot)
         val audioSpeed: TextView = view.findViewById(R.id.audioSpeed)
-        val videoRow: LinearLayout = view.findViewById(R.id.videoRow)
-        val videoButton: View = view.findViewById(R.id.videoButton)
-        val videoIcon: ImageView = view.findViewById(R.id.videoIcon)
-        val videoProgress: android.widget.ProgressBar = view.findViewById(R.id.videoProgress)
-        val videoSpinner: android.widget.ProgressBar = view.findViewById(R.id.videoSpinner)
-        val videoLabel: TextView = view.findViewById(R.id.videoLabel)
+        val fileRow: LinearLayout = view.findViewById(R.id.fileRow)
+        val fileButton: View = view.findViewById(R.id.fileButton)
+        val fileIcon: ImageView = view.findViewById(R.id.fileIcon)
+        val fileProgress: android.widget.ProgressBar = view.findViewById(R.id.fileProgress)
+        val fileSpinner: android.widget.ProgressBar = view.findViewById(R.id.fileSpinner)
+        val fileName: TextView = view.findViewById(R.id.fileName)
+        val fileMeta: TextView = view.findViewById(R.id.fileMeta)
+        var fileIconRes: Int = 0
         val text: TextView = view.findViewById(R.id.messageText)
         val time: TextView = view.findViewById(R.id.messageTime)
         val contactCard: LinearLayout = view.findViewById(R.id.contactCard)
@@ -343,6 +406,7 @@ class MessageAdapter(
         holder.quotePreview.maxWidth = maxWidth
         holder.image.maxWidth = maxWidth
         holder.image.maxHeight = (metrics.heightPixels * 0.5f).toInt()
+        holder.fileName.maxWidth = maxWidth - (72 * metrics.density).toInt()
         val cardWidth = maxWidth - (24 * metrics.density).toInt()
         holder.linkSite.maxWidth = cardWidth
         holder.linkTitle.maxWidth = cardWidth
@@ -479,14 +543,23 @@ class MessageAdapter(
                 v.touchDelegate = null
             }
         }
-        holder.videoButton.setOnClickListener {
-            tappedRow()?.let(onDocumentClick)
+        fun openFile(m: MessageRow) =
+            if (m.msgType in VIDEO_TYPES) onVideoOpen(m) else onDocumentClick(m)
+        holder.fileButton.setOnClickListener {
+            val m = tappedRow() ?: return@setOnClickListener
+            if (isDownloading(m)) {
+                Bridge.cancelDownload(m)
+            } else {
+                downloadBytes.remove(m.id)
+                openFile(m)
+                applyFileState(holder, m)
+            }
         }
-        holder.videoButton.setOnLongClickListener(longPress)
-        holder.videoRow.setOnClickListener {
-            tappedRow()?.let(onVideoOpen)
+        holder.fileButton.setOnLongClickListener(longPress)
+        holder.fileRow.setOnClickListener {
+            tappedRow()?.let { openFile(it) }
         }
-        holder.videoRow.setOnLongClickListener(longPress)
+        holder.fileRow.setOnLongClickListener(longPress)
         holder.audioButtonFrame.setOnClickListener {
             val m = tappedRow(retryIfFailed = !playableWhileFailed(holder))
                 ?: return@setOnClickListener
@@ -576,17 +649,6 @@ class MessageAdapter(
         }
         holder.flashFade = tick
         view.postOnAnimation(tick)
-    }
-
-    private fun downloadSuffix(ctx: android.content.Context, msg: MessageRow): String = when {
-        msg.filePath.isNotEmpty() -> ""
-        isDownloading(msg) -> {
-            val pct = downloadPct[msg.id]
-            " — " + if (pct == null) ctx.getString(R.string.downloading)
-            else ctx.getString(R.string.downloading_pct, pct)
-        }
-        msg.fileStatus == 3 -> " — " + ctx.getString(R.string.download_failed)
-        else -> ""
     }
 
     private fun reactionSummary(csv: String): String {
@@ -723,7 +785,7 @@ class MessageAdapter(
         if (msg.msgType !in PICTURE_TYPES) ImageLoader.clearAnimating(holder.image)
         holder.audioRow.visibility = View.GONE
         holder.audioMeta.visibility = View.GONE
-        holder.videoRow.visibility = View.GONE
+        holder.fileRow.visibility = View.GONE
         holder.contactActions.visibility = View.GONE
         holder.contactCard.visibility = View.GONE
         holder.text.visibility = View.VISIBLE
@@ -805,13 +867,15 @@ class MessageAdapter(
                 maybeAutoDownload(msg)
                 applyAudioState(holder, msg)
             }
-            "document" -> applyDocumentState(holder, msg)
-            in VIDEO_TYPES -> {
+            "document", in VIDEO_TYPES -> {
                 holder.text.visibility = View.GONE
-                holder.videoRow.visibility = View.VISIBLE
-                val label = msg.text.ifEmpty { ctx.getString(R.string.video_label) }
-                holder.videoLabel.text = highlighted(ctx, label)
-                applyVideoState(holder, msg)
+                holder.fileRow.visibility = View.VISIBLE
+                if (msg.fileSize == 0L && msg.filePath.isEmpty()) onNeedFileSize(msg)
+                val fallback =
+                    if (msg.msgType == "document") R.string.document_label else R.string.video_label
+                holder.fileName.text =
+                    highlighted(ctx, msg.text.ifEmpty { ctx.getString(fallback) })
+                applyFileState(holder, msg)
             }
             "location" -> {
                 val label = msg.text.ifEmpty { ctx.getString(R.string.location_label) }
@@ -1036,8 +1100,11 @@ object ImageLoader {
     }
 
     fun load(msg: MessageRow, imageView: ImageView) {
-        val path = msg.filePath
         val sticker = msg.msgType == "sticker"
+        // Falls back to the inline preview the sender shipped with the message.
+        val path = msg.filePath.ifEmpty {
+            Thumbs.path(imageView.context, msg.chatId, msg.id)
+        }
         val prev = imageView.tag as? Tag
         imageView.tag = Tag(path, msg.id)
         if (path.isEmpty()) {

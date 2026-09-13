@@ -44,11 +44,12 @@ type EventListener interface {
 	OnContact(id string, name string, phone string, isSelf bool, isGroup bool, isSaved bool)
 	OnChat(chatId string, name string, unreadCount int, isArchived bool, lastMessageTime int64)
 	OnContactsSynced()
-	OnMessage(chatId string, msgId string, senderId string, text string, fromMe bool, timeSent int64, isRead bool, msgType string, fileId string, latitude float64, longitude float64, isHistory bool, isEdited bool, quotedId string, quotedText string, quotedType string, senderName string, isForwarded bool)
+	OnMessage(chatId string, msgId string, senderId string, text string, fromMe bool, timeSent int64, isRead bool, msgType string, fileId string, fileSize int64, latitude float64, longitude float64, isHistory bool, isEdited bool, quotedId string, quotedText string, quotedType string, senderName string, isForwarded bool)
 	OnMessageDeleted(chatId string, msgId string)
 	OnReaction(chatId string, msgId string, senderId string, emoji string)
 	OnFileDownloaded(chatId string, msgId string, filePath string, status int)
-	OnDownloadProgress(chatId string, msgId string, pct int)
+	OnDownloadProgress(chatId string, msgId string, done int64, total int64)
+	OnThumbnail(chatId string, msgId string, data []byte)
 	OnMessageRead(chatId string, msgId string)
 	OnMessagePlayed(chatId string, msgId string)
 	OnChatReadSelf(chatId string, msgId string)
@@ -969,7 +970,7 @@ func EditMessage(connId int, chatId string, msgId string, newText string, origTi
 	if c.getClient().Store.ID != nil {
 		senderId = strFromJid(*c.getClient().Store.ID)
 	}
-	c.listener.OnMessage(chatId, msgId, senderId, newText, true, 0, false, "", "", 0, 0, false, true, "", "", "", "", false)
+	c.listener.OnMessage(chatId, msgId, senderId, newText, true, 0, false, "", "", 0, 0, 0, false, true, "", "", "", "", false)
 	return true
 }
 
@@ -1252,6 +1253,49 @@ func encodeFileId(kind string, m proto.Message) string {
 	return kind + ":" + base64.StdEncoding.EncodeToString(raw)
 }
 
+// The encoded file id carries the whole media proto, so a size missing from the
+// database (rows stored before file_size existed) is recoverable offline.
+func FileSize(fileId string) int64 {
+	if strings.HasPrefix(fileId, SgIDPrefix) {
+		ptr, err := sgParseFileID(fileId)
+		if err != nil {
+			return 0
+		}
+		return int64(ptr.GetSize())
+	}
+	kind, encoded, found := strings.Cut(fileId, ":")
+	if !found {
+		return 0
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return 0
+	}
+	var m proto.Message
+	switch kind {
+	case "img":
+		m = &waE2E.ImageMessage{}
+	case "vid", "ptv":
+		m = &waE2E.VideoMessage{}
+	case "aud":
+		m = &waE2E.AudioMessage{}
+	case "doc":
+		m = &waE2E.DocumentMessage{}
+	case "stk":
+		m = &waE2E.StickerMessage{}
+	default:
+		return 0
+	}
+	if err := proto.Unmarshal(raw, m); err != nil {
+		return 0
+	}
+	sizer, ok := m.(interface{ GetFileLength() uint64 })
+	if !ok {
+		return 0
+	}
+	return int64(sizer.GetFileLength())
+}
+
 func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe bool, senderId string) string {
 	c := getConn(connId)
 	if c == nil {
@@ -1296,6 +1340,7 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 		downloadable = img
 		setDirectPath = func(p string) { img.DirectPath = proto.String(p) }
 		ext = extFromMime(img.GetMimetype(), ".jpg")
+		total = int64(img.GetFileLength())
 	case "stk":
 		stk := &waE2E.StickerMessage{}
 		if !unmarshal(stk) {
@@ -1304,6 +1349,7 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 		downloadable = stk
 		setDirectPath = func(p string) { stk.DirectPath = proto.String(p) }
 		ext = extFromMime(stk.GetMimetype(), ".webp")
+		total = int64(stk.GetFileLength())
 	case "aud":
 		aud := &waE2E.AudioMessage{}
 		if !unmarshal(aud) {
@@ -1312,6 +1358,7 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 		downloadable = aud
 		setDirectPath = func(p string) { aud.DirectPath = proto.String(p) }
 		ext = ".ogg"
+		total = int64(aud.GetFileLength())
 	case "vid", "ptv":
 		vid := &waE2E.VideoMessage{}
 		if !unmarshal(vid) {
@@ -1329,6 +1376,7 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 		downloadable = doc
 		setDirectPath = func(p string) { doc.DirectPath = proto.String(p) }
 		ext = extFromFileName(doc.GetFileName(), ".bin")
+		total = int64(doc.GetFileLength())
 	default:
 		return fail("file id kind "+kind, nil)
 	}
@@ -1337,6 +1385,10 @@ func DownloadFile(connId int, chatId string, msgId string, fileId string, fromMe
 	if err == nil {
 		c.listener.OnFileDownloaded(chatId, msgId, path, 2)
 		return path
+	}
+	if errors.Is(err, context.Canceled) {
+		c.listener.OnFileDownloaded(chatId, msgId, "", 0)
+		return ""
 	}
 	if !isExpiredMediaErr(err) {
 		return fail("download", err)
@@ -1402,8 +1454,13 @@ func downloadToPath(c *conn, chatId string, msgId string, downloadable whatsmeow
 	if err != nil {
 		return "", err
 	}
-	pf := &progressFile{f: f, c: c, chatId: chatId, msgId: msgId, total: total}
-	err = c.getClient().DownloadToFile(context.Background(), downloadable, pf)
+	pf := &progressFile{f: f, listener: c.listener, chatId: chatId, msgId: msgId, total: total}
+	ctx, release := downloadContext(chatId, msgId)
+	err = c.getClient().DownloadToFile(ctx, downloadable, pf)
+	if err != nil && ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	release()
 	if cerr := f.Close(); cerr != nil && err == nil {
 		err = cerr
 	}
@@ -1544,28 +1601,28 @@ func copyToMedia(c *conn, msgId string, ext string, srcPath string) string {
 	return path
 }
 
+const progressStepBytes = 512 << 10
+
 type progressFile struct {
-	f       *os.File
-	c       *conn
-	chatId  string
-	msgId   string
-	total   int64
-	written int64
-	lastPct int
+	f        *os.File
+	listener EventListener
+	chatId   string
+	msgId    string
+	total    int64
+	written  int64
+	reported int64
 }
 
 func (p *progressFile) Write(b []byte) (int, error) {
 	n, err := p.f.Write(b)
 	p.written += int64(n)
-	if p.total > 0 {
-		pct := int(p.written * 100 / p.total)
-		if pct > 99 {
-			pct = 99
+	if p.total > 0 && p.written-p.reported >= progressStepBytes {
+		p.reported = p.written
+		done := p.written
+		if done > p.total {
+			done = p.total
 		}
-		if pct > p.lastPct {
-			p.lastPct = pct
-			p.c.listener.OnDownloadProgress(p.chatId, p.msgId, pct)
-		}
+		p.listener.OnDownloadProgress(p.chatId, p.msgId, done, p.total)
 	}
 	return n, err
 }
@@ -1573,9 +1630,90 @@ func (p *progressFile) Write(b []byte) (int, error) {
 func (p *progressFile) Seek(offset int64, whence int) (int64, error) {
 	if offset == 0 && whence == io.SeekStart {
 		p.written = 0
-		p.lastPct = 0
+		p.reported = 0
 	}
 	return p.f.Seek(offset, whence)
+}
+
+// Signal reports progress over the encrypted stream, which is padded past the
+// plaintext size; rescale so the counts match the size the message advertises.
+type progressScaler struct {
+	listener EventListener
+	chatId   string
+	msgId    string
+	size     int64
+	reported int64
+}
+
+func (p *progressScaler) report(read int64, total int64) {
+	if total <= 0 || read-p.reported < progressStepBytes {
+		return
+	}
+	p.reported = read
+	done := read * p.size / total
+	if done > p.size {
+		done = p.size
+	}
+	p.listener.OnDownloadProgress(p.chatId, p.msgId, done, p.size)
+}
+
+type downloadCancel struct{ cancel context.CancelFunc }
+
+var downloadCancels = map[string]*downloadCancel{}
+
+// Downloads are queued on a worker pool, so a cancel routinely arrives before
+// the transfer has a context to cancel. Remember it until the transfer starts.
+var downloadCancelled = map[string]time.Time{}
+
+const maxCancelMemo = 1024
+
+// A tombstone only covers the transfer the user was looking at. Without an
+// expiry, a cancel that raced the end of a transfer would kill the next one.
+const cancelMemoTTL = 30 * time.Second
+
+func downloadContext(chatId string, msgId string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	key := chatId + "/" + msgId
+	entry := &downloadCancel{cancel: cancel}
+	mx.Lock()
+	old := downloadCancels[key]
+	downloadCancels[key] = entry
+	at, tombstoned := downloadCancelled[key]
+	delete(downloadCancelled, key)
+	mx.Unlock()
+	if old != nil {
+		old.cancel()
+	}
+	if tombstoned && time.Since(at) < cancelMemoTTL {
+		cancel()
+	}
+	return ctx, func() {
+		mx.Lock()
+		if downloadCancels[key] == entry {
+			delete(downloadCancels, key)
+		}
+		mx.Unlock()
+		cancel()
+	}
+}
+
+func CancelDownload(chatId string, msgId string) {
+	key := chatId + "/" + msgId
+	mx.Lock()
+	entry := downloadCancels[key]
+	delete(downloadCancels, key)
+	if entry == nil {
+		// A cancel for a download that never starts is never consumed; the
+		// memo is only a hint, so drop the whole set rather than grow forever.
+		if len(downloadCancelled) >= maxCancelMemo {
+			downloadCancelled = map[string]time.Time{}
+		}
+		downloadCancelled[key] = time.Now()
+	}
+	mx.Unlock()
+	if entry != nil {
+		entry.cancel()
+	}
 }
 
 func (p *progressFile) Read(b []byte) (int, error)               { return p.f.Read(b) }
@@ -2278,6 +2416,10 @@ func handleMediaRetryEvent(c *conn, evt *events.MediaRetry) {
 	go func() {
 		path, err := downloadToPath(c, pending.chatId, msgId, pending.downloadable, pending.ext, pending.total)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				c.listener.OnFileDownloaded(pending.chatId, msgId, "", 0)
+				return
+			}
 			fail("media retry download", err)
 			return
 		}
@@ -2550,9 +2692,12 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 		emitTime = 0
 	}
 	c.listener.OnMessage(chatId, messageInfo.ID, senderId, content.text, fromMe, emitTime,
-		isRead, content.msgType, content.fileId, content.latitude, content.longitude,
+		isRead, content.msgType, content.fileId, content.fileSize, content.latitude, content.longitude,
 		isHistory, isEdited, content.quotedId, content.quotedText,
 		content.quotedType, messageInfo.PushName, content.forwarded)
+	if len(content.thumb) > 0 {
+		c.listener.OnThumbnail(chatId, messageInfo.ID, content.thumb)
+	}
 }
 
 func handleUndecryptableMessage(c *conn, evt *events.UndecryptableMessage) {
@@ -2567,13 +2712,15 @@ func handleUndecryptableMessage(c *conn, evt *events.UndecryptableMessage) {
 	timeSent := evt.Info.Timestamp
 	isRead := c.messageIsRead(chatId, evt.Info.IsFromMe, timeSent, false, false)
 	c.listener.OnMessage(chatId, evt.Info.ID, senderId, "", evt.Info.IsFromMe, timeSent.Unix(),
-		isRead, viewOnceType, "", 0, 0, false, false, "", "", "", evt.Info.PushName, false)
+		isRead, viewOnceType, "", 0, 0, 0, false, false, "", "", "", evt.Info.PushName, false)
 }
 
 type msgContent struct {
 	text       string
 	msgType    string
 	fileId     string
+	fileSize   int64
+	thumb      []byte
 	quotedId   string
 	quotedText string
 	quotedType string
@@ -2672,6 +2819,9 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 		}
 		m := fromContext(img.GetContextInfo())
 		m.text, m.msgType, m.fileId = img.GetCaption(), "image", encodeFileId("img", img)
+		m.fileSize = int64(img.GetFileLength())
+		// encodeFileId drops the thumbnail to keep the id small, so take it here.
+		m.thumb = img.GetJPEGThumbnail()
 		return m, true
 	}
 	if vid := msg.GetVideoMessage(); vid != nil {
@@ -2680,6 +2830,7 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 		}
 		m := fromContext(vid.GetContextInfo())
 		m.text, m.msgType, m.fileId = vid.GetCaption(), "video", encodeFileId("vid", vid)
+		m.fileSize = int64(vid.GetFileLength())
 		return m, true
 	}
 	if ptv := msg.GetPtvMessage(); ptv != nil {
@@ -2688,6 +2839,7 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 		}
 		m := fromContext(ptv.GetContextInfo())
 		m.text, m.msgType, m.fileId = ptv.GetCaption(), "video", encodeFileId("ptv", ptv)
+		m.fileSize = int64(ptv.GetFileLength())
 		return m, true
 	}
 	if aud := msg.GetAudioMessage(); aud != nil {
@@ -2697,11 +2849,13 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 		m := fromContext(aud.GetContextInfo())
 		m.text = formatDuration(int(aud.GetSeconds()))
 		m.msgType, m.fileId = "audio", encodeFileId("aud", aud)
+		m.fileSize = int64(aud.GetFileLength())
 		return m, true
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		m := fromContext(doc.GetContextInfo())
 		m.text, m.msgType, m.fileId = doc.GetFileName(), "document", encodeFileId("doc", doc)
+		m.fileSize = int64(doc.GetFileLength())
 		return m, true
 	}
 	if stk := msg.GetStickerMessage(); stk != nil {

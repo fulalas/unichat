@@ -24,7 +24,7 @@ object Bridge : EventListener {
         fun onPairCode(code: String) {}
         fun onPairError(proto: String, code: String) {}
         fun onSyncProgress(progress: Int) {}
-        fun onDownloadProgress(chatId: String, msgId: String, pct: Int) {}
+        fun onDownloadProgress(chatId: String, msgId: String, done: Long, total: Long) {}
         fun onChatState(chatId: String, state: String) {}
         fun onPresence(userId: String, isOnline: Boolean, lastSeen: Long) {}
         fun onChatSyncProgress(chatId: String, progress: Int) {}
@@ -49,6 +49,10 @@ object Bridge : EventListener {
     private val executor = Executors.newSingleThreadExecutor()
     private val sgExecutor = Executors.newSingleThreadExecutor()
     private val mediaExecutor = Executors.newFixedThreadPool(2)
+    // Downloads occupy mediaExecutor for their whole run, so a cancel queued
+    // there waits for the transfer it is meant to stop.
+    private val cancelExecutor = Executors.newSingleThreadExecutor()
+    private val lookupExecutor = Executors.newFixedThreadPool(2)
     private val notifyExecutor = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private val listeners = CopyOnWriteArraySet<UiListener>()
@@ -255,6 +259,8 @@ object Bridge : EventListener {
         fun exportProgress(chatId: String): Int
 
         fun startDownload(msg: MessageRow): Boolean
+        fun cancelDownload(msg: MessageRow)
+        fun fileSize(msg: MessageRow): Long
         fun avatarPath(chatId: String, big: Boolean, cachedOnly: Boolean): String
 
         val consumesStagingInput: Boolean
@@ -377,6 +383,9 @@ object Bridge : EventListener {
         override fun exportProgress(chatId: String) = -1
 
         override fun startDownload(msg: MessageRow) = Signal.startDownload(msg)
+        override fun cancelDownload(msg: MessageRow) =
+            Wmbridge.cancelDownload(msg.chatId, msg.id)
+        override fun fileSize(msg: MessageRow): Long = Wmbridge.fileSize(msg.fileId)
         override fun avatarPath(chatId: String, big: Boolean, cachedOnly: Boolean) = ""
 
         override val consumesStagingInput = false
@@ -553,6 +562,11 @@ object Bridge : EventListener {
         override fun exportProgress(chatId: String): Int =
             chatExport?.takeIf { it.chatId == chatId }?.collected?.size ?: -1
 
+        override fun cancelDownload(msg: MessageRow) =
+            Wmbridge.cancelDownload(msg.chatId, msg.id)
+
+        override fun fileSize(msg: MessageRow): Long = Wmbridge.fileSize(msg.fileId)
+
         override fun startDownload(msg: MessageRow): Boolean {
             mediaExecutor.execute {
                 var dispatched = false
@@ -683,6 +697,8 @@ object Bridge : EventListener {
         override fun exportProgress(chatId: String): Int = Tg.exportProgress(chatId)
 
         override fun startDownload(msg: MessageRow): Boolean = Tg.downloadFile(msg)
+        override fun cancelDownload(msg: MessageRow) = Tg.cancelDownload(msg)
+        override fun fileSize(msg: MessageRow): Long = Tg.fileSize(msg)
 
         override fun avatarPath(chatId: String, big: Boolean, cachedOnly: Boolean): String =
             Tg.avatarPath(chatId, big = big, cachedOnly = cachedOnly)
@@ -781,6 +797,7 @@ object Bridge : EventListener {
             fromMe = true, timeSent = stagedTime(chatId, msgId), isRead = false,
             msgType = msgType, filePath = filePath,
             fileStatus = if (filePath.isEmpty()) 0 else 2,
+            fileSize = if (filePath.isEmpty()) 0 else java.io.File(filePath).length(),
             quotedId = quoted?.id ?: "", quotedText = quoted?.let { quotedPreview(it) } ?: "",
             quotedType = quoted?.msgType ?: "",
             latitude = latitude, longitude = longitude, sendPending = true,
@@ -1347,6 +1364,49 @@ object Bridge : EventListener {
         return started
     }
 
+    private val sizeLookups: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val sizeLookupFailed = ConcurrentHashMap<String, Long>()
+
+    // Every rebind of a sizeless row asks again, and a Telegram lookup is a
+    // blocking round trip, so a failure has to back off rather than retry at once.
+    private const val SIZE_RETRY_MS = 60_000L
+
+    fun requestFileSize(msg: MessageRow) {
+        if (msg.fileId.isEmpty()) return
+        val key = msg.chatId + "/" + msg.id
+        val failedAt = sizeLookupFailed[key]
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (failedAt != null && now - failedAt < SIZE_RETRY_MS) return
+        if (!sizeLookups.add(key)) return
+        lookupExecutor.execute {
+            val size = runCatching { proto(msg.chatId).fileSize(msg) }.getOrDefault(0L)
+            if (size <= 0) {
+                sizeLookupFailed[key] = android.os.SystemClock.elapsedRealtime()
+                sizeLookups.remove(key)
+                return@execute
+            }
+            sizeLookupFailed.remove(key)
+            db.setFileSize(msg.chatId, msg.id, size)
+            notifyChatRow(msg.chatId, msg.id)
+        }
+    }
+
+    fun cancelDownload(msg: MessageRow) {
+        val key = msg.chatId + "/" + msg.id
+        userRequestedDownloads.remove(key)
+        cancelExecutor.execute {
+            proto(msg.chatId).cancelDownload(msg)
+            // Each protocol reports the reset itself, but a bridge that is slow
+            // to notice would leave the row stuck showing progress forever.
+            val (path, status) = db.fileState(msg.chatId, msg.id)
+            if (status == 2 && path.isNotEmpty()) return@execute
+            flushProgress(msg.chatId, msg.id)
+            db.setFileState(msg.chatId, msg.id, "", 0)
+            notifyChatRow(msg.chatId, msg.id)
+            onFileTransferDone(msg.chatId, msg.id, "", 0)
+        }
+    }
+
     fun searchServer(chatId: String, query: String, fromMessageId: Long): Tg.SearchPage? =
         proto(chatId).searchServer(chatId, query, fromMessageId)
 
@@ -1832,6 +1892,14 @@ object Bridge : EventListener {
             downloading.remove(key)
             fileWaits[key]?.countDown()
         }
+        for (id in chatIds) {
+            progressWritten.remove(id + KEY_SEP + msgId)
+            progressLatest.remove(id + KEY_SEP + msgId)
+            if (status == 2) {
+                db.setFileDone(id, msgId, 0)
+                appContext?.let { Thumbs.discard(it, id, msgId) }
+            }
+        }
         val requested = keys.count { userRequestedDownloads.remove(it) } > 0
         if (status == 3 && requested) toastUi(R.string.download_failed)
         if (autoPlayKey in keys) {
@@ -1981,7 +2049,7 @@ object Bridge : EventListener {
     override fun onMessage(
         chatId: String, msgId: String, senderId: String, text: String,
         fromMe: Boolean, timeSent: Long, isRead: Boolean, msgType: String, fileId: String,
-        latitude: Double, longitude: Double,
+        fileSize: Long, latitude: Double, longitude: Double,
         isHistory: Boolean, isEdited: Boolean, quotedId: String, quotedText: String,
         quotedType: String, senderName: String, isForwarded: Boolean,
     ) {
@@ -1990,6 +2058,7 @@ object Bridge : EventListener {
         ingestMessage(
             MessageRow(
                 msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId,
+                fileSize = fileSize,
                 edited = isEdited, quotedId = quotedId, quotedText = quotedText,
                 quotedType = quotedType, senderName = senderName,
                 forwarded = isForwarded, latitude = latitude, longitude = longitude
@@ -2107,9 +2176,11 @@ object Bridge : EventListener {
         notifyChatRow(target, msgId)
     }
 
-    override fun onDownloadProgress(chatId: String, msgId: String, pct: Long) {
-        notifyUi { it.onDownloadProgress(chatId, msgId, pct.toInt()) }
-    }
+    override fun onDownloadProgress(chatId: String, msgId: String, done: Long, total: Long) =
+        postDownloadProgress(chatId, msgId, done, total)
+
+    override fun onThumbnail(chatId: String, msgId: String, data: ByteArray) =
+        storeThumbnail(chatId, msgId, data)
 
     override fun onMessageRead(chatId: String, msgId: String) {
         if (wiping) return
@@ -2264,8 +2335,38 @@ object Bridge : EventListener {
 
     internal fun runOnUi(block: () -> Unit) = main.post(block)
 
-    internal fun postDownloadProgress(chatId: String, msgId: String, pct: Int) =
-        notifyUi { it.onDownloadProgress(chatId, msgId, pct) }
+    private val progressLatest = ConcurrentHashMap<String, Long>()
+    private val progressWritten = ConcurrentHashMap<String, Long>()
+
+    // The bridges report every 512 KB; persisting that often is pointless churn,
+    // so only checkpoint often enough that a kill loses little.
+    private const val PROGRESS_WRITE_STEP = 4L shl 20
+
+    internal fun postDownloadProgress(chatId: String, msgId: String, done: Long, total: Long) {
+        val key = chatId + KEY_SEP + msgId
+        progressLatest[key] = done
+        if (done - (progressWritten[key] ?: 0L) >= PROGRESS_WRITE_STEP) {
+            progressWritten[key] = done
+            db.setFileDone(chatId, msgId, done)
+        }
+        notifyUi { it.onDownloadProgress(chatId, msgId, done, total) }
+    }
+
+    internal fun storeThumbnail(chatId: String, msgId: String, data: ByteArray) {
+        val ctx = appContext ?: return
+        if (data.isEmpty()) return
+        lookupExecutor.execute {
+            if (Thumbs.path(ctx, chatId, msgId).isNotEmpty()) return@execute
+            Thumbs.store(ctx, chatId, msgId, data)
+            notifyChatRow(chatId, msgId)
+        }
+    }
+
+    private fun flushProgress(chatId: String, msgId: String) {
+        val key = chatId + KEY_SEP + msgId
+        progressWritten.remove(key)
+        progressLatest.remove(key)?.let { db.setFileDone(chatId, msgId, it) }
+    }
 
     internal fun postChatExportProgress(chatId: String, fetched: Int) =
         notifyUi { it.onChatExportProgress(chatId, fetched) }

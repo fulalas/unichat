@@ -185,7 +185,6 @@
     <string name="go_to_message">Przejdź do wiadomości</string>
     <string name="forwarded">↪ Przekazane</string>
     <string name="download_failed">Pobieranie nie powiodło się</string>
-    <string name="downloading_pct">Pobieram… %1$d%%</string>
     <string name="image_show_failed">Nie udało się pokazać tego obrazu</string>
     <string name="react">Zareaguj</string>
     <string name="reacted_to">%1$s zareagował(a) %2$s na \"%3$s\"</string>
@@ -228,6 +227,8 @@
     <string name="recording_too_short">Za krótkie, żeby wysłać — przytrzymaj dłużej</string>
     <string name="recording_paused">⏸ %1$s — wyślij albo anuluj</string>
     <string name="downloading">Pobieram…</string>
+    <string name="open">Otwórz</string>
+    <string name="download_bytes">%1$s / %2$s</string>
     <string name="no_app_for_file">Żadna aplikacja nie otworzy tego pliku</string>
     <string name="share_not_linked">UniChat nie jest jeszcze połączony z żadnym kontem</string>
     <string name="share_sending">Wysyłam…</string>

@@ -1,3 +1,12 @@
+# UniChat 0.60.0
+
+### New
+
+* **Files now look like files.** A round download button with the name and size next to it, instead of a paperclip line of text.
+* Tapping the button downloads, and the ring around it fills up as the file arrives, with the byte count below the name (for example `4.0 MB / 503.2 MB`).
+* Tapping again while it is downloading cancels it.
+* Works the same on all three accounts — Signal reports byte progress now too.
+
 # UniChat 0.59.2
 
 ### Fixed

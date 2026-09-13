@@ -56,6 +56,62 @@ fun Context.copyUriToCache(uri: Uri, prefix: String, name: String): File? {
     }
 }
 
+// Inline previews the protocols ship with the message. Kept as files rather than
+// a blob column so loading a page of messages does not drag the bytes with it.
+object Thumbs {
+    private fun dir(ctx: Context) = File(ctx.filesDir, "thumbs")
+
+    private fun file(ctx: Context, chatId: String, msgId: String): File =
+        File(dir(ctx), (chatId + "_" + msgId).replace(UNSAFE_FILE_CHARS, "_") + ".jpg")
+
+    fun store(ctx: Context, chatId: String, msgId: String, data: ByteArray) {
+        if (data.isEmpty()) return
+        val out = file(ctx, chatId, msgId)
+        if (out.exists()) return
+        try {
+            dir(ctx).mkdirs()
+            out.writeBytes(data)
+        } catch (_: Exception) {
+            out.delete()
+        }
+    }
+
+    fun path(ctx: Context, chatId: String, msgId: String): String {
+        val f = file(ctx, chatId, msgId)
+        return if (f.exists()) f.path else ""
+    }
+
+    fun discard(ctx: Context, chatId: String, msgId: String) {
+        runCatching { file(ctx, chatId, msgId).delete() }
+    }
+
+    private fun chatPrefix(chatId: String) = chatId.replace(UNSAFE_FILE_CHARS, "_") + "_"
+
+    fun discardChat(ctx: Context, chatId: String) = discardChats(ctx, listOf(chatId))
+
+    fun discardChats(ctx: Context, chatIds: Collection<String>) {
+        if (chatIds.isEmpty()) return
+        val prefixes = chatIds.map { chatPrefix(it) }
+        val entries = dir(ctx).listFiles() ?: return
+        for (f in entries) {
+            if (prefixes.any { f.name.startsWith(it) }) runCatching { f.delete() }
+        }
+    }
+}
+
+private val BYTE_UNITS = listOf("B", "KB", "MB", "GB", "TB")
+
+fun formatBytes(bytes: Long): String {
+    var value = bytes.toDouble()
+    var unit = 0
+    while (value >= 1024 && unit < BYTE_UNITS.size - 1) {
+        value /= 1024
+        unit++
+    }
+    val digits = if (unit == 0) 0 else 1
+    return "%.${digits}f %s".format(java.util.Locale.US, value, BYTE_UNITS[unit])
+}
+
 fun mimeOfPath(path: String, fallback: String = "application/octet-stream"): String =
     MimeTypeMap.getSingleton()
         .getMimeTypeFromExtension(File(path).extension.lowercase()) ?: fallback

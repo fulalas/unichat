@@ -185,7 +185,6 @@
     <string name="go_to_message">Mesaja git</string>
     <string name="forwarded">↪ İletildi</string>
     <string name="download_failed">İndirme başarısız</string>
-    <string name="downloading_pct">İndiriliyor… %%%1$d</string>
     <string name="image_show_failed">Bu resim gösterilemedi</string>
     <string name="react">Tepki ver</string>
     <string name="reacted_to">%1$s, \"%3$s\" mesajına %2$s tepkisi verdi</string>
@@ -228,6 +227,8 @@
     <string name="recording_too_short">Göndermek için çok kısa — daha uzun basılı tutun</string>
     <string name="recording_paused">⏸ %1$s — gönderin ya da iptal edin</string>
     <string name="downloading">İndiriliyor…</string>
+    <string name="open">Aç</string>
+    <string name="download_bytes">%1$s / %2$s</string>
     <string name="no_app_for_file">Bu dosyayı açabilecek bir uygulama yok</string>
     <string name="share_not_linked">UniChat henüz hiçbir hesaba bağlı değil</string>
     <string name="share_sending">Gönderiliyor…</string>

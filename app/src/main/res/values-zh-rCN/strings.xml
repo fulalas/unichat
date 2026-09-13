@@ -185,7 +185,6 @@
     <string name="go_to_message">跳到该消息</string>
     <string name="forwarded">↪ 已转发</string>
     <string name="download_failed">下载失败</string>
-    <string name="downloading_pct">下载中… %1$d%%</string>
     <string name="image_show_failed">无法显示这张图片</string>
     <string name="react">回应</string>
     <string name="reacted_to">%1$s 对「%3$s」回应了 %2$s</string>
@@ -228,6 +227,8 @@
     <string name="recording_too_short">太短了，发不出去 — 请按住久一点</string>
     <string name="recording_paused">⏸ %1$s — 发送或取消</string>
     <string name="downloading">下载中…</string>
+    <string name="open">打开</string>
+    <string name="download_bytes">%1$s / %2$s</string>
     <string name="no_app_for_file">没有应用可以打开这个文件</string>
     <string name="share_not_linked">UniChat 还没有关联任何账号</string>
     <string name="share_sending">发送中…</string>

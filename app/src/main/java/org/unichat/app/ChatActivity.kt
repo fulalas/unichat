@@ -300,6 +300,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             onQuoteClick = { msg -> onQuoteTapped(msg) },
             onRetrySend = { msg -> retrySend(msg) },
             onNeedLinkPreview = { url -> requestLinkPreview(url) },
+            onNeedFileSize = { msg -> Bridge.requestFileSize(msg) },
             onLinkPreviewClick = { url -> openLink(url) },
             onSelectionChanged = { onSelectionChanged() },
             onDragArm = { dragSelect?.arm() },
@@ -784,9 +785,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         updateSubtitle()
     }
 
-    override fun onDownloadProgress(chatId: String, msgId: String, pct: Int) {
+    override fun onDownloadProgress(chatId: String, msgId: String, done: Long, total: Long) {
         if (chatId != this.chatId) return
-        adapter.setDownloadProgress(messageList, msgId, pct)
+        adapter.setDownloadProgress(messageList, msgId, done, total)
     }
 
     override fun onChatMerged(fromId: String, toId: String) {
@@ -834,6 +835,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 consumePendingVideo { id -> fresh[id] }
                 adapter.refreshRows(fresh)
+                // Download state lives outside MessageRow, so a row whose transfer
+                // stopped diffs as unchanged and would never repaint on its own.
+                for (id in ids) adapter.refreshDownloadState(messageList, id)
             }
         }
     }

@@ -790,9 +790,13 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 				} else {
 					id = fmt.Sprintf("%s-%d", msgID, i)
 				}
+				label := caption
+				if kind == "document" && label == "" {
+					label = att.GetFileName()
+				}
 				c.listener.OnMessage(
-					chatID, id, senderID, caption,
-					fromMe, timeSent, false, kind, sgFileID(att),
+					chatID, id, senderID, label,
+					fromMe, timeSent, false, kind, sgFileID(att), int64(att.GetSize()),
 					0, 0, false, false, quotedID, quotedText, "", "", false,
 				)
 			}
@@ -801,7 +805,7 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 		if text := sgContactText(content.GetContact()); text != "" {
 			c.listener.OnMessage(
 				chatID, msgID, senderID, text,
-				fromMe, timeSent, false, "contact", "",
+				fromMe, timeSent, false, "contact", "", 0,
 				0, 0, false, false, quotedID, quotedText, "", "", false,
 			)
 			return
@@ -809,7 +813,7 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 		if lat, lng, ok := sgParseMapLink(body); ok {
 			c.listener.OnMessage(
 				chatID, msgID, senderID, "",
-				fromMe, timeSent, false, "location", "",
+				fromMe, timeSent, false, "location", "", 0,
 				lat, lng, false, false, quotedID, quotedText, "", "", false,
 			)
 			return
@@ -819,13 +823,13 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 		}
 		c.listener.OnMessage(
 			chatID, msgID, senderID, body,
-			fromMe, timeSent, false, "", "", 0, 0, false, false, quotedID, quotedText, "", "", false,
+			fromMe, timeSent, false, "", "", 0, 0, 0, false, false, quotedID, quotedText, "", "", false,
 		)
 	case *signalpb.EditMessage:
 		edited := content.GetDataMessage()
 		c.listener.OnMessage(
 			chatID, fmt.Sprintf("%d", content.GetTargetSentTimestamp()), senderID,
-			sgWithMarkers(edited.GetBody(), edited.GetBodyRanges()), fromMe, 0, false, "", "",
+			sgWithMarkers(edited.GetBody(), edited.GetBodyRanges()), fromMe, 0, false, "", "", 0,
 			0, 0, false, true, "", "", "", "", false,
 		)
 	case *signalpb.TypingMessage:
@@ -1149,10 +1153,10 @@ func sgTimestamp(msgId string) uint64 {
 	return uint64(time.Now().UnixMilli())
 }
 
-func sgEchoOwn(c *sgConn, chatId, msgID, text, msgType, fileID string, timeSent int64) {
+func sgEchoOwn(c *sgConn, chatId, msgID, text, msgType, fileID string, fileSize int64, timeSent int64) {
 	c.listener.OnMessage(
 		chatId, msgID, SignalSelfID(), text, true, timeSent, false,
-		msgType, fileID, 0, 0, false, false, "", "", "", "", false,
+		msgType, fileID, fileSize, 0, 0, false, false, "", "", "", "", false,
 	)
 	c.listener.OnChat(chatId, "", 0, false, timeSent)
 }
@@ -1237,7 +1241,12 @@ func SignalSendAttachment(
 	if caption != "" {
 		dm.Body = proto.String(caption)
 	}
-	sgEchoOwn(c, chatId, msgID, caption, sgAttachmentKind(mime, voiceNote), sgFileID(ptr), int64(timestamp/1000))
+	kind := sgAttachmentKind(mime, voiceNote)
+	label := caption
+	if kind == "document" && label == "" {
+		label = filepath.Base(path)
+	}
+	sgEchoOwn(c, chatId, msgID, label, kind, sgFileID(ptr), info.Size(), int64(timestamp/1000))
 	if err := sgSend(c, client, chatId, &signalpb.Content{
 		Content: &signalpb.Content_DataMessage{DataMessage: dm},
 	}); err != nil {
@@ -1273,10 +1282,23 @@ func SignalDownloadAttachment(chatId string, msgId string, fileId string) {
 		fail("create", err)
 		return
 	}
-	_, err = signalmeow.DownloadAttachmentWithPointer(context.TODO(), ptr, nil, f)
+	ctx, release := downloadContext(chatId, msgId)
+	if size := int64(ptr.GetSize()); size > 0 {
+		p := &progressScaler{listener: c.listener, chatId: chatId, msgId: msgId, size: size}
+		ctx = signalmeow.WithDownloadProgress(ctx, p.report)
+	}
+	_, err = signalmeow.DownloadAttachmentWithPointer(ctx, ptr, nil, f)
+	if err != nil && ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	release()
 	closeErr := f.Close()
 	if err != nil {
 		os.Remove(out)
+		if errors.Is(err, context.Canceled) {
+			c.listener.OnFileDownloaded(chatId, msgId, "", 0)
+			return
+		}
 		fail("fetch", err)
 		return
 	}
@@ -1448,7 +1470,7 @@ func SignalEdit(chatId string, msgId string, newText string, styles string, file
 	}
 	c.listener.OnMessage(
 		chatId, msgId, SignalSelfID(), sgWithMarkers(newText, ranges), true, 0, false,
-		"", "", 0, 0, false, true, "", "", "", "", false,
+		"", "", 0, 0, 0, false, true, "", "", "", "", false,
 	)
 	return true
 }

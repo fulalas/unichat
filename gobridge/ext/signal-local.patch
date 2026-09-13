@@ -2,8 +2,9 @@ Base-Commit: 0d5f3f457dac53707973f525809fe9c6dc926bd6 (v0.2608.0)
 #
 # Everything UniChat adds to signalmeow. The checkout is refetched by
 # build.sh and is gitignored, so anything not in here is lost on a clean
-# build: registration, SVR2, profile upload and the generated svr2 protobuf
-# all live only in this patch.
+# build: registration, SVR2, profile upload, attachment download progress and
+# the generated svr2 protobuf all live only in this patch.
+
 
 diff --git a/pkg/libsignalgo/accountentropy.go b/pkg/libsignalgo/accountentropy.go
 index 712f886..74819d0 100644
@@ -171,6 +172,61 @@ index 0000000..4706cfe
 +	}
 +	return wrapSGXClientState(out.raw), nil
 +}
+diff --git a/pkg/signalmeow/attachments.go b/pkg/signalmeow/attachments.go
+index c091827..da80457 100644
+--- a/pkg/signalmeow/attachments.go
++++ b/pkg/signalmeow/attachments.go
+@@ -57,6 +57,41 @@ func getAttachmentPath(id uint64, key string) string {
+ 	return fmt.Sprintf(attachmentKeyDownloadPath, key)
+ }
+ 
++type downloadProgressKey struct{}
++
++// DownloadProgressFunc is called as attachment bytes arrive. Both counts are of
++// the encrypted stream, so they run slightly ahead of the plaintext size.
++type DownloadProgressFunc func(read int64, total int64)
++
++// WithDownloadProgress returns a context that reports download progress to cb.
++func WithDownloadProgress(ctx context.Context, cb DownloadProgressFunc) context.Context {
++	return context.WithValue(ctx, downloadProgressKey{}, cb)
++}
++
++type progressReader struct {
++	r     io.Reader
++	cb    DownloadProgressFunc
++	total int64
++	read  int64
++}
++
++func (p *progressReader) Read(b []byte) (int, error) {
++	n, err := p.r.Read(b)
++	if n > 0 {
++		p.read += int64(n)
++		p.cb(p.read, p.total)
++	}
++	return n, err
++}
++
++func withProgress(ctx context.Context, r io.Reader, total int64) io.Reader {
++	cb, _ := ctx.Value(downloadProgressKey{}).(DownloadProgressFunc)
++	if cb == nil || total <= 0 {
++		return r
++	}
++	return &progressReader{r: r, cb: cb, total: total}
++}
++
+ // ErrInvalidMACForAttachment signals that the downloaded attachment has an invalid MAC.
+ var ErrInvalidMACForAttachment = errors.New("invalid MAC for attachment")
+ var ErrInvalidDigestForAttachment = errors.New("invalid digest for attachment")
+@@ -108,7 +143,7 @@ func DownloadAttachment(
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed to pre-allocate file for attachment: %w", err)
+ 		}
+-		downloadedSize, err = io.Copy(into, resp.Body)
++		downloadedSize, err = io.Copy(into, withProgress(ctx, resp.Body, resp.ContentLength))
+ 	}
+ 	if err != nil {
+ 		return nil, err
 diff --git a/pkg/signalmeow/profileupload.go b/pkg/signalmeow/profileupload.go
 new file mode 100644
 index 0000000..35e5ba7
@@ -2185,9 +2241,33 @@ index 756e673..605bb33 100644
 +	_, err := cli.sendContent(ctx, self, timestamp, syncSentMessage(sent), 0, true, nil, nil)
 +	return err
 +}
+diff --git a/pkg/signalmeow/storageservice.go b/pkg/signalmeow/storageservice.go
+index 2326e1c..7c5afca 100644
+--- a/pkg/signalmeow/storageservice.go
++++ b/pkg/signalmeow/storageservice.go
+@@ -59,6 +59,19 @@ func (cli *Client) SyncStorage(ctx context.Context) {
+ 	}
+ }
+ 
++// ProcessStorage applies an update the caller has already fetched, so a caller
++// that had to read the manifest itself — to know whether the account's key even
++// opens it — does not download the whole thing a second time.
++func (cli *Client) ProcessStorage(ctx context.Context, update *StorageUpdate) error {
++	// Same logger in the context as SyncStorage puts there: without it every
++	// diagnostic the processing emits goes to a nop logger and is simply lost.
++	log := cli.Log.With().Str("action", "sync storage").Logger()
++	ctx = log.WithContext(ctx)
++	return cli.Store.DoContactTxn(ctx, func(ctx context.Context) error {
++		return cli.processStorageInTxn(ctx, update)
++	})
++}
++
+ func (cli *Client) processStorageInTxn(ctx context.Context, update *StorageUpdate) error {
+ 	log := zerolog.Ctx(ctx)
+ 	var changedContacts []*types.Recipient
 diff --git a/pkg/signalmeow/svr2.go b/pkg/signalmeow/svr2.go
 new file mode 100644
-index 0000000..0000000
+index 0000000..6f08257
 --- /dev/null
 +++ b/pkg/signalmeow/svr2.go
 @@ -0,0 +1,299 @@
@@ -2490,27 +2570,3 @@ index 0000000..0000000
 +	}
 +	return pin
 +}
-diff --git a/pkg/signalmeow/storageservice.go b/pkg/signalmeow/storageservice.go
-index 2326e1c..7c5afca 100644
---- a/pkg/signalmeow/storageservice.go
-+++ b/pkg/signalmeow/storageservice.go
-@@ -59,6 +59,19 @@ func (cli *Client) SyncStorage(ctx context.Context) {
- 	}
- }
- 
-+// ProcessStorage applies an update the caller has already fetched, so a caller
-+// that had to read the manifest itself — to know whether the account's key even
-+// opens it — does not download the whole thing a second time.
-+func (cli *Client) ProcessStorage(ctx context.Context, update *StorageUpdate) error {
-+	// Same logger in the context as SyncStorage puts there: without it every
-+	// diagnostic the processing emits goes to a nop logger and is simply lost.
-+	log := cli.Log.With().Str("action", "sync storage").Logger()
-+	ctx = log.WithContext(ctx)
-+	return cli.Store.DoContactTxn(ctx, func(ctx context.Context) error {
-+		return cli.processStorageInTxn(ctx, update)
-+	})
-+}
-+
- func (cli *Client) processStorageInTxn(ctx context.Context, update *StorageUpdate) error {
- 	log := zerolog.Ctx(ctx)
- 	var changedContacts []*types.Recipient

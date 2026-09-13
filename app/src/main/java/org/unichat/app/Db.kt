@@ -33,6 +33,8 @@ data class MessageRow(
     val fileId: String = "",
     val filePath: String = "",
     val fileStatus: Int = 0,
+    val fileSize: Long = 0,
+    val fileDone: Long = 0,
     val edited: Boolean = false,
     val quotedId: String = "",
     val quotedText: String = "",
@@ -125,7 +127,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
 
     private val ctx: Context = context.applicationContext
 
@@ -211,6 +213,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
                 "time_sent INTEGER NOT NULL DEFAULT 0, is_read INTEGER NOT NULL DEFAULT 0," +
                 "msg_type TEXT NOT NULL DEFAULT '', file_id TEXT NOT NULL DEFAULT ''," +
                 "file_path TEXT NOT NULL DEFAULT '', file_status INTEGER NOT NULL DEFAULT 0," +
+                "file_size INTEGER NOT NULL DEFAULT 0," +
+                "file_done INTEGER NOT NULL DEFAULT 0," +
                 "edited INTEGER NOT NULL DEFAULT 0," +
                 "quoted_id TEXT NOT NULL DEFAULT '', quoted_text TEXT NOT NULL DEFAULT ''," +
                 "quoted_type TEXT NOT NULL DEFAULT ''," +
@@ -382,6 +386,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
         if (oldVersion < 35) {
             db.execSQL(CREATE_UNREAD_OUT_INDEX)
         }
+        if (oldVersion < 36) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 37) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN file_done INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     private fun <T> queryList(sql: String, args: Array<String>?, map: (Cursor) -> T): List<T> {
@@ -484,8 +494,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
     fun upsertMessage(m: MessageRow) {
         if (suppressed(m.chatId, m.timeSent)) return
         writableDatabase.execSQL(
-            "INSERT INTO messages(chat_id, id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, edited, quoted_id, quoted_text, quoted_type, sender_name, forwarded, latitude, longitude) " +
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
+            "INSERT INTO messages(chat_id, id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_size, edited, quoted_id, quoted_text, quoted_type, sender_name, forwarded, latitude, longitude) " +
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
                 "ON CONFLICT(chat_id, id) DO UPDATE SET " +
                 "text=CASE WHEN excluded.text!='' THEN excluded.text ELSE text END," +
                 "is_read=max(is_read, excluded.is_read), edited=max(edited, excluded.edited)," +
@@ -494,11 +504,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
                 "time_sent=CASE WHEN excluded.time_sent>0 AND time_pinned=0 " +
                 "THEN excluded.time_sent ELSE time_sent END," +
                 "file_id=CASE WHEN excluded.file_id!='' THEN excluded.file_id ELSE file_id END," +
+                "file_size=CASE WHEN excluded.file_size>0 THEN excluded.file_size ELSE file_size END," +
                 "latitude=CASE WHEN excluded.latitude!=0 THEN excluded.latitude ELSE latitude END," +
                 "longitude=CASE WHEN excluded.longitude!=0 THEN excluded.longitude ELSE longitude END",
             arrayOf(
                 m.chatId, m.id, m.senderId, m.text, if (m.fromMe) 1 else 0, m.timeSent,
-                if (m.isRead) 1 else 0, m.msgType, m.fileId, if (m.edited) 1 else 0,
+                if (m.isRead) 1 else 0, m.msgType, m.fileId, m.fileSize, if (m.edited) 1 else 0,
                 m.quotedId, m.quotedText, m.quotedType, m.senderName, if (m.forwarded) 1 else 0,
                 m.latitude, m.longitude
             )
@@ -517,6 +528,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
     }
 
     fun deleteMessage(chatId: String, msgId: String) = writableDatabase.transact {
+        Thumbs.discard(ctx, chatId, msgId)
         execSQL("DELETE FROM messages WHERE chat_id=? AND id=?", arrayOf(chatId, msgId))
         execSQL("DELETE FROM reactions WHERE chat_id=? AND msg_id=?", arrayOf(chatId, msgId))
         val newest = queryFirst(
@@ -555,6 +567,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
         val now = System.currentTimeMillis() / 1000
         val previous = deletedChats.put(chatId, now)
         try {
+            Thumbs.discardChat(ctx, chatId)
             writableDatabase.transact {
                 execSQL("DELETE FROM messages WHERE chat_id=?", arrayOf(chatId))
                 execSQL("DELETE FROM reactions WHERE chat_id=?", arrayOf(chatId))
@@ -714,6 +727,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
     }
 
     private fun clearProtocolData(predicate: (String) -> String) = writableDatabase.transact {
+        Thumbs.discardChats(
+            ctx, queryList("SELECT id FROM chats WHERE ${predicate("id")}", null) { it.getString(0) }
+        )
         execSQL("DELETE FROM messages WHERE ${predicate("chat_id")}")
         execSQL("DELETE FROM reactions WHERE ${predicate("chat_id")}")
         execSQL("DELETE FROM chats WHERE ${predicate("id")}")
@@ -736,6 +752,24 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
     }
 
     fun clearTgData() = clearProtocolData { "$it LIKE 'tg:%'" }
+
+    fun fileId(chatId: String, msgId: String): String = queryFirst(
+        "SELECT file_id FROM messages WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+    ) { it.getString(0) } ?: ""
+
+    fun setFileDone(chatId: String, msgId: String, done: Long) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET file_done=? WHERE chat_id=? AND id=?",
+            arrayOf(done, chatId, msgId)
+        )
+    }
+
+    fun setFileSize(chatId: String, msgId: String, size: Long) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET file_size=? WHERE chat_id=? AND id=? AND file_size=0",
+            arrayOf(size, chatId, msgId)
+        )
+    }
 
     fun setFileId(chatId: String, msgId: String, fileId: String) {
         writableDatabase.execSQL(
@@ -826,11 +860,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
             execSQL("INSERT OR IGNORE INTO chats(id) VALUES(?)", arrayOf(m.chatId))
             execSQL(
                 "REPLACE INTO messages(chat_id, id, sender_id, text, from_me, time_sent, is_read, " +
-                    "msg_type, file_id, file_path, file_status, quoted_id, quoted_text, quoted_type, " +
-                    "latitude, longitude, send_pending) VALUES(?,?,?,?,1,?,0,?,'',?,?,?,?,?,?,?,1)",
+                    "msg_type, file_id, file_path, file_status, file_size, quoted_id, quoted_text, quoted_type, " +
+                    "latitude, longitude, send_pending) VALUES(?,?,?,?,1,?,0,?,'',?,?,?,?,?,?,?,?,1)",
                 arrayOf(
                     m.chatId, m.id, m.senderId, m.text, m.timeSent, m.msgType, m.filePath,
-                    m.fileStatus, m.quotedId, m.quotedText, m.quotedType, m.latitude, m.longitude
+                    m.fileStatus, m.fileSize, m.quotedId, m.quotedText, m.quotedType,
+                    m.latitude, m.longitude
                 )
             )
         }
@@ -939,7 +974,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
 
     private fun messageColumns(src: String) =
         "SELECT id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, " +
-            "file_status, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
+            "file_status, file_size, file_done, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
             "latitude, longitude, send_failed, send_pending, caption_locked," +
             "(SELECT GROUP_CONCAT(emoji) FROM reactions r " +
             "WHERE r.chat_id=$src.chat_id AND r.msg_id=$src.id) AS reactions "
@@ -950,15 +985,16 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 35) {
         timeSent = it.getLong(4), isRead = it.getInt(5) != 0,
         msgType = it.getString(6), fileId = it.getString(7),
         filePath = it.getString(8), fileStatus = it.getInt(9),
-        edited = it.getInt(10) != 0,
-        quotedId = it.getString(11), quotedText = it.getString(12),
-        senderName = it.getString(13), played = it.getInt(14) != 0,
-        forwarded = it.getInt(15) != 0, quotedType = it.getString(16),
-        latitude = it.getDouble(17), longitude = it.getDouble(18),
-        sendFailed = it.getInt(19) != 0,
-        sendPending = it.getInt(20) != 0,
-        captionLocked = it.getInt(21) != 0,
-        reactions = it.getString(22) ?: ""
+        fileSize = it.getLong(10), fileDone = it.getLong(11),
+        edited = it.getInt(12) != 0,
+        quotedId = it.getString(13), quotedText = it.getString(14),
+        senderName = it.getString(15), played = it.getInt(16) != 0,
+        forwarded = it.getInt(17) != 0, quotedType = it.getString(18),
+        latitude = it.getDouble(19), longitude = it.getDouble(20),
+        sendFailed = it.getInt(21) != 0,
+        sendPending = it.getInt(22) != 0,
+        captionLocked = it.getInt(23) != 0,
+        reactions = it.getString(24) ?: ""
     )
 
     fun messagesByIds(chatId: String, ids: Collection<String>): List<MessageRow> {

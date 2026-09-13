@@ -554,6 +554,7 @@ private const val UNREAD_REACTION_PAGE = 100
         var msgType = ""
         var text = ""
         var fileId = fileOf(content)?.optInt("id")?.toString() ?: ""
+        val fileSize = fileOf(content)?.optLong("size") ?: 0L
         var listened = false
         var latitude = 0.0
         var longitude = 0.0
@@ -649,7 +650,7 @@ private const val UNREAD_REACTION_PAGE = 100
         } else ""
         return MessageRow(
             msgId.toString(), chatId, senderId, text, fromMe, timeSent, isRead,
-            msgType = msgType, fileId = fileId,
+            msgType = msgType, fileId = fileId, fileSize = fileSize,
             filePath = filePath, fileStatus = fileStatus,
             latitude = latitude, longitude = longitude,
             edited = msg.optLong("edit_date") > 0, quotedId = quotedId,
@@ -682,6 +683,7 @@ private const val UNREAD_REACTION_PAGE = 100
             if (row.msgType == "videonote") {
                 Bridge.db.setMsgType(row.chatId, row.id, row.msgType)
             }
+            if (row.filePath.isEmpty()) storeThumb(row.chatId, row.id, msg)
         }
     }
 
@@ -691,6 +693,20 @@ private const val UNREAD_REACTION_PAGE = 100
 
     private fun parseMessageSafe(msg: JSONObject): MessageRow? =
         try { parseMessage(msg) } catch (e: Exception) { Log.e(TAG, "message parse failed", e); null }
+
+    private fun storeThumb(chatId: String, msgId: String, msg: JSONObject) {
+        val content = msg.optJSONObject("content") ?: return
+        val mini = (content.optJSONObject("photo") ?: content.optJSONObject("sticker"))
+            ?.optJSONObject("minithumbnail") ?: return
+        val encoded = mini.optString("data")
+        if (encoded.isEmpty()) return
+        val bytes = try {
+            android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
+        } catch (_: IllegalArgumentException) {
+            return
+        }
+        Bridge.storeThumbnail(chatId, msgId, bytes)
+    }
 
     private fun placeholderFor(content: JSONObject): String =
         "[" + content.optString("@type").removePrefix("message") + "]"
@@ -864,6 +880,32 @@ private const val UNREAD_REACTION_PAGE = 100
 
     private fun failDownload(msg: MessageRow) = fileDone(msg.chatId, msg.id, "", 3)
 
+    fun fileSize(msg: MessageRow): Long {
+        val mid = msg.id.toLongOrNull() ?: return 0
+        val fresh = request(
+            JSONObject().put("@type", "getMessage")
+                .put("chat_id", chatIdOf(msg.chatId)).put("message_id", mid)
+        ) ?: return 0
+        return fresh.optJSONObject("content")?.let { fileOf(it) }?.optLong("size") ?: 0
+    }
+
+    fun cancelDownload(msg: MessageRow) {
+        downloader.execute {
+            // startDownload rewrites the stored id without notifying, so the row the
+            // adapter holds can name a file id from before the last restart.
+            val fid = Bridge.db.fileId(msg.chatId, msg.id).toIntOrNull()
+                ?: msg.fileId.toIntOrNull() ?: return@execute
+            fileTargets[fid]?.remove(Pair(msg.chatId, msg.id))
+            request(
+                JSONObject().put("@type", "cancelDownloadFile")
+                    .put("file_id", fid).put("only_if_pending", false)
+            )
+            val (path, status) = Bridge.db.fileState(msg.chatId, msg.id)
+            if (status == 2 && path.isNotEmpty()) return@execute
+            fileDone(msg.chatId, msg.id, "", 0)
+        }
+    }
+
     private fun onFile(file: JSONObject) {
         val fid = file.optInt("id")
         val targets = fileTargets[fid] ?: return
@@ -880,8 +922,10 @@ private const val UNREAD_REACTION_PAGE = 100
             local.optBoolean("is_downloading_active") -> {
                 val total = file.optLong("size")
                 if (total > 0) {
-                    val pct = (local.optLong("downloaded_size") * 100 / total).toInt().coerceIn(0, 99)
-                    for ((chatId, msgId) in targets) Bridge.postDownloadProgress(chatId, msgId, pct)
+                    val done = local.optLong("downloaded_size").coerceIn(0, total)
+                    for ((chatId, msgId) in targets) {
+                        Bridge.postDownloadProgress(chatId, msgId, done, total)
+                    }
                 }
             }
             !local.optBoolean("can_be_downloaded", true) -> {

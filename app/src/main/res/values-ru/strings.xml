@@ -185,7 +185,6 @@
     <string name="go_to_message">Перейти к сообщению</string>
     <string name="forwarded">↪ Переслано</string>
     <string name="download_failed">Не удалось скачать</string>
-    <string name="downloading_pct">Скачиваем… %1$d%%</string>
     <string name="image_show_failed">Не удалось показать это изображение</string>
     <string name="react">Реакция</string>
     <string name="reacted_to">%1$s поставил(а) %2$s на \"%3$s\"</string>
@@ -228,6 +227,8 @@
     <string name="recording_too_short">Слишком коротко — держите дольше</string>
     <string name="recording_paused">⏸ %1$s — отправьте или отмените</string>
     <string name="downloading">Скачиваем…</string>
+    <string name="open">Открыть</string>
+    <string name="download_bytes">%1$s / %2$s</string>
     <string name="no_app_for_file">Нет приложения, которое откроет этот файл</string>
     <string name="share_not_linked">UniChat ещё не подключён ни к одному аккаунту</string>
     <string name="share_sending">Отправляем…</string>

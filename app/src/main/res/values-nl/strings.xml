@@ -185,7 +185,6 @@
     <string name="go_to_message">Naar het bericht</string>
     <string name="forwarded">↪ Doorgestuurd</string>
     <string name="download_failed">Downloaden mislukt</string>
-    <string name="downloading_pct">Downloaden… %1$d%%</string>
     <string name="image_show_failed">Deze afbeelding kon niet worden getoond</string>
     <string name="react">Reageren</string>
     <string name="reacted_to">%1$s reageerde met %2$s op \"%3$s\"</string>
@@ -228,6 +227,8 @@
     <string name="recording_too_short">Te kort om te versturen — houd langer ingedrukt</string>
     <string name="recording_paused">⏸ %1$s — versturen of annuleren</string>
     <string name="downloading">Downloaden…</string>
+    <string name="open">Openen</string>
+    <string name="download_bytes">%1$s / %2$s</string>
     <string name="no_app_for_file">Geen enkele app kan dit bestand openen</string>
     <string name="share_not_linked">UniChat is nog aan geen enkel account gekoppeld</string>
     <string name="share_sending">Versturen…</string>
