@@ -168,6 +168,7 @@
     <string name="sticker_label">Стікер</string>
     <string name="video_label">Відео</string>
     <string name="view_once_label">Одноразове (відкрийте на іншому пристрої)</string>
+    <string name="undecryptable_label">Очікування цього повідомлення</string>
     <string name="document_label">Файл</string>
     <string name="contact_label">Картка контакту</string>
     <string name="add_to_contacts">Додати контакт</string>

@@ -56,7 +56,7 @@ WHATSMEOW_BRANCH="main"
 # checkout. Moving this pin means rebuilding libsignal_ffi.a, which the stamp in
 # gobridge/ext/libsignal handles automatically.
 SIGNALMEOW_REPO="https://github.com/mautrix/signal.git"
-SIGNALMEOW_TAG="v0.2608.0"
+SIGNALMEOW_TAG="v0.2609.0"
 
 # Upstream is polled once a week, not once a build: whatsmeow used to hit the
 # network on every run while signalmeow and TDLib sat on their pins forever, so
@@ -72,6 +72,10 @@ mark_checked() { mkdir -p "$(dirname "$UPDATE_STAMP")"; date +%G-W%V > "$UPDATE_
 latest_tag() {
     git ls-remote --tags --refs "$1" 2>/dev/null |
         sed 's#.*refs/tags/##' | grep -E '^v[0-9]+(\.[0-9]+)*$' | sort -V | tail -1
+}
+
+newer_tag() {
+    printf '%s\n%s\n' "$1" "$2" | grep -v '^$' | sort -V | tail -1
 }
 
 # Both ensure_* helpers fetch into "$dest.new" and swap it in only on full
@@ -94,22 +98,64 @@ tidy_gobridge() {
     ( cd "$DIR/gobridge" && go mod tidy ) || { echo "$1" >&2; exit 1; }
 }
 
+stage_signalmeow() {
+    local tag="$1" staging="$2" patch="$3"
+    rm -rf "$staging"
+    if ! git clone -q --depth 1 --branch "$tag" "$SIGNALMEOW_REPO" "$staging"; then
+        rm -rf "$staging"
+        echo "signalmeow: fetch of $tag failed" >&2
+        return 1
+    fi
+    # Unlike whatsmeow's, this patch is not optional: it is what makes the cgo
+    # link flags Android-correct (the NDK has no libstdc++), so an unpatched tree
+    # fails at link, not at runtime. Fail loudly instead of building it.
+    if ! git -C "$staging" apply "$patch"; then
+        rm -rf "$staging"
+        echo "signalmeow: signal-local.patch did not apply against $tag" >&2
+        return 1
+    fi
+}
+
+install_signalmeow() {
+    local tag="$1" staging="$2" dest="$3"
+    swap_in_checkout "$staging" "$dest"
+    # Re-assert the replace before tidying. Without it tidy happily resolves
+    # mautrix-signal to the published release in the module cache instead of
+    # this patched checkout — the build still succeeds, so the only symptom is
+    # the unpatched cgo flags coming back and the app dying at startup on a
+    # missing libc++_shared.so. Cost an afternoon once; not relying on go.mod
+    # keeping the line.
+    ( cd "$DIR/gobridge" &&
+      go mod edit -require=go.mau.fi/mautrix-signal@v0.0.0 \
+                  -replace=go.mau.fi/mautrix-signal=./ext/signal ) || {
+        echo "signalmeow: go mod edit failed for $tag" >&2
+        exit 1
+    }
+    ( cd "$DIR/gobridge" && go mod tidy ) || {
+        echo "signalmeow: go mod tidy failed after updating to $tag" >&2
+        return 1
+    }
+}
+
 ensure_signalmeow() {
     local dest="$DIR/gobridge/ext/signal"
     local stamp="$dest/.sg-tag"
     local patch="$DIR/gobridge/ext/signal-local.patch"
-    local pinned="$SIGNALMEOW_TAG" have
-    have=$(cat "$stamp" 2>/dev/null)
-    # Whatever is already checked out wins over the hardcoded pin for the rest
-    # of the week: the adopted tag was only ever held in this variable, so the
-    # next build of the same week re-read the pin, saw the stamp disagree, and
-    # re-cloned the OLDER tag — an upgrade on Monday, a silent downgrade on
-    # Tuesday, every week.
-    [ -n "$have" ] && SIGNALMEOW_TAG="$have"
+    local pinned="$SIGNALMEOW_TAG" have known
+    have=$(cat "$stamp" 2>/dev/null || true)
+    # Never go backwards. The adopted tag was only ever held in this variable, so
+    # the next build of the same week re-read the pin, saw the stamp disagree,
+    # and re-cloned the OLDER tag — an upgrade on Monday, a silent downgrade on
+    # Tuesday, every week. Taking the newer of the two also lets a pin someone
+    # moves forward beat a stamp written before the bump, which otherwise pinned
+    # the tree to a version the bridge no longer compiles against.
+    known=$(newer_tag "$have" "$pinned")
+    SIGNALMEOW_TAG="$known"
     if week_due; then
         local newest
         newest=$(latest_tag "$SIGNALMEOW_REPO")
-        if [ -n "$newest" ] && [ "$newest" != "$SIGNALMEOW_TAG" ]; then
+        newest=$(newer_tag "$newest" "$known")
+        if [ "$newest" != "$SIGNALMEOW_TAG" ]; then
             echo "== signalmeow: upstream has $newest (was $SIGNALMEOW_TAG) =="
             SIGNALMEOW_TAG="$newest"
         fi
@@ -120,56 +166,37 @@ ensure_signalmeow() {
     fi
     echo "== Fetching signalmeow @ $SIGNALMEOW_TAG =="
     local staging="$dest.new"
-    rm -rf "$staging"
-    if ! git clone -q --depth 1 --branch "$SIGNALMEOW_TAG" "$SIGNALMEOW_REPO" "$staging"; then
-        rm -rf "$staging"
-        echo "signalmeow: fetch of $SIGNALMEOW_TAG failed" >&2
-        [ -d "$dest" ] && { echo "   keeping the existing checkout" >&2; return; }
+    if stage_signalmeow "$SIGNALMEOW_TAG" "$staging" "$patch" &&
+       install_signalmeow "$SIGNALMEOW_TAG" "$staging" "$dest"; then
+        echo "$SIGNALMEOW_TAG" > "$stamp"
+        return
+    fi
+    # Only fatal for a tag someone chose. An automatic weekly bump landing on a
+    # release the patch predates, or one that restructures packages the bridge
+    # imports, would otherwise kill every build until someone fixed it by hand —
+    # the calendar must not break the build.
+    if [ "$SIGNALMEOW_TAG" = "$known" ]; then
+        echo "   refresh gobridge/ext/signal-local.patch or move the pin; the Go bridge cannot build without a usable checkout" >&2
         exit 1
     fi
-    # Unlike whatsmeow's, this patch is not optional: it is what makes the cgo
-    # link flags Android-correct (the NDK has no libstdc++), so an unpatched tree
-    # fails at link, not at runtime. Fail loudly instead of building it.
-    if ! git -C "$staging" apply "$patch"; then
-        rm -rf "$staging"
-        echo "signalmeow: signal-local.patch did not apply against $SIGNALMEOW_TAG" >&2
-        # Only fatal for a tag someone chose. An automatic weekly bump landing on
-        # a release the patch predates would otherwise kill every build until
-        # someone refreshed it by hand — the calendar must not break the build.
-        if [ "$SIGNALMEOW_TAG" != "$pinned" ]; then
-            # Keep a working stamped checkout: resetting to the hardcoded pin
-            # here discarded a newer adopted tag and re-cloned the OLDER one —
-            # the same silent downgrade the stamp exists to prevent.
-            if [ -n "$have" ] && [ -d "$dest" ]; then
-                echo "   keeping $have; refresh the patch to take $SIGNALMEOW_TAG" >&2
-                SIGNALMEOW_TAG="$have"
-                return
-            fi
-            echo "   falling back to $pinned; refresh the patch to take $SIGNALMEOW_TAG" >&2
-            SIGNALMEOW_TAG="$pinned"
-        else
-            echo "   refresh gobridge/ext/signal-local.patch; the Go bridge cannot link without it" >&2
-            exit 1
-        fi
-        rm -rf "$staging"
-        git clone -q --depth 1 --branch "$SIGNALMEOW_TAG" "$SIGNALMEOW_REPO" "$staging" || exit 1
-        git -C "$staging" apply "$patch" || { echo "signalmeow: $pinned no longer patches" >&2; exit 1; }
+    # Keep a working stamped checkout: resetting to the hardcoded pin here
+    # discarded a newer adopted tag and re-cloned the OLDER one — the same silent
+    # downgrade the stamp exists to prevent. install_signalmeow has already
+    # deleted $dest by the time it can fail, so re-reading the stamp to find the
+    # last good tag does not work; $known was captured before any of that.
+    if [ "$(cat "$stamp" 2>/dev/null || true)" = "$known" ] && [ -d "$dest" ]; then
+        echo "   keeping $known; adopt $SIGNALMEOW_TAG by hand once the bridge builds against it" >&2
+        SIGNALMEOW_TAG="$known"
+        return
     fi
-    swap_in_checkout "$staging" "$dest"
-    # Re-assert the replace before tidying. Without it tidy happily resolves
-    # mautrix-signal to the published v0.2608.0 in the module cache instead of
-    # this patched checkout — the build still succeeds, so the only symptom is
-    # the unpatched cgo flags coming back and the app dying at startup on a
-    # missing libc++_shared.so. Cost an afternoon once; not relying on go.mod
-    # keeping the line.
-    ( cd "$DIR/gobridge" &&
-      go mod edit -require=go.mau.fi/mautrix-signal@v0.0.0 \
-                  -replace=go.mau.fi/mautrix-signal=./ext/signal ) || {
-        echo "signalmeow: go mod edit failed for $SIGNALMEOW_TAG" >&2
+    echo "   falling back to $known; adopt $SIGNALMEOW_TAG by hand once the bridge builds against it" >&2
+    if ! stage_signalmeow "$known" "$staging" "$patch" ||
+       ! install_signalmeow "$known" "$staging" "$dest"; then
+        echo "signalmeow: $known no longer works either" >&2
         exit 1
-    }
-    tidy_gobridge "signalmeow: go mod tidy failed after updating to $SIGNALMEOW_TAG"
-    echo "$SIGNALMEOW_TAG" > "$stamp"
+    fi
+    SIGNALMEOW_TAG="$known"
+    echo "$known" > "$stamp"
 }
 
 ensure_whatsmeow() {

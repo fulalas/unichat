@@ -362,6 +362,7 @@ private const val UNREAD_REACTION_PAGE = 100
                 // end of the chat and shuffled a batch into confirmation order.
                 Bridge.db.renameMessage(chatId, oldId, msg.getLong("id").toString())
                 storeMessage(msg)
+                Bridge.notifyChat(chatId)
             }
             "updateMessageSendFailed" -> {
                 val msg = obj.getJSONObject("message")

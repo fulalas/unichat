@@ -48,6 +48,7 @@ data class MessageRow(
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
     val captionLocked: Boolean = false,
+    val rowId: Long = 0,
 )
 
 val MESSAGE_ORDER: Comparator<MessageRow> =
@@ -103,8 +104,11 @@ val VIDEO_TYPES = setOf("video", "videonote")
 
 val CAPTION_TYPES = setOf("image", "video")
 
+const val UNDECRYPTABLE_TYPE = "undecryptable"
+
 val LABEL_ONLY_TYPES: Map<String, Pair<String, Int>> = mapOf(
     "viewonce" to ("🔒" to R.string.view_once_label),
+    UNDECRYPTABLE_TYPE to ("⏳" to R.string.undecryptable_label),
     "contact" to ("👤" to R.string.contact_label),
     "poll" to ("📊" to R.string.poll_label),
     "pollvote" to ("🗳" to R.string.poll_vote_label),
@@ -127,7 +131,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
 
     private val ctx: Context = context.applicationContext
 
@@ -172,6 +176,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
         private const val CREATE_ID_INDEX =
             "CREATE INDEX IF NOT EXISTS idx_msg_id ON messages(id)"
 
+        // Partial, so it only carries the reply rows. repointQuotes repeats the
+        // same predicate; without it SQLite cannot use this index at all.
+        private const val CREATE_QUOTED_INDEX =
+            "CREATE INDEX IF NOT EXISTS idx_msg_quoted ON messages(chat_id, quoted_id) " +
+                "WHERE quoted_id!=''"
+
         private const val NEGATIVE_TTL_SECONDS = 7L * 24 * 60 * 60
 
         private const val CREATE_LINK_PREVIEWS =
@@ -179,7 +189,19 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
                 "url TEXT PRIMARY KEY, site TEXT NOT NULL DEFAULT ''," +
                 "title TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT ''," +
                 "image_path TEXT NOT NULL DEFAULT ''," +
+                "image_url TEXT NOT NULL DEFAULT ''," +
                 "status INTEGER NOT NULL DEFAULT 0, fetched_at INTEGER NOT NULL DEFAULT 0)"
+    }
+
+    private fun SQLiteDatabase.hasColumn(table: String, column: String): Boolean =
+        rawQuery("PRAGMA table_info($table)", null).use { c ->
+            while (c.moveToNext()) if (c.getString(1) == column) return true
+            false
+        }
+
+    private fun SQLiteDatabase.addColumnIfMissing(table: String, column: String, type: String) {
+        if (hasColumn(table, column)) return
+        execSQL("ALTER TABLE $table ADD COLUMN $column $type")
     }
 
     private inline fun SQLiteDatabase.transact(body: SQLiteDatabase.() -> Unit) {
@@ -233,6 +255,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
         db.execSQL(CREATE_UNREAD_INDEX)
         db.execSQL(CREATE_UNREAD_OUT_INDEX)
         db.execSQL(CREATE_ID_INDEX)
+        db.execSQL(CREATE_QUOTED_INDEX)
         db.execSQL(CREATE_REACTIONS)
         db.execSQL(CREATE_DELETED_CHATS)
         db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
@@ -392,6 +415,16 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
         if (oldVersion < 37) {
             db.execSQL("ALTER TABLE messages ADD COLUMN file_done INTEGER NOT NULL DEFAULT 0")
         }
+        if (oldVersion < 38) {
+            db.addColumnIfMissing(
+                "link_previews", "image_url", "TEXT NOT NULL DEFAULT ''"
+            )
+            db.execSQL("DELETE FROM link_previews")
+        }
+        if (oldVersion < 41) {
+            db.execSQL("DROP INDEX IF EXISTS idx_msg_quoted")
+            db.execSQL(CREATE_QUOTED_INDEX)
+        }
     }
 
     private fun <T> queryList(sql: String, args: Array<String>?, map: (Cursor) -> T): List<T> {
@@ -498,6 +531,14 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
                 "ON CONFLICT(chat_id, id) DO UPDATE SET " +
                 "text=CASE WHEN excluded.text!='' THEN excluded.text ELSE text END," +
+                "msg_type=CASE WHEN msg_type='$UNDECRYPTABLE_TYPE' " +
+                "THEN excluded.msg_type ELSE msg_type END," +
+                "quoted_id=CASE WHEN msg_type='$UNDECRYPTABLE_TYPE' " +
+                "THEN excluded.quoted_id ELSE quoted_id END," +
+                "quoted_text=CASE WHEN msg_type='$UNDECRYPTABLE_TYPE' " +
+                "THEN excluded.quoted_text ELSE quoted_text END," +
+                "forwarded=CASE WHEN msg_type='$UNDECRYPTABLE_TYPE' " +
+                "THEN excluded.forwarded ELSE forwarded END," +
                 "is_read=max(is_read, excluded.is_read), edited=max(edited, excluded.edited)," +
                 "sender_name=CASE WHEN excluded.sender_name!='' THEN excluded.sender_name ELSE sender_name END," +
                 "quoted_type=CASE WHEN excluded.quoted_type!='' THEN excluded.quoted_type ELSE quoted_type END," +
@@ -861,7 +902,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
             execSQL(
                 "REPLACE INTO messages(chat_id, id, sender_id, text, from_me, time_sent, is_read, " +
                     "msg_type, file_id, file_path, file_status, file_size, quoted_id, quoted_text, quoted_type, " +
-                    "latitude, longitude, send_pending) VALUES(?,?,?,?,1,?,0,?,'',?,?,?,?,?,?,?,?,1)",
+                    "latitude, longitude, send_pending, time_pinned) " +
+                    "VALUES(?,?,?,?,1,?,0,?,'',?,?,?,?,?,?,?,?,1,1)",
                 arrayOf(
                     m.chatId, m.id, m.senderId, m.text, m.timeSent, m.msgType, m.filePath,
                     m.fileStatus, m.fileSize, m.quotedId, m.quotedText, m.quotedType,
@@ -898,8 +940,32 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
             "SELECT 1 FROM messages WHERE chat_id=? AND id=? LIMIT 1", arrayOf(chatId, newId)
         ) { true } ?: false
         if (taken) {
+            val slot = queryFirst(
+                "SELECT rowid, time_sent, file_path, file_status, file_size, file_done " +
+                    "FROM messages WHERE chat_id=? AND id=?",
+                arrayOf(chatId, oldId)
+            ) {
+                arrayOf<Any>(
+                    it.getLong(0), it.getLong(1), it.getString(2),
+                    it.getInt(3), it.getLong(4), it.getInt(5)
+                )
+            }
             execSQL("DELETE FROM messages WHERE chat_id=? AND id=?", arrayOf(chatId, oldId))
             execSQL("DELETE FROM reactions WHERE chat_id=? AND msg_id=?", arrayOf(chatId, oldId))
+            if (slot != null) {
+                execSQL(
+                    "UPDATE OR IGNORE messages SET rowid=?, time_sent=?, time_pinned=1," +
+                        "file_path=CASE WHEN file_path='' THEN ? ELSE file_path END," +
+                        "file_status=CASE WHEN file_path='' THEN ? ELSE file_status END," +
+                        "file_done=CASE WHEN file_path='' THEN ? ELSE file_done END," +
+                        "file_size=CASE WHEN file_size=0 THEN ? ELSE file_size END " +
+                        "WHERE chat_id=? AND id=?",
+                    arrayOf(
+                        slot[0], slot[1], slot[2], slot[3], slot[5], slot[4], chatId, newId
+                    )
+                )
+            }
+            repointQuotes(chatId, oldId, newId)
             return@transact
         }
         execSQL(
@@ -909,7 +975,15 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
             "UPDATE reactions SET msg_id=? WHERE chat_id=? AND msg_id=?",
             arrayOf(newId, chatId, oldId)
         )
+        repointQuotes(chatId, oldId, newId)
     }
+
+    private fun SQLiteDatabase.repointQuotes(chatId: String, oldId: String, newId: String) =
+        execSQL(
+            "UPDATE messages SET quoted_id=? " +
+                "WHERE chat_id=? AND quoted_id=? AND quoted_id!=''",
+            arrayOf(newId, chatId, oldId)
+        )
 
     fun failStalePending() {
         writableDatabase.execSQL(
@@ -972,42 +1046,43 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
         }
     }
 
-    private fun messageColumns(src: String) =
-        "SELECT id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, " +
+    private fun messageColumns(src: String, rowIdExpr: String) =
+        "SELECT $rowIdExpr AS row_id, id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, " +
             "file_status, file_size, file_done, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
             "latitude, longitude, send_failed, send_pending, caption_locked," +
             "(SELECT GROUP_CONCAT(emoji) FROM reactions r " +
             "WHERE r.chat_id=$src.chat_id AND r.msg_id=$src.id) AS reactions "
 
     private fun fullMessage(chatId: String, it: Cursor) = MessageRow(
-        id = it.getString(0), chatId = chatId, senderId = it.getString(1),
-        text = it.getString(2), fromMe = it.getInt(3) != 0,
-        timeSent = it.getLong(4), isRead = it.getInt(5) != 0,
-        msgType = it.getString(6), fileId = it.getString(7),
-        filePath = it.getString(8), fileStatus = it.getInt(9),
-        fileSize = it.getLong(10), fileDone = it.getLong(11),
-        edited = it.getInt(12) != 0,
-        quotedId = it.getString(13), quotedText = it.getString(14),
-        senderName = it.getString(15), played = it.getInt(16) != 0,
-        forwarded = it.getInt(17) != 0, quotedType = it.getString(18),
-        latitude = it.getDouble(19), longitude = it.getDouble(20),
-        sendFailed = it.getInt(21) != 0,
-        sendPending = it.getInt(22) != 0,
-        captionLocked = it.getInt(23) != 0,
-        reactions = it.getString(24) ?: ""
+        rowId = it.getLong(0),
+        id = it.getString(1), chatId = chatId, senderId = it.getString(2),
+        text = it.getString(3), fromMe = it.getInt(4) != 0,
+        timeSent = it.getLong(5), isRead = it.getInt(6) != 0,
+        msgType = it.getString(7), fileId = it.getString(8),
+        filePath = it.getString(9), fileStatus = it.getInt(10),
+        fileSize = it.getLong(11), fileDone = it.getLong(12),
+        edited = it.getInt(13) != 0,
+        quotedId = it.getString(14), quotedText = it.getString(15),
+        senderName = it.getString(16), played = it.getInt(17) != 0,
+        forwarded = it.getInt(18) != 0, quotedType = it.getString(19),
+        latitude = it.getDouble(20), longitude = it.getDouble(21),
+        sendFailed = it.getInt(22) != 0,
+        sendPending = it.getInt(23) != 0,
+        captionLocked = it.getInt(24) != 0,
+        reactions = it.getString(25) ?: ""
     )
 
     fun messagesByIds(chatId: String, ids: Collection<String>): List<MessageRow> {
         if (ids.isEmpty()) return emptyList()
         val holes = ids.joinToString(",") { "?" }
         return queryList(
-            messageColumns("messages") + "FROM messages WHERE chat_id=? AND id IN ($holes)",
+            messageColumns("messages", "messages.rowid") + "FROM messages WHERE chat_id=? AND id IN ($holes)",
             (listOf(chatId) + ids).toTypedArray()
         ) { fullMessage(chatId, it) }
     }
 
     fun messages(chatId: String, limit: Int = 500): List<MessageRow> = queryList(
-        messageColumns("m") + "FROM " +
+        messageColumns("m", "m.rid") + "FROM " +
             "(SELECT rowid AS rid, * FROM messages WHERE chat_id=? ORDER BY time_sent DESC, rowid DESC LIMIT ?) m " +
             "ORDER BY time_sent ASC, rid ASC",
         arrayOf(chatId, limit.toString())
@@ -1141,40 +1216,32 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 37) {
     ) { if (it.isNull(0)) null else it.getString(0) }
 
     fun linkPreview(url: String): LinkPreview.Row? = queryFirst(
-        "SELECT site, title, description, image_path, status, fetched_at " +
+        "SELECT site, title, description, image_path, image_url, status, fetched_at " +
             "FROM link_previews WHERE url=?",
         arrayOf(url)
     ) {
-        val hasPreview = it.getInt(4) == 1
-        val age = System.currentTimeMillis() / 1000 - it.getLong(5)
+        val hasPreview = it.getInt(5) == 1
+        val age = System.currentTimeMillis() / 1000 - it.getLong(6)
         if (!hasPreview && age > NEGATIVE_TTL_SECONDS) return@queryFirst null
         LinkPreview.Row(
             url = url, site = it.getString(0), title = it.getString(1),
             description = it.getString(2), imagePath = it.getString(3),
-            hasPreview = hasPreview,
+            imageUrl = it.getString(4), hasPreview = hasPreview,
         )
     }
 
     fun putLinkPreview(row: LinkPreview.Row) {
         writableDatabase.execSQL(
-            "INSERT INTO link_previews(url, site, title, description, image_path, status, fetched_at) " +
-                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET " +
+            "INSERT INTO link_previews(url, site, title, description, image_path, image_url, status, fetched_at) " +
+                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET " +
                 "site=excluded.site, title=excluded.title, description=excluded.description," +
-                "image_path=excluded.image_path, status=excluded.status, fetched_at=excluded.fetched_at",
+                "image_path=excluded.image_path, image_url=excluded.image_url," +
+                "status=excluded.status, fetched_at=excluded.fetched_at",
             arrayOf(
-                row.url, row.site, row.title, row.description, row.imagePath,
+                row.url, row.site, row.title, row.description, row.imagePath, row.imageUrl,
                 if (row.hasPreview) 1 else 2, System.currentTimeMillis() / 1000
             )
         )
-    }
-
-    fun forgetLinkPreviewImages(paths: Collection<String>) {
-        if (paths.isEmpty()) return
-        writableDatabase.transact {
-            for (path in paths) {
-                execSQL("UPDATE link_previews SET image_path='' WHERE image_path=?", arrayOf(path))
-            }
-        }
     }
 
     fun contactPhone(id: String): String = queryFirst(

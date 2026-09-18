@@ -31,12 +31,13 @@ object LinkPreview {
 
     private const val USER_AGENT = "TelegramBot (like TwitterBot)"
 
-    class Row(
+    data class Row(
         val url: String,
         val site: String,
         val title: String,
         val description: String,
         val imagePath: String,
+        val imageUrl: String,
         val hasPreview: Boolean,
     )
 
@@ -176,15 +177,15 @@ object LinkPreview {
         }
     }
 
-    private fun empty(url: String) = Row(url, "", "", "", "", hasPreview = false)
+    private fun empty(url: String) = Row(url, "", "", "", "", "", hasPreview = false)
 
     private fun stored(url: String): Row? {
         val row = Bridge.db.linkPreview(url) ?: return null
-        if (row.imagePath.isNotEmpty() && !File(row.imagePath).exists()) {
-            Bridge.db.forgetLinkPreviewImages(listOf(row.imagePath))
-            return null
-        }
-        return row
+        if (!row.hasPreview || row.imageUrl.isEmpty()) return row
+        if (row.imagePath.isNotEmpty() && File(row.imagePath).exists()) return row
+        val path = downloadImage(app, row.imageUrl) ?: return persist(row.copy(imagePath = ""))
+        if (path == row.imagePath) return row
+        return persist(row.copy(imagePath = path))
     }
 
     private fun fetch(ctx: Context, url: String): Row? {
@@ -196,10 +197,12 @@ object LinkPreview {
         ).take(MAX_DESCRIPTION)
         val site = meta["og:site_name"] ?: hostLabel(url)
         if (title.isEmpty() && description.isEmpty()) return persist(empty(url))
-        val imageUrl = meta["og:image"] ?: meta["twitter:image"] ?: ""
-        val imagePath =
-            if (imageUrl.isEmpty()) "" else downloadImage(ctx, absolute(url, imageUrl)).orEmpty()
-        return persist(Row(url, site, title, description, imagePath, hasPreview = true))
+        val metaImage = meta["og:image"] ?: meta["twitter:image"] ?: ""
+        val imageUrl = if (metaImage.isEmpty()) "" else absolute(url, metaImage)
+        val imagePath = if (imageUrl.isEmpty()) "" else downloadImage(ctx, imageUrl).orEmpty()
+        return persist(
+            Row(url, site, title, description, imagePath, imageUrl, hasPreview = true)
+        )
     }
 
     private fun persist(row: Row): Row {
@@ -380,10 +383,12 @@ object LinkPreview {
 
     private fun tidyDescription(text: String): String = GLUED_URL.replace(text, "\n$1")
 
+    fun imageDir(ctx: Context): File = File(ctx.filesDir, IMAGE_DIR)
+
     private fun downloadImage(ctx: Context, imageUrl: String): String? {
         val bytes = readBinary(imageUrl) ?: return null
         return runCatching {
-            val dir = File(ctx.cacheDir, IMAGE_DIR)
+            val dir = imageDir(ctx)
             if (!dir.isDirectory && !dir.mkdirs()) return null
             val out = File(dir, fileNameFor(imageUrl))
             out.writeBytes(bytes)
@@ -423,38 +428,49 @@ object LinkPreview {
         return null
     }
 
-    private val bitmaps = newBitmapCache(48)
+    private val bitmaps = newBitmapCache(16)
     private val waiting = PendingViews<Int>()
 
+    private fun cacheKey(path: String, widthPx: Int) = "$path@$widthPx"
+
     fun loadImage(path: String, view: android.widget.ImageView, widthPx: Int) {
-        view.tag = path
-        bitmaps.get(path)?.let { applyBounds(view, it, widthPx); view.setImageBitmap(it); return }
+        val key = cacheKey(path, widthPx)
+        view.tag = key
+        bitmaps.get(key)?.let { applyBounds(view, it, widthPx); view.setImageBitmap(it); return }
         view.setImageDrawable(null)
-        if (waiting.await(path, view, widthPx)) dispatchDecode(path, widthPx)
+        if (waiting.await(key, view, widthPx)) dispatchDecode(key, path, widthPx)
     }
 
-    private fun dispatchDecode(path: String, widthPx: Int) {
+    private fun dispatchDecode(key: String, path: String, widthPx: Int) {
         decoder.execute {
             var delivering = false
-            val queued = waiting.peek(path)
+            val queued = waiting.peek(key)
             try {
                 if (queued.isEmpty()) return@execute
-                val bmp = ImageLoader.decodeSampled(path, widthPx) ?: return@execute
-                bitmaps.put(path, bmp)
+                val bmp = decodeForWidth(path, widthPx) ?: return@execute
+                bitmaps.put(key, bmp)
                 delivering = true
-                main.post { deliver(path, bmp) }
+                main.post { deliver(key, bmp) }
             } finally {
-                if (!delivering && waiting.settle(path, queued).isNotEmpty()) {
-                    dispatchDecode(path, widthPx)
+                if (!delivering && waiting.settle(key, queued).isNotEmpty()) {
+                    dispatchDecode(key, path, widthPx)
                 }
             }
         }
     }
 
-    private fun deliver(path: String, bitmap: Bitmap) {
-        for (w in waiting.take(path)) {
+    private fun decodeForWidth(path: String, widthPx: Int): Bitmap? {
+        val decoded = ImageLoader.decodeSampled(path, widthPx) ?: return null
+        if (widthPx <= 0 || decoded.width <= widthPx) return decoded
+        val height = (widthPx.toLong() * decoded.height / decoded.width).toInt().coerceAtLeast(1)
+        return runCatching { Bitmap.createScaledBitmap(decoded, widthPx, height, true) }
+            .getOrDefault(decoded)
+    }
+
+    private fun deliver(key: String, bitmap: Bitmap) {
+        for (w in waiting.take(key)) {
             val view = w.view.get() ?: continue
-            if (view.tag != path) continue
+            if (view.tag != key) continue
             applyBounds(view, bitmap, w.payload)
             view.setImageBitmap(bitmap)
         }

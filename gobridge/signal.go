@@ -24,7 +24,7 @@ import (
 	"go.mau.fi/mautrix-signal/pkg/libsignalgo"
 	"go.mau.fi/mautrix-signal/pkg/signalmeow"
 	"go.mau.fi/mautrix-signal/pkg/signalmeow/events"
-	signalpb "go.mau.fi/mautrix-signal/pkg/signalmeow/protobuf"
+	signalpb "go.mau.fi/mautrix-signal/pkg/signalmeow/protobuf/signalpb"
 	"go.mau.fi/mautrix-signal/pkg/signalmeow/protobuf/svr2pb"
 	sgstore "go.mau.fi/mautrix-signal/pkg/signalmeow/store"
 	"go.mau.fi/mautrix-signal/pkg/signalmeow/types"

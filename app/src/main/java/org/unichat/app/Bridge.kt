@@ -837,12 +837,39 @@ object Bridge : EventListener {
 
     private val sendQueued = ConcurrentHashMap.newKeySet<String>()
 
-    private fun runSend(row: MessageRow, send: (String) -> String): Boolean {
+    private val sendAcks = ConcurrentHashMap<String, CountDownLatch>()
+
+    private const val SEND_ACK_WAIT_MS = 120_000L
+    private const val SEND_ACK_POLL_MS = 1_000L
+
+    private fun settleSendAck(chatId: String, msgId: String) {
+        sendAcks[chatId + KEY_SEP + msgId]?.countDown()
+        settleOrdered(chatId, msgId)
+    }
+
+    private fun awaitSendAck(chatId: String, msgId: String) {
+        if (msgId.isEmpty() || proto(chatId).ackOnSend) return
+        val key = chatId + KEY_SEP + msgId
+        val latch = sendAcks.computeIfAbsent(key) { CountDownLatch(1) }
+        try {
+            val deadline = System.currentTimeMillis() + SEND_ACK_WAIT_MS
+            while (System.currentTimeMillis() < deadline) {
+                if (wiping || !db.isSendPending(chatId, msgId)) return
+                if (latch.await(SEND_ACK_POLL_MS, TimeUnit.MILLISECONDS)) return
+            }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } finally {
+            sendAcks.remove(key)
+        }
+    }
+
+    private fun runSend(row: MessageRow, send: (String) -> String): String {
         val key = row.chatId + KEY_SEP + row.id
         sendQueued.remove(key)
         if (!proto(row.chatId).connected) {
             onMessageSendFailed(row.chatId, row.id)
-            return false
+            return ""
         }
         sendInFlight.add(key)
         val resultId = try {
@@ -855,7 +882,7 @@ object Bridge : EventListener {
         }
         if (resultId.isEmpty()) {
             onMessageSendFailed(row.chatId, row.id)
-            return false
+            return ""
         }
         if (resultId != row.id) {
             if (settledBeforeRekey == row.chatId + KEY_SEP + resultId) {
@@ -863,7 +890,7 @@ object Bridge : EventListener {
                 forgetRetry(row.chatId, row.id)
                 db.deleteMessage(row.chatId, row.id)
                 notifyChat(row.chatId)
-                return true
+                return resultId
             }
             db.renameMessage(row.chatId, row.id, resultId)
             moveRetryKey(row.chatId, row.id, resultId)
@@ -872,7 +899,7 @@ object Bridge : EventListener {
         }
         if (proto(row.chatId).ackOnSend) onMessageSendOk(row.chatId, resultId)
         notifyChat(row.chatId)
-        return true
+        return resultId
     }
 
     fun sendText(chatId: String, text: String, mentions: List<Mention> = emptyList()) =
@@ -1015,13 +1042,13 @@ object Bridge : EventListener {
     private fun quoteArgs(q: MessageRow?): Triple<String, String, String> =
         Triple(q?.id ?: "", q?.let { quotedPreview(it) } ?: "", q?.senderId ?: "")
 
-    private fun sendMediaBlocking(row: MessageRow, send: (Protocol, String) -> String): Boolean {
+    private fun sendMediaBlocking(row: MessageRow, send: (Protocol, String) -> String): String {
         val p = proto(row.chatId)
-        val ok = runSend(row) { id -> send(p, id) }
-        if (ok && p.consumesStagingInput && isStagingPath(row.filePath)) {
+        val sentId = runSend(row) { id -> send(p, id) }
+        if (sentId.isNotEmpty() && p.consumesStagingInput && isStagingPath(row.filePath)) {
             java.io.File(row.filePath).delete()
         }
-        return ok
+        return sentId
     }
 
     fun sendAudio(
@@ -1045,8 +1072,8 @@ object Bridge : EventListener {
         ordered: Boolean = false,
     ) = stageExecutor.execute {
         val row = stageFile(chatId, filePath, fileName, mimeType, caption, quoted)
-        val exec = if (ordered) batchExecutor else mediaExecutor
-        exec.execute { sendFileBlocking(row, fileName, mimeType, caption, quoted, viewOnce) }
+        val send = { sendFileBlocking(row, fileName, mimeType, caption, quoted, viewOnce) }
+        if (ordered) enqueueOrdered(row.chatId, send) else mediaExecutor.execute { send() }
     }
 
     private fun stageFile(
@@ -1063,10 +1090,10 @@ object Bridge : EventListener {
     private fun sendFileBlocking(
         row: MessageRow, fileName: String, mimeType: String,
         caption: String, quoted: MessageRow?, viewOnce: Boolean,
-    ) {
+    ): String {
         val chatId = row.chatId
         val filePath = row.filePath
-        when (row.msgType) {
+        return when (row.msgType) {
             "image" -> sendMediaBlocking(row) { p, id ->
                 p.sendImage(chatId, id, filePath, caption, quoted, viewOnce)
             }
@@ -1218,8 +1245,9 @@ object Bridge : EventListener {
         java.io.File(ctx.cacheDir, "tgdoc").listFiles()?.forEach { dir ->
             if (dir.lastModified() < cutoff) dir.deleteRecursively()
         }
+        java.io.File(ctx.cacheDir, LinkPreview.IMAGE_DIR).deleteRecursively()
         val previewCutoff = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
-        java.io.File(ctx.cacheDir, LinkPreview.IMAGE_DIR).listFiles()?.forEach { f ->
+        LinkPreview.imageDir(ctx).listFiles()?.forEach { f ->
             if (f.lastModified() < previewCutoff) f.delete()
         }
     }
@@ -1244,7 +1272,72 @@ object Bridge : EventListener {
             }
         }
 
-    private val batchExecutor = Executors.newSingleThreadExecutor()
+    private class OrderedSends {
+        val queued = java.util.ArrayDeque<() -> String>()
+        var awaiting = ""
+        var busy = false
+        var timeout: java.util.concurrent.ScheduledFuture<*>? = null
+    }
+
+    private val orderedSends = ConcurrentHashMap<String, OrderedSends>()
+
+    private fun enqueueOrdered(chatId: String, send: () -> String) {
+        val q = orderedSends.computeIfAbsent(chatId) { OrderedSends() }
+        synchronized(q) { q.queued.add(send) }
+        pumpOrdered(chatId)
+    }
+
+    private fun pumpOrdered(chatId: String) {
+        val q = orderedSends[chatId] ?: return
+        val send = synchronized(q) {
+            if (q.busy) return
+            val next = q.queued.poll() ?: return
+            q.busy = true
+            next
+        }
+        mediaExecutor.execute {
+            val sentId = try {
+                send()
+            } catch (e: Exception) {
+                Log.w(TAG, "ordered send threw for $chatId", e)
+                ""
+            }
+            awaitOrderedAck(chatId, sentId)
+        }
+    }
+
+    private fun awaitOrderedAck(chatId: String, sentId: String) {
+        val q = orderedSends[chatId] ?: return
+        if (sentId.isEmpty() || wiping || proto(chatId).ackOnSend) {
+            releaseOrdered(chatId)
+            return
+        }
+        synchronized(q) {
+            q.awaiting = sentId
+            q.timeout = retryScheduler.schedule(
+                { settleOrdered(chatId, sentId) }, SEND_ACK_WAIT_MS, TimeUnit.MILLISECONDS
+            )
+        }
+        if (!db.isSendPending(chatId, sentId)) settleOrdered(chatId, sentId)
+    }
+
+    private fun settleOrdered(chatId: String, msgId: String) {
+        val q = orderedSends[chatId] ?: return
+        synchronized(q) { if (q.awaiting != msgId) return }
+        releaseOrdered(chatId)
+    }
+
+    private fun releaseOrdered(chatId: String) {
+        val q = orderedSends[chatId] ?: return
+        synchronized(q) {
+            if (!q.busy) return
+            q.timeout?.cancel(false)
+            q.timeout = null
+            q.awaiting = ""
+            q.busy = false
+        }
+        pumpOrdered(chatId)
+    }
 
     private const val FORWARD_FILE_WAIT_MS = 120_000L
 
@@ -1266,24 +1359,29 @@ object Bridge : EventListener {
             }
         }
         var sent = false
-        for ((source, row) in staged) {
-            val ok = try {
+        for ((index, entry) in staged.withIndex()) {
+            val (source, row) = entry
+            val sentId = try {
                 forwardStagedBlocking(source, row)
             } catch (e: Exception) {
                 Log.w(TAG, "forward failed for ${row.chatId}", e)
                 markSendFailed(row.chatId, row.id, retry = false)
-                false
+                ""
             }
-            if (ok) sent = true
+            if (sentId.isEmpty()) continue
+            sent = true
+            if (staged.getOrNull(index + 1)?.second?.chatId == row.chatId) {
+                awaitSendAck(row.chatId, sentId)
+            }
         }
         main.post { onDone(sent) }
     }
 
-    private fun forwardStagedBlocking(source: MessageRow, row: MessageRow): Boolean {
+    private fun forwardStagedBlocking(source: MessageRow, row: MessageRow): String {
         val ready = withLocalFile(source)
         if (ready == null) {
             markSendFailed(row.chatId, row.id, retry = false)
-            return false
+            return ""
         }
         val target = row.chatId
         if (ready.filePath != row.filePath) db.setFileState(target, row.id, ready.filePath, 2)
@@ -2063,7 +2161,7 @@ object Bridge : EventListener {
                 quotedType = quotedType, senderName = senderName,
                 forwarded = isForwarded, latitude = latitude, longitude = longitude
             ),
-            notify = !isHistory && !isResend,
+            notify = !isHistory && !isResend && msgType != UNDECRYPTABLE_TYPE,
             fetchMedia = !isHistory,
         )
     }
@@ -2201,6 +2299,7 @@ object Bridge : EventListener {
         if (wiping) return
         disarmSendWatchdog(chatId, msgId)
         db.setSendFailed(chatId, msgId)
+        settleSendAck(chatId, msgId)
         notifyChatRow(chatId, msgId)
         if (!retry) return
         if (sendInFlight.contains(chatId + KEY_SEP + msgId)) return
@@ -2215,6 +2314,7 @@ object Bridge : EventListener {
         disarmSendWatchdog(chatId, msgId)
         forgetRetry(chatId, msgId)
         db.clearSendMarks(chatId, msgId)
+        settleSendAck(chatId, msgId)
         notifyChatRow(chatId, msgId)
     }
 

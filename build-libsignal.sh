@@ -25,8 +25,17 @@ SRC="${LIBSIGNAL_SRC:-$DIR/../toolchain/libsignal-src}"
 # mirror a specific libsignal_ffi ABI, and a mismatched archive links fine and
 # then corrupts memory at the first FFI call. signalmeow records the version it
 # was generated against, so read it rather than pinning a second copy here.
-VERSION_FILE="$DIR/gobridge/ext/signal/pkg/libsignalgo/version.go"
-[ -f "$VERSION_FILE" ] || { echo "libsignal: $VERSION_FILE not found (fetch signalmeow first)" >&2; exit 1; }
+# signalmeow v0.2609.0 moved this constant into its own package, which broke the
+# single hardcoded path this used to read.
+LIBSIGNALGO="$DIR/gobridge/ext/signal/pkg/libsignalgo"
+VERSION_FILE=""
+for candidate in "$LIBSIGNALGO/signalversion/version.go" "$LIBSIGNALGO/version.go"; do
+    [ -f "$candidate" ] && { VERSION_FILE="$candidate"; break; }
+done
+[ -n "$VERSION_FILE" ] || {
+    echo "libsignal: no version.go under $LIBSIGNALGO (fetch signalmeow first)" >&2
+    exit 1
+}
 VERSION=$(sed -n 's/.*const Version = "\(.*\)".*/\1/p' "$VERSION_FILE")
 [ -n "$VERSION" ] || { echo "libsignal: could not parse version from $VERSION_FILE" >&2; exit 1; }
 
@@ -69,7 +78,14 @@ export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-android$API --sysroot=$T
 #   -Cforce-unwind-tables=no  panic=unwind needs those tables.
 #   -Ctarget-cpu=<x>      the APK is one arm64 build for every arm64 phone;
 #                         tuning past baseline armv8-a would crash older ones.
-# -Z flags are fine here: libsignal's rust-toolchain pins a nightly.
+# The -Z flags below shipped while libsignal's rust-toolchain pinned a nightly.
+# v0.102.2 moved that pin to stable 1.98.1, and rustup honours the pin from the
+# source tree whatever toolchain is installed as default, so rustc started
+# rejecting -Z outright and failed the build before compiling anything.
+# RUSTC_BOOTSTRAP is what keeps them accepted, and it has to go through cargo's
+# --config env table: cargo strips that variable from the environment of the
+# rustc it spawns, so plain `export RUSTC_BOOTSTRAP=1` here is silently dropped
+# and the build dies on the very first target-info probe.
 export RUSTFLAGS="-Ctarget-feature=-crt-static \
     -Zlocation-detail=none -Zfmt-debug=shallow"
 # LTO goes through the cargo profile, not RUSTFLAGS: cargo compiles
@@ -145,7 +161,8 @@ echo "== Building libsignal_ffi $VERSION for $ABI (LTO, this takes a few minutes
 # build fails on a missing std for the target.
 ( cd "$SRC" && rustup target add "$RUST_TARGET" >/dev/null 2>&1 ) ||
     echo "libsignal: warning: 'rustup target add $RUST_TARGET' failed; expect cargo to die on a missing std for the target" >&2
-( cd "$SRC" && cargo build -p libsignal-ffi --release --target "$RUST_TARGET" )
+( cd "$SRC" && cargo --config 'env.RUSTC_BOOTSTRAP="1"' \
+    build -p libsignal-ffi --release --target "$RUST_TARGET" )
 
 mkdir -p "$OUT"
 cp "$SRC/target/$RUST_TARGET/release/libsignal_ffi.a" "$ARCHIVE"

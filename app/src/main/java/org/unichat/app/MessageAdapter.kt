@@ -57,7 +57,8 @@ class MessageAdapter(
         private val EXTENSION = Regex("[A-Za-z0-9]{1,4}")
 
         private val DIFF = object : DiffUtil.ItemCallback<MessageRow>() {
-            override fun areItemsTheSame(a: MessageRow, b: MessageRow) = a.id == b.id
+            override fun areItemsTheSame(a: MessageRow, b: MessageRow) =
+                if (a.rowId != 0L && b.rowId != 0L) a.rowId == b.rowId else a.id == b.id
             override fun areContentsTheSame(a: MessageRow, b: MessageRow): Boolean {
                 if (!a.fromMe && a.isRead != b.isRead) return a == b.copy(isRead = a.isRead)
                 return a == b
@@ -1063,11 +1064,14 @@ object ImageLoader {
     private val executor = Executors.newFixedThreadPool(2)
     private val main = Handler(Looper.getMainLooper())
 
-    private data class Tag(val path: String, val msgId: String)
+    private data class Tag(val path: String, val key: String)
 
     private val waiting = PendingViews<Boolean>()
 
     private fun stillOn(view: ImageView, path: String) = (view.tag as? Tag)?.path == path
+
+    private fun rowKey(msg: MessageRow) =
+        if (msg.rowId != 0L) msg.rowId.toString() else msg.id
 
     private fun deliverBitmap(path: String, bitmap: Bitmap) {
         for (w in waiting.take(path)) {
@@ -1106,14 +1110,14 @@ object ImageLoader {
             Thumbs.path(imageView.context, msg.chatId, msg.id)
         }
         val prev = imageView.tag as? Tag
-        imageView.tag = Tag(path, msg.id)
+        imageView.tag = Tag(path, rowKey(msg))
         if (path.isEmpty()) {
             clearAnimating(imageView)
             applyBounds(imageView, 0, 0, sticker)
             imageView.setImageResource(R.drawable.image_placeholder)
             return
         }
-        if (prev?.path == path && prev.msgId == msg.id) {
+        if (prev?.path == path) {
             (imageView.drawable as? AnimatedImageDrawable)?.let { anim ->
                 if (!anim.isRunning) anim.start()
                 return
@@ -1135,7 +1139,7 @@ object ImageLoader {
             reuse.start()
             return
         }
-        if (prev?.msgId != msg.id) {
+        if (prev?.key != rowKey(msg) || imageView.drawable == null) {
             clearAnimating(imageView)
             applyBounds(imageView, 0, 0, sticker)
             imageView.setImageResource(R.drawable.image_placeholder)

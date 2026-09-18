@@ -168,6 +168,7 @@
     <string name="sticker_label">贴纸</string>
     <string name="video_label">视频</string>
     <string name="view_once_label">阅后即焚（请在你的另一台设备上打开）</string>
+    <string name="undecryptable_label">正在等待这条消息</string>
     <string name="document_label">文件</string>
     <string name="contact_label">联系人名片</string>
     <string name="add_to_contacts">添加联系人</string>

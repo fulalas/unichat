@@ -314,6 +314,7 @@ func newDeviceClient(connId int, c *conn, deviceStore *store.Device) *whatsmeow.
 	clientLog := &bridgeLogger{c: c, mod: "client"}
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 	if client != nil {
+		client.AutomaticMessageRerequestFromPhone = true
 		client.AddEventHandler(func(evt interface{}) { handleEvent(connId, c, evt) })
 	}
 	return client
@@ -2701,10 +2702,13 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 }
 
 func handleUndecryptableMessage(c *conn, evt *events.UndecryptableMessage) {
-	if evt.UnavailableType != events.UnavailableTypeViewOnce {
+	if isStatusBroadcast(evt.Info.Chat) {
 		return
 	}
-	if isStatusBroadcast(evt.Info.Chat) {
+	msgType := undecryptableType
+	if evt.UnavailableType == events.UnavailableTypeViewOnce {
+		msgType = viewOnceType
+	} else if evt.DecryptFailMode == events.DecryptFailHide {
 		return
 	}
 	chatId := getChatId(c.getClient(), &evt.Info.Chat, &evt.Info.Sender)
@@ -2712,7 +2716,7 @@ func handleUndecryptableMessage(c *conn, evt *events.UndecryptableMessage) {
 	timeSent := evt.Info.Timestamp
 	isRead := c.messageIsRead(chatId, evt.Info.IsFromMe, timeSent, false, false)
 	c.listener.OnMessage(chatId, evt.Info.ID, senderId, "", evt.Info.IsFromMe, timeSent.Unix(),
-		isRead, viewOnceType, "", 0, 0, 0, false, false, "", "", "", evt.Info.PushName, false)
+		isRead, msgType, "", 0, 0, 0, false, false, "", "", "", evt.Info.PushName, false)
 }
 
 type msgContent struct {
@@ -2800,6 +2804,8 @@ func fromContext(ci *waE2E.ContextInfo) msgContent {
 }
 
 const viewOnceType = "viewonce"
+
+const undecryptableType = "undecryptable"
 
 func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 	if msg == nil {

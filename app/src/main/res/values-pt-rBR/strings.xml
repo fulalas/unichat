@@ -168,6 +168,7 @@
     <string name="sticker_label">Figurinha</string>
     <string name="video_label">Vídeo</string>
     <string name="view_once_label">Visualização única (abra no seu outro aparelho)</string>
+    <string name="undecryptable_label">Aguardando esta mensagem</string>
     <string name="document_label">Arquivo</string>
     <string name="contact_label">Cartão de contato</string>
     <string name="add_to_contacts">Adicionar contato</string>

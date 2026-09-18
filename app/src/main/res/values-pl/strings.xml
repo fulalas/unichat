@@ -168,6 +168,7 @@
     <string name="sticker_label">Naklejka</string>
     <string name="video_label">Wideo</string>
     <string name="view_once_label">Jednorazowe (otwórz na drugim urządzeniu)</string>
+    <string name="undecryptable_label">Oczekiwanie na tę wiadomość</string>
     <string name="document_label">Plik</string>
     <string name="contact_label">Wizytówka</string>
     <string name="add_to_contacts">Dodaj kontakt</string>

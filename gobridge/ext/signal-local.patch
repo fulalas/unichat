@@ -1,11 +1,3 @@
-Base-Commit: 0d5f3f457dac53707973f525809fe9c6dc926bd6 (v0.2608.0)
-#
-# Everything UniChat adds to signalmeow. The checkout is refetched by
-# build.sh and is gitignored, so anything not in here is lost on a clean
-# build: registration, SVR2, profile upload, attachment download progress and
-# the generated svr2 protobuf all live only in this patch.
-
-
 diff --git a/pkg/libsignalgo/accountentropy.go b/pkg/libsignalgo/accountentropy.go
 index 712f886..74819d0 100644
 --- a/pkg/libsignalgo/accountentropy.go
@@ -30,15 +22,24 @@ index 712f886..74819d0 100644
  	var out SVRKey
  	aepC, free := GoStringToCString(string(aep))
 diff --git a/pkg/libsignalgo/cflags.go b/pkg/libsignalgo/cflags.go
-index e1bb7d5..fab660d 100644
+index 50530d9..fab660d 100644
 --- a/pkg/libsignalgo/cflags.go
 +++ b/pkg/libsignalgo/cflags.go
-@@ -1,3 +1,5 @@
+@@ -1,12 +1,8 @@
 +//go:build !android
 +
  package libsignalgo
  
  /*
+ #cgo LDFLAGS: -lsignal_ffi -ldl -lm -lz -lstdc++
+ */
+ import "C"
+-
+-import (
+-	"go.mau.fi/mautrix-signal/pkg/libsignalgo/signalversion"
+-)
+-
+-const Version = signalversion.Version
 diff --git a/pkg/libsignalgo/cflags_android.go b/pkg/libsignalgo/cflags_android.go
 new file mode 100644
 index 0000000..8c59d0b
@@ -172,8 +173,24 @@ index 0000000..4706cfe
 +	}
 +	return wrapSGXClientState(out.raw), nil
 +}
+diff --git a/pkg/libsignalgo/versionexport.go b/pkg/libsignalgo/versionexport.go
+new file mode 100644
+index 0000000..90e93e3
+--- /dev/null
++++ b/pkg/libsignalgo/versionexport.go
+@@ -0,0 +1,10 @@
++package libsignalgo
++
++import (
++	"go.mau.fi/mautrix-signal/pkg/libsignalgo/signalversion"
++)
++
++// Upstream keeps this re-export in cflags.go, which signal-local.patch builds
++// only on !android — so every android build failed on an undefined
++// libsignalgo.Version. It lives in its own untagged file instead.
++const Version = signalversion.Version
 diff --git a/pkg/signalmeow/attachments.go b/pkg/signalmeow/attachments.go
-index c091827..da80457 100644
+index de89fb2..a9c8028 100644
 --- a/pkg/signalmeow/attachments.go
 +++ b/pkg/signalmeow/attachments.go
 @@ -57,6 +57,41 @@ func getAttachmentPath(id uint64, key string) string {
@@ -2198,7 +2215,7 @@ index 0000000..04cbf14
 +
 +
 diff --git a/pkg/signalmeow/sending.go b/pkg/signalmeow/sending.go
-index 756e673..605bb33 100644
+index 8852197..675f424 100644
 --- a/pkg/signalmeow/sending.go
 +++ b/pkg/signalmeow/sending.go
 @@ -1171,3 +1171,39 @@ func (cli *Client) handle428(ctx context.Context, recipient libsignalgo.ServiceI
@@ -2242,7 +2259,7 @@ index 756e673..605bb33 100644
 +	return err
 +}
 diff --git a/pkg/signalmeow/storageservice.go b/pkg/signalmeow/storageservice.go
-index 2326e1c..7c5afca 100644
+index df26a8d..4b31406 100644
 --- a/pkg/signalmeow/storageservice.go
 +++ b/pkg/signalmeow/storageservice.go
 @@ -59,6 +59,19 @@ func (cli *Client) SyncStorage(ctx context.Context) {

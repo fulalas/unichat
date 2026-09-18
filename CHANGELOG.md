@@ -1,3 +1,49 @@
+# UniChat 0.61.10
+
+### Added
+
+* **A WhatsApp message that hasn't arrived yet shows as "Waiting for this message"** instead of leaving a silent gap in the chat. It turns into the real message as soon as it lands.
+
+### Fixed
+
+* **Photos sent together on Telegram stay where you put them.** Each one jumped to the bottom of the batch as it was confirmed, so the whole group shuffled until the last one finished.
+* **Those photos no longer flicker.** Telegram renames a message twice while sending it, and each rename made the app throw the picture away and read it back from disk.
+* **Forwarding one message to several chats no longer sends them one at a time.** Each copy waited for the previous chat to confirm, even though the chats are unrelated.
+* **A link preview whose picture can't be fetched again shows just the text** instead of leaving an empty space, and picks the picture up on a later try.
+
+### Changed
+
+* Signal runs on a newer signalmeow and libsignal.
+
+# UniChat 0.60.7
+
+### Fixed
+
+* **A WhatsApp message that fails to decrypt is no longer lost.** UniChat asked the sender to resend it, and gave up when the sender was already offline — so the message showed up on every other WhatsApp client and never here. It now also asks your own phone for it, like WhatsApp Web does.
+
+# UniChat 0.60.6
+
+### Fixed
+
+* Upgrading from a very old build no longer crashes on start.
+* Sending several files at once to a Telegram chat no longer holds up a file sent to another chat right after.
+* A forward batch can't get stuck for two minutes when you log out mid-send.
+* Jumping to a quoted message is faster in long chats.
+
+# UniChat 0.60.2
+
+### Fixed
+
+* **Link preview pictures stop reloading every time you open a chat.** They were kept at full size — a 1400-pixel picture for a 780-pixel card — which alone filled the whole picture memory, so each one was thrown away right after being read and had to be read again. They are now shrunk to the size actually shown, and the memory they share is bigger.
+
+# UniChat 0.60.1
+
+### Fixed
+
+* **Link preview pictures no longer vanish with the throwaway cache.** They now live with the app's own files, and a missing picture is fetched again on its own.
+* **Forwarding a photo and a text together keeps the order.** Each message now waits for the server to confirm it before the next goes out, so the photo no longer lands after the text.
+* **Quoting a just-forwarded message works.** A quote kept pointing at the temporary id the message had while it was being sent, and tapping it hung on "syncing message…".
+
 # UniChat 0.60.0
 
 ### New

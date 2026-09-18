@@ -168,6 +168,7 @@
     <string name="sticker_label">Sticker</string>
     <string name="video_label">Video</string>
     <string name="view_once_label">Visualizzazione singola (aprilo sull\'altro dispositivo)</string>
+    <string name="undecryptable_label">In attesa di questo messaggio</string>
     <string name="document_label">File</string>
     <string name="contact_label">Scheda contatto</string>
     <string name="add_to_contacts">Aggiungi contatto</string>
