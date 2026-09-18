@@ -1,4 +1,4 @@
-# UniChat 0.61.10
+# UniChat 0.61.11
 
 ### Added
 
@@ -14,6 +14,7 @@
 ### Changed
 
 * Signal runs on a newer signalmeow and libsignal.
+* **The app is 2.4 MB smaller.** The new Signal library opens two connections it never sends anything over, and they dragged in a pile of code with them; UniChat no longer builds that in.
 
 # UniChat 0.60.7
 
