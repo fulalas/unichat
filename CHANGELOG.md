@@ -1,3 +1,9 @@
+# UniChat 0.61.13
+
+### Fixed
+
+* **Messages that arrive while you are searching a chat now show up.** The chat stopped updating as soon as you opened the search box, so you had to close it to see anything new. Your place in the results is kept.
+
 # UniChat 0.61.11
 
 ### Added

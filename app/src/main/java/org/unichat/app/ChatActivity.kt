@@ -26,6 +26,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     companion object {
         private const val MAX_SCROLL_STATES = 50
         private const val SEARCH_LOAD_LIMIT = 5000
+        private const val SEARCH_REFRESH_MS = 300L
         private const val DEEP_TICK_MS = 8_000L
         private const val DEEP_IDLE_ROUNDS = 3
         private const val LOCAL_PAGE = 500
@@ -120,6 +121,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private var searchSeq = 0
     private var windowSeq = 0
     private var hitsLoading = false
+    private var hitWindowLoading = false
     private var deepening = false
     private var idleRounds = 0
     private var searchLimit = SEARCH_LOAD_LIMIT
@@ -459,6 +461,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         releaseRecordWakeLock()
         main.removeCallbacks(audioTicker)
         main.removeCallbacks(searchDebounce)
+        main.removeCallbacks(searchRefresh)
         main.removeCallbacks(presenceTicker)
         releaseLocationRequests()
         pendingVideoOpen = null
@@ -812,7 +815,18 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         if (chatId != this.chatId) return
         if (searchActive || windowMode) {
             Bridge.markChatRead(chatId)
-            if (deepening && rowIds == null) onDeepPage()
+            if (deepening && rowIds == null) {
+                onDeepPage()
+            } else if (rowIds != null) {
+                refreshRows(rowIds)
+            } else if (!windowMode) {
+                if (serverSearch) {
+                    if (!hitWindowLoading) reload()
+                } else {
+                    main.removeCallbacks(searchRefresh)
+                    main.postDelayed(searchRefresh, SEARCH_REFRESH_MS)
+                }
+            }
             return
         }
         if (dragSelect?.isDragging == true) {
@@ -872,16 +886,31 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         loadSearchWindow()
     }
 
-    private fun loadSearchWindow() {
+    private val searchRefresh = Runnable { loadSearchWindow(keepPosition = true) }
+
+    private fun loadSearchWindow(keepPosition: Boolean = false) {
+        val atBottom = keepPosition && isAtBottom()
         io.execute {
             val all = Bridge.db.messages(chatId, searchLimit)
             val names = contactNames()
             val quoteNames = quoteNamesFor(all, names)
             runOnUiThread {
-                if (!searchActive || isFinishing || isDestroyed) return@runOnUiThread
+                if (!searchActive || windowMode || isFinishing || isDestroyed) return@runOnUiThread
                 val q = searchInput.text?.toString().orEmpty()
+                val newest = all.lastOrNull()
+                val newestChanged = newest != null &&
+                    newest.id != adapter.messagesSnapshot().lastOrNull()?.id
+                val holdId = if (keepPosition || deepening) currentMatchId() else null
                 adapter.submit(all, names, quoteNames) {
-                    if (q.isNotBlank()) runSearch(q)
+                    if (keepPosition && newestChanged) {
+                        if (atBottom && adapter.itemCount > 0) {
+                            messageList.scrollToPosition(adapter.itemCount - 1)
+                        } else {
+                            hasNewBelow = true
+                        }
+                        updateScrollFab()
+                    }
+                    if (q.isNotBlank()) runSearch(q, holdId)
                 }
             }
         }
@@ -897,6 +926,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         searchCoverageRow.visibility = android.view.View.GONE
         searchInput.setText("")
         main.removeCallbacks(searchDebounce)
+        main.removeCallbacks(searchRefresh)
         adapter.highlightQuery = ""
         rebindVisible()
         searchMatches = emptyList()
@@ -906,6 +936,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         serverNextFrom = 0L
         currentHit = -1
         hitsLoading = false
+        hitWindowLoading = false
         windowFailed.clear()
         pendingWindowOpen = null
         searchLimit = SEARCH_LOAD_LIMIT
@@ -959,7 +990,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         adapter.notifyItemRangeChanged(first, last - first + 1)
     }
 
-    private fun runSearch(query: String) {
+    private fun runSearch(query: String, holdId: String? = null) {
         val q = query.trim()
         adapter.highlightQuery = q
         rebindVisible()
@@ -977,10 +1008,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             if (showingHit) reload()
             return
         }
-        if (serverSearch) runServerSearch(q) else runLocalSearch(q)
+        if (serverSearch) runServerSearch(q) else runLocalSearch(q, holdId)
     }
 
-    private fun runLocalSearch(q: String) {
+    private fun runLocalSearch(q: String, holdId: String?) {
         val msgs = adapter.messagesSnapshot()
         val folded = Search.fold(q)
         io.execute {
@@ -990,11 +1021,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             }
             runOnUiThread {
                 if (adapter.highlightQuery != q) return@runOnUiThread
-                val keepId = currentMatchId()
                 searchMatches = matches
-                val kept = matches.indexOfFirst { adapter.idAt(it) == keepId }
-                currentMatch = if (deepening && kept >= 0) kept else matches.size - 1
-                if (!deepening && currentMatch >= 0) {
+                val kept = if (holdId.isNullOrEmpty()) -1
+                    else matches.indexOfFirst { adapter.idAt(it) == holdId }
+                currentMatch = if (kept >= 0) kept else matches.size - 1
+                if (holdId == null && currentMatch >= 0) {
                     messageList.scrollToPosition(matches[currentMatch])
                 }
                 updateSearchCount()
@@ -1033,6 +1064,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun showHit(index: Int) {
         val id = serverHits.getOrNull(index) ?: return
         val seq = ++windowSeq
+        hitWindowLoading = true
         searchExec.execute {
             val window = Bridge.searchContext(chatId, id)
             val names = contactNames()
@@ -1041,6 +1073,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 if (seq != windowSeq || !searchActive || isFinishing || isDestroyed) {
                     return@runOnUiThread
                 }
+                hitWindowLoading = false
                 if (window.isEmpty()) {
                     Toast.makeText(this, R.string.message_not_loaded, Toast.LENGTH_SHORT).show()
                     return@runOnUiThread
