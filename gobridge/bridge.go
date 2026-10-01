@@ -61,6 +61,7 @@ type EventListener interface {
 	OnSyncProgress(progress int)
 	OnChatHistoryDelivered(chatId string, count int, forExport bool, oldestId string, oldestTime int64, oldestFromMe bool)
 	OnExportMessage(chatId string, msgId string, senderId string, text string, fromMe bool, timeSent int64, msgType string, fileId string, senderName string, isEdited bool)
+	OnExportRevoke(chatId string, msgId string)
 	OnLog(level int, message string)
 }
 
@@ -971,7 +972,7 @@ func EditMessage(connId int, chatId string, msgId string, newText string, origTi
 	if c.getClient().Store.ID != nil {
 		senderId = strFromJid(*c.getClient().Store.ID)
 	}
-	c.listener.OnMessage(chatId, msgId, senderId, newText, true, 0, false, "", "", 0, 0, 0, false, true, "", "", "", "", false)
+	c.listener.OnMessage(chatId, msgId, senderId, newText, true, time.Now().Unix(), false, "", "", 0, 0, 0, false, true, "", "", "", "", false)
 	return true
 }
 
@@ -2488,6 +2489,7 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 		type parsedMsg struct {
 			info      *types.MessageInfo
 			msg       *waE2E.Message
+			viewOnce  bool
 			peerRead  bool
 			played    bool
 			reactions []*waWeb.Reaction
@@ -2505,8 +2507,9 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 			status := webMessageInfo.GetStatus()
 			peerRead := status >= waWeb.WebMessageInfo_READ
 			played := status >= waWeb.WebMessageInfo_PLAYED
-			parsed = append(parsed, parsedMsg{messageInfo, message, peerRead, played,
-				webMessageInfo.GetReactions()})
+			unwrapped := (&events.Message{RawMessage: message}).UnwrapRaw()
+			parsed = append(parsed, parsedMsg{messageInfo, unwrapped.Message, unwrapped.IsViewOnce,
+				peerRead, played, webMessageInfo.GetReactions()})
 		}
 
 		sort.SliceStable(parsed, func(i, j int) bool {
@@ -2526,14 +2529,28 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 		}
 		if forExport {
 			for _, p := range parsed {
-				content, ok := getMessageContent(p.msg, false)
+				id, msg := p.info.ID, p.msg
+				action, target, inner := protocolOf(msg)
+				switch action {
+				case protoIgnore:
+					continue
+				case protoRevoke:
+					c.listener.OnExportRevoke(convChatId, target)
+					continue
+				case protoEdit:
+					id, msg = target, inner
+				}
+				content, ok := getMessageContent(msg, false)
 				if !ok {
 					continue
 				}
-				c.listener.OnExportMessage(convChatId, p.info.ID,
+				if p.viewOnce {
+					content = viewOnceContent(content)
+				}
+				c.listener.OnExportMessage(convChatId, id,
 					getUserId(client, &p.info.Chat, &p.info.Sender), content.text,
 					p.info.IsFromMe, p.info.Timestamp.Unix(), content.msgType,
-					content.fileId, p.info.PushName, len(p.info.Edit) > 0)
+					content.fileId, p.info.PushName, action == protoEdit)
 			}
 			answerRequest()
 			continue
@@ -2547,12 +2564,15 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 		lastMessageTime := int64(0)
 		hasMessages := false
 		for _, p := range parsed {
+			if p.msg.GetProtocolMessage() != nil {
+				continue
+			}
 			isRead := true
 			if !p.info.IsFromMe && unreadLeft > 0 && isDisplayable(p.msg) {
 				isRead = false
 				unreadLeft--
 			}
-			handleMessageFull(c, *p.info, p.msg, isRead, p.peerRead, true, false, false)
+			handleMessageFull(c, *p.info, p.msg, isRead, p.peerRead, true, p.viewOnce, false)
 			if p.played {
 				c.listener.OnMessagePlayed(getChatId(client, &p.info.Chat, &p.info.Sender), p.info.ID)
 			}
@@ -2569,6 +2589,13 @@ func handleHistorySync(c *conn, historySync *events.HistorySync) {
 			if t := p.info.Timestamp.Unix(); t > lastMessageTime {
 				lastMessageTime = t
 			}
+		}
+		for i := len(parsed) - 1; i >= 0; i-- {
+			p := parsed[i]
+			if p.msg.GetProtocolMessage() == nil {
+				continue
+			}
+			handleMessageFull(c, *p.info, p.msg, true, p.peerRead, true, false, false)
 		}
 
 		if hasMessages && !onDemand {
@@ -2647,25 +2674,15 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 	}
 
 	isEdited := len(messageInfo.Edit) > 0
-	editInPlace := false
-	if pm := msg.GetProtocolMessage(); pm != nil {
-		switch pm.GetType() {
-		case waE2E.ProtocolMessage_MESSAGE_EDIT:
-			edited := pm.GetEditedMessage()
-			if edited == nil {
-				return
-			}
-			messageInfo.ID = pm.GetKey().GetID()
-			msg = edited
-			isEdited = true
-			editInPlace = true
-		case waE2E.ProtocolMessage_REVOKE:
-			chatId := getChatId(c.getClient(), &messageInfo.Chat, &messageInfo.Sender)
-			c.listener.OnMessageDeleted(chatId, pm.GetKey().GetID())
-			return
-		default:
-			return
-		}
+	switch action, target, inner := protocolOf(msg); action {
+	case protoIgnore:
+		return
+	case protoRevoke:
+		chatId := getChatId(c.getClient(), &messageInfo.Chat, &messageInfo.Sender)
+		c.listener.OnMessageDeleted(chatId, target)
+		return
+	case protoEdit:
+		messageInfo.ID, msg, isEdited = target, inner, true
 	}
 
 	content, ok := getMessageContent(msg, ownSend)
@@ -2673,13 +2690,7 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 		return
 	}
 	if isViewOnce {
-		content = msgContent{
-			msgType:    viewOnceType,
-			quotedId:   content.quotedId,
-			quotedText: content.quotedText,
-			quotedType: content.quotedType,
-			forwarded:  content.forwarded,
-		}
+		content = viewOnceContent(content)
 	}
 
 	chatId := getChatId(c.getClient(), &messageInfo.Chat, &messageInfo.Sender)
@@ -2688,16 +2699,47 @@ func handleMessageFull(c *conn, messageInfo types.MessageInfo, msg *waE2E.Messag
 	timeSent := messageInfo.Timestamp
 	isRead := c.messageIsRead(chatId, fromMe, timeSent, isSyncRead, peerRead)
 
-	emitTime := timeSent.Unix()
-	if editInPlace {
-		emitTime = 0
-	}
-	c.listener.OnMessage(chatId, messageInfo.ID, senderId, content.text, fromMe, emitTime,
+	c.listener.OnMessage(chatId, messageInfo.ID, senderId, content.text, fromMe, timeSent.Unix(),
 		isRead, content.msgType, content.fileId, content.fileSize, content.latitude, content.longitude,
 		isHistory, isEdited, content.quotedId, content.quotedText,
 		content.quotedType, messageInfo.PushName, content.forwarded)
 	if len(content.thumb) > 0 {
 		c.listener.OnThumbnail(chatId, messageInfo.ID, content.thumb)
+	}
+}
+
+type protocolAction int
+
+const (
+	protoNone protocolAction = iota
+	protoEdit
+	protoRevoke
+	protoIgnore
+)
+
+func protocolOf(msg *waE2E.Message) (protocolAction, string, *waE2E.Message) {
+	pm := msg.GetProtocolMessage()
+	if pm == nil {
+		return protoNone, "", msg
+	}
+	switch pm.GetType() {
+	case waE2E.ProtocolMessage_MESSAGE_EDIT:
+		if edited := pm.GetEditedMessage(); edited != nil {
+			return protoEdit, pm.GetKey().GetID(), edited
+		}
+	case waE2E.ProtocolMessage_REVOKE:
+		return protoRevoke, pm.GetKey().GetID(), nil
+	}
+	return protoIgnore, "", nil
+}
+
+func viewOnceContent(content msgContent) msgContent {
+	return msgContent{
+		msgType:    viewOnceType,
+		quotedId:   content.quotedId,
+		quotedText: content.quotedText,
+		quotedType: content.quotedType,
+		forwarded:  content.forwarded,
 	}
 }
 

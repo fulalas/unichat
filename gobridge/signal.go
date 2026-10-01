@@ -829,7 +829,7 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 		edited := content.GetDataMessage()
 		c.listener.OnMessage(
 			chatID, fmt.Sprintf("%d", content.GetTargetSentTimestamp()), senderID,
-			sgWithMarkers(edited.GetBody(), edited.GetBodyRanges()), fromMe, 0, false, "", "", 0,
+			sgWithMarkers(edited.GetBody(), edited.GetBodyRanges()), fromMe, timeSent, false, "", "", 0,
 			0, 0, false, true, "", "", "", "", false,
 		)
 	case *signalpb.TypingMessage:
@@ -1469,7 +1469,7 @@ func SignalEdit(chatId string, msgId string, newText string, styles string, file
 		return false
 	}
 	c.listener.OnMessage(
-		chatId, msgId, SignalSelfID(), sgWithMarkers(newText, ranges), true, 0, false,
+		chatId, msgId, SignalSelfID(), sgWithMarkers(newText, ranges), true, time.Now().Unix(), false,
 		"", "", 0, 0, 0, false, true, "", "", "", "", false,
 	)
 	return true

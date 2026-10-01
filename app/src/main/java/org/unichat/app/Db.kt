@@ -36,6 +36,7 @@ data class MessageRow(
     val fileSize: Long = 0,
     val fileDone: Long = 0,
     val edited: Boolean = false,
+    val editTime: Long = 0,
     val quotedId: String = "",
     val quotedText: String = "",
     val quotedType: String = "",
@@ -131,7 +132,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, emoji, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
 
     private val ctx: Context = context.applicationContext
 
@@ -140,6 +141,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
     }
 
     companion object {
+        private const val CREATE_REVOKED_MESSAGES =
+            "CREATE TABLE IF NOT EXISTS revoked_messages(" +
+                "chat_id TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(chat_id, id))"
+
         private const val CREATE_DELETED_CHATS =
             "CREATE TABLE IF NOT EXISTS deleted_chats(" +
                 "id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)"
@@ -248,6 +253,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
                 "forwarded INTEGER NOT NULL DEFAULT 0," +
                 "latitude REAL NOT NULL DEFAULT 0, longitude REAL NOT NULL DEFAULT 0," +
                 "caption_locked INTEGER NOT NULL DEFAULT 0," +
+                "edit_time INTEGER NOT NULL DEFAULT 0," +
                 "PRIMARY KEY(chat_id, id))"
         )
         db.execSQL(CREATE_SCROLL)
@@ -258,6 +264,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
         db.execSQL(CREATE_QUOTED_INDEX)
         db.execSQL(CREATE_REACTIONS)
         db.execSQL(CREATE_DELETED_CHATS)
+        db.execSQL(CREATE_REVOKED_MESSAGES)
         db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
         db.execSQL(CREATE_PLACEHOLDER_INDEX)
         db.execSQL(CREATE_EMPTY_CONTACT_INDEX)
@@ -267,6 +274,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
     override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         db.execSQL("DROP TABLE IF EXISTS link_previews")
         db.execSQL("DROP TABLE IF EXISTS deleted_chats")
+        db.execSQL("DROP TABLE IF EXISTS revoked_messages")
         db.execSQL("DROP TABLE IF EXISTS reactions")
         db.execSQL("DROP TABLE IF EXISTS messages")
         db.execSQL("DROP TABLE IF EXISTS chats")
@@ -425,6 +433,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
             db.execSQL("DROP INDEX IF EXISTS idx_msg_quoted")
             db.execSQL(CREATE_QUOTED_INDEX)
         }
+        if (oldVersion < 42) {
+            db.addColumnIfMissing("messages", "edit_time", "INTEGER NOT NULL DEFAULT 0")
+            db.execSQL(CREATE_REVOKED_MESSAGES)
+        }
     }
 
     private fun <T> queryList(sql: String, args: Array<String>?, map: (Cursor) -> T): List<T> {
@@ -488,6 +500,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
             db.execSQL("INSERT OR IGNORE INTO chats(id) VALUES(?)", arrayOf(toId))
             db.execSQL("UPDATE OR IGNORE messages SET chat_id=? WHERE chat_id=?", arrayOf(toId, fromId))
             db.execSQL("DELETE FROM messages WHERE chat_id=?", arrayOf(fromId))
+            db.execSQL("UPDATE OR IGNORE revoked_messages SET chat_id=? WHERE chat_id=?", arrayOf(toId, fromId))
+            db.execSQL("DELETE FROM revoked_messages WHERE chat_id=?", arrayOf(fromId))
             db.execSQL("UPDATE OR IGNORE reactions SET chat_id=? WHERE chat_id=?", arrayOf(toId, fromId))
             db.execSQL("DELETE FROM reactions WHERE chat_id=?", arrayOf(fromId))
             db.execSQL(
@@ -525,24 +539,28 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
     }
 
     fun upsertMessage(m: MessageRow) {
-        if (suppressed(m.chatId, m.timeSent)) return
+        if (suppressed(m.chatId, if (m.edited) 0 else m.timeSent)) return
+        if (isRevoked(m.chatId, m.id)) return
+        val fromOriginal = "(edited=1 AND excluded.edited=0)"
+        val keepText = "excluded.text='' OR $fromOriginal OR " +
+            "(excluded.edited=1 AND excluded.edit_time<edit_time)"
+        val fillFromOriginal = "msg_type='$UNDECRYPTABLE_TYPE' OR $fromOriginal"
         writableDatabase.execSQL(
-            "INSERT INTO messages(chat_id, id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_size, edited, quoted_id, quoted_text, quoted_type, sender_name, forwarded, latitude, longitude) " +
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
+            "INSERT INTO messages(chat_id, id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_size, edited, edit_time, quoted_id, quoted_text, quoted_type, sender_name, forwarded, latitude, longitude) " +
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
                 "ON CONFLICT(chat_id, id) DO UPDATE SET " +
-                "text=CASE WHEN excluded.text!='' THEN excluded.text ELSE text END," +
-                "msg_type=CASE WHEN msg_type='$UNDECRYPTABLE_TYPE' " +
-                "THEN excluded.msg_type ELSE msg_type END," +
-                "quoted_id=CASE WHEN msg_type='$UNDECRYPTABLE_TYPE' " +
-                "THEN excluded.quoted_id ELSE quoted_id END," +
-                "quoted_text=CASE WHEN msg_type='$UNDECRYPTABLE_TYPE' " +
-                "THEN excluded.quoted_text ELSE quoted_text END," +
-                "forwarded=CASE WHEN msg_type='$UNDECRYPTABLE_TYPE' " +
-                "THEN excluded.forwarded ELSE forwarded END," +
+                "text=CASE WHEN $keepText THEN text ELSE excluded.text END," +
+                "edit_time=CASE WHEN excluded.edited=1 AND excluded.edit_time>=edit_time " +
+                "THEN excluded.edit_time ELSE edit_time END," +
+                "msg_type=CASE WHEN $fillFromOriginal THEN excluded.msg_type ELSE msg_type END," +
+                "quoted_id=CASE WHEN $fillFromOriginal THEN excluded.quoted_id ELSE quoted_id END," +
+                "quoted_text=CASE WHEN $fillFromOriginal THEN excluded.quoted_text ELSE quoted_text END," +
+                "forwarded=CASE WHEN $fillFromOriginal THEN excluded.forwarded ELSE forwarded END," +
                 "is_read=max(is_read, excluded.is_read), edited=max(edited, excluded.edited)," +
                 "sender_name=CASE WHEN excluded.sender_name!='' THEN excluded.sender_name ELSE sender_name END," +
                 "quoted_type=CASE WHEN excluded.quoted_type!='' THEN excluded.quoted_type ELSE quoted_type END," +
                 "time_sent=CASE WHEN excluded.time_sent>0 AND time_pinned=0 " +
+                "AND (excluded.edited=0 OR time_sent=0) " +
                 "THEN excluded.time_sent ELSE time_sent END," +
                 "file_id=CASE WHEN excluded.file_id!='' THEN excluded.file_id ELSE file_id END," +
                 "file_size=CASE WHEN excluded.file_size>0 THEN excluded.file_size ELSE file_size END," +
@@ -551,10 +569,21 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
             arrayOf(
                 m.chatId, m.id, m.senderId, m.text, if (m.fromMe) 1 else 0, m.timeSent,
                 if (m.isRead) 1 else 0, m.msgType, m.fileId, m.fileSize, if (m.edited) 1 else 0,
-                m.quotedId, m.quotedText, m.quotedType, m.senderName, if (m.forwarded) 1 else 0,
-                m.latitude, m.longitude
+                m.editTime, m.quotedId, m.quotedText, m.quotedType, m.senderName,
+                if (m.forwarded) 1 else 0, m.latitude, m.longitude
             )
         )
+    }
+
+    fun isRevoked(chatId: String, msgId: String): Boolean = queryFirst(
+        "SELECT 1 FROM revoked_messages WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
+    ) { true } ?: false
+
+    fun revokeMessage(chatId: String, msgId: String) {
+        writableDatabase.execSQL(
+            "INSERT OR IGNORE INTO revoked_messages(chat_id, id) VALUES(?,?)", arrayOf(chatId, msgId)
+        )
+        deleteMessage(chatId, msgId)
     }
 
     fun quotedMessage(chatId: String, msgId: String): QuotedInfo? = queryFirst(
@@ -776,6 +805,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 41) {
         execSQL("DELETE FROM chats WHERE ${predicate("id")}")
         execSQL("DELETE FROM contacts WHERE ${predicate("id")}")
         execSQL("DELETE FROM deleted_chats WHERE ${predicate("id")}")
+        execSQL("DELETE FROM revoked_messages WHERE ${predicate("chat_id")}")
         execSQL("DELETE FROM scroll WHERE ${predicate("chat_id")}")
     }
 

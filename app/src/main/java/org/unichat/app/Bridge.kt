@@ -1586,7 +1586,7 @@ object Bridge : EventListener {
 
     private class HistoryReq(
         val chatId: String, val anchorId: String, val forExport: Boolean, val gen: Long,
-        val forSeek: Boolean = false,
+        val forSeek: Boolean = false, val forSyncAll: Boolean = false,
     )
     private class Anchor(val id: String, val time: Long, val fromMe: Boolean)
 
@@ -1602,7 +1602,10 @@ object Bridge : EventListener {
         if (!Wmbridge.requestChatHistory(
                 connId, chatId, anchor.id, anchor.time, anchor.fromMe, HISTORY_PAGE, forExport)
         ) return null
-        val req = HistoryReq(chatId, anchor.id, forExport, gen, forSeek)
+        val req = HistoryReq(
+            chatId, anchor.id, forExport, gen, forSeek,
+            forSyncAll = !forExport && !forSeek && syncAllChat == chatId,
+        )
         historyInFlight = req
         main.postDelayed({ executor.execute { historyTimeout(gen) } }, HISTORY_TIMEOUT_MS)
         return req
@@ -1620,7 +1623,7 @@ object Bridge : EventListener {
             return
         }
         if (req.forExport) chatExport?.let { if (it.chatId == req.chatId) finishExport(it, complete = false) }
-        else endSyncAll(req.chatId, complete = false)
+        else if (req.forSyncAll) endSyncAll(req.chatId, complete = false)
     }
 
     private fun requestHistoryPageWa(chatId: String, retryIfBusy: Boolean = false) {
@@ -1664,6 +1667,7 @@ object Bridge : EventListener {
             requestExportPage(ex)
             return@execute
         }
+        if (syncAllChat == chatId && !req.forSyncAll) return@execute
         if (exhausted) {
             historyExhausted.add(chatId)
             endSyncAll(chatId, complete = true)
@@ -1726,6 +1730,7 @@ object Bridge : EventListener {
 
     private class ChatExport(val chatId: String, val uri: android.net.Uri) {
         val collected = ConcurrentHashMap<String, MessageRow>()
+        val revoked: MutableSet<String> = ConcurrentHashMap.newKeySet()
         @Volatile var anchor: Anchor? = null
         var busyRetriesLeft: Int = 40
     }
@@ -1828,10 +1833,27 @@ object Bridge : EventListener {
     ) {
         val ex = chatExport ?: return
         if (ex.chatId != chatId) return
-        ex.collected[msgId] = MessageRow(
+        if (msgId in ex.revoked || db.isRevoked(chatId, msgId)) return
+        val row = MessageRow(
             msgId, chatId, senderId, text, fromMe, timeSent, isRead = true,
-            msgType = msgType, fileId = fileId, senderName = senderName, edited = isEdited
+            msgType = msgType, fileId = fileId, senderName = senderName,
+            edited = isEdited, editTime = if (isEdited) timeSent else 0,
         )
+        ex.collected.merge(msgId, row, ::mergeEdit)
+    }
+
+    private fun mergeEdit(prev: MessageRow, next: MessageRow): MessageRow = when {
+        !next.edited ->
+            if (prev.edited) next.copy(text = prev.text, edited = true, editTime = prev.editTime) else next
+        next.editTime < prev.editTime -> prev
+        else -> prev.copy(text = next.text, edited = true, editTime = next.editTime)
+    }
+
+    override fun onExportRevoke(chatId: String, msgId: String) {
+        val ex = chatExport ?: return
+        if (ex.chatId != chatId) return
+        ex.revoked.add(msgId)
+        ex.collected.remove(msgId)
     }
 
     fun markChatRead(chatId: String) = proto(chatId).markChatRead(chatId)
@@ -2157,7 +2179,8 @@ object Bridge : EventListener {
             MessageRow(
                 msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId,
                 fileSize = fileSize,
-                edited = isEdited, quotedId = quotedId, quotedText = quotedText,
+                edited = isEdited, editTime = if (isEdited) timeSent else 0,
+                quotedId = quotedId, quotedText = quotedText,
                 quotedType = quotedType, senderName = senderName,
                 forwarded = isForwarded, latitude = latitude, longitude = longitude
             ),
@@ -2185,7 +2208,7 @@ object Bridge : EventListener {
         ) {
             downloadFile(row)
         }
-        if (notify && !row.fromMe && !row.isRead &&
+        if (notify && !row.edited && !row.fromMe && !row.isRead &&
             row.chatId != activeChatId && !db.isMuted(row.chatId)
         ) {
             postMessageNotification(row.chatId, row.senderId, row.text, row.msgType, row.timeSent)
@@ -2245,7 +2268,7 @@ object Bridge : EventListener {
     override fun onMessageDeleted(chatId: String, msgId: String) {
         if (wiping) return
         if (msgId.isEmpty()) { Log.w(TAG, "revoke with empty message id for $chatId"); return }
-        db.deleteMessage(chatId, msgId)
+        db.revokeMessage(chatId, msgId)
         notifyChat(chatId)
     }
 

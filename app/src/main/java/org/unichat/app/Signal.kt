@@ -358,7 +358,8 @@ object Signal : EventListener {
             MessageRow(
                 msgId, chatId, senderId, text, fromMe, timeSent, isRead, msgType, fileId,
                 fileSize = fileSize,
-                edited = isEdited, quotedId = quotedId, quotedText = quotedText,
+                edited = isEdited, editTime = if (isEdited) timeSent else 0,
+                quotedId = quotedId, quotedText = quotedText,
                 quotedType = quotedType, senderName = senderName,
                 forwarded = isForwarded, latitude = latitude, longitude = longitude
             ),
@@ -385,7 +386,7 @@ object Signal : EventListener {
     override fun onContactsSynced() = Bridge.notifyChatsChanged()
     override fun onMessageDeleted(chatId: String, msgId: String) {
         if (msgId.isEmpty()) return
-        Bridge.db.deleteMessage(chatId, msgId)
+        Bridge.db.revokeMessage(chatId, msgId)
         Bridge.notifyChat(chatId)
         Bridge.notifyChatsChanged()
     }
@@ -445,4 +446,6 @@ object Signal : EventListener {
         chatId: String, msgId: String, senderId: String, text: String, fromMe: Boolean,
         timeSent: Long, msgType: String, fileId: String, senderName: String, isEdited: Boolean,
     ) {}
+
+    override fun onExportRevoke(chatId: String, msgId: String) {}
 }
