@@ -60,6 +60,7 @@
     <string name="choose_account">Hangi hesap?</string>
     <string name="export_file_name">%1$s sohbeti - %2$s.txt</string>
     <string name="export_edited">&lt;düzenlendi&gt;</string>
+    <string name="export_deleted">&lt;silindi&gt;</string>
     <string name="avatar_desc">Profil fotoğrafı</string>
     <string name="record_voice">Sesli mesaj kaydet</string>
     <string name="cancel_recording">Kaydı iptal et</string>
@@ -158,7 +159,8 @@
     <string name="you">Siz</string>
     <string name="you_proto">Siz (%1$s)</string>
     <string name="edited">Düzenlendi</string>
-    <string name="edited_time">%1$s %2$s</string>
+    <string name="label_time">%1$s %2$s</string>
+    <string name="deleted">Silindi</string>
     <string name="reply">Yanıtla</string>
     <string name="edit">Düzenle</string>
     <string name="delete">Sil</string>

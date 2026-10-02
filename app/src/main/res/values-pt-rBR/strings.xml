@@ -60,6 +60,7 @@
     <string name="choose_account">Qual conta?</string>
     <string name="export_file_name">Conversa %1$s - %2$s.txt</string>
     <string name="export_edited">&lt;editada&gt;</string>
+    <string name="export_deleted">&lt;apagada&gt;</string>
     <string name="avatar_desc">Foto do perfil</string>
     <string name="record_voice">Gravar mensagem de voz</string>
     <string name="cancel_recording">Cancelar gravação</string>
@@ -158,7 +159,8 @@
     <string name="you">Você</string>
     <string name="you_proto">Você (%1$s)</string>
     <string name="edited">Editada</string>
-    <string name="edited_time">%1$s %2$s</string>
+    <string name="label_time">%1$s %2$s</string>
+    <string name="deleted">Apagada</string>
     <string name="reply">Responder</string>
     <string name="edit">Editar</string>
     <string name="delete">Apagar</string>

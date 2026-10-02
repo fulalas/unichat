@@ -45,6 +45,7 @@ object ChatExporter {
         val body =
             previewLabel(context, m.msgType, resolveMentions(m.text, names), emoji = true, detail = detail)
         val edited = if (m.edited) " " + context.getString(R.string.export_edited) else ""
-        return "$stamp - $sender: $body$edited"
+        val deleted = if (m.deleted) " " + context.getString(R.string.export_deleted) else ""
+        return "$stamp - $sender: $body$edited$deleted"
     }
 }

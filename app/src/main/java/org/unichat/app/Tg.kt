@@ -376,11 +376,9 @@ private const val UNREAD_REACTION_PAGE = 100
                     val ids = obj.getJSONArray("message_ids")
                     executor.execute {
                         refetchGen.incrementAndGet()
-                        for (i in 0 until ids.length()) {
-                            val msgId = ids.getLong(i).toString()
-                            if (cancelledSends.remove("$chatId/$msgId")) continue
-                            Bridge.db.deleteMessage(chatId, msgId)
-                        }
+                        val gone = (0 until ids.length()).map { ids.getLong(it).toString() }
+                            .filterNot { cancelledSends.remove("$chatId/$it") }
+                        Bridge.db.revokeMessages(chatId, gone)
                         Bridge.notifyChat(chatId)
                     }
                 }

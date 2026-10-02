@@ -60,6 +60,7 @@
     <string name="choose_account">Який акаунт?</string>
     <string name="export_file_name">Чат %1$s - %2$s.txt</string>
     <string name="export_edited">&lt;змінено&gt;</string>
+    <string name="export_deleted">&lt;видалено&gt;</string>
     <string name="avatar_desc">Фото профілю</string>
     <string name="record_voice">Записати голосове повідомлення</string>
     <string name="cancel_recording">Скасувати запис</string>
@@ -158,7 +159,8 @@
     <string name="you">Ви</string>
     <string name="you_proto">Ви (%1$s)</string>
     <string name="edited">Змінено</string>
-    <string name="edited_time">%1$s %2$s</string>
+    <string name="label_time">%1$s %2$s</string>
+    <string name="deleted">Видалено</string>
     <string name="reply">Відповісти</string>
     <string name="edit">Змінити</string>
     <string name="delete">Видалити</string>

@@ -37,6 +37,7 @@ data class MessageRow(
     val fileDone: Long = 0,
     val edited: Boolean = false,
     val editTime: Long = 0,
+    val deleted: Boolean = false,
     val quotedId: String = "",
     val quotedText: String = "",
     val quotedType: String = "",
@@ -540,7 +541,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
 
     fun upsertMessage(m: MessageRow) {
         if (suppressed(m.chatId, if (m.edited) 0 else m.timeSent)) return
-        if (isRevoked(m.chatId, m.id)) return
+        if (m.fromMe && isRevoked(m.chatId, m.id)) return
         val fromOriginal = "(edited=1 AND excluded.edited=0)"
         val keepText = "excluded.text='' OR $fromOriginal OR " +
             "(excluded.edited=1 AND excluded.edit_time<edit_time)"
@@ -579,12 +580,22 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         "SELECT 1 FROM revoked_messages WHERE chat_id=? AND id=?", arrayOf(chatId, msgId)
     ) { true } ?: false
 
-    fun revokeMessage(chatId: String, msgId: String) {
-        writableDatabase.execSQL(
-            "INSERT OR IGNORE INTO revoked_messages(chat_id, id) VALUES(?,?)", arrayOf(chatId, msgId)
-        )
-        deleteMessage(chatId, msgId)
+    fun revokeMessages(chatId: String, msgIds: Collection<String>) = writableDatabase.transact {
+        for (msgId in msgIds) {
+            execSQL("INSERT OR IGNORE INTO revoked_messages(chat_id, id) VALUES(?,?)", arrayOf(chatId, msgId))
+        }
+        for (batch in msgIds.chunked(500)) {
+            val holes = batch.joinToString(",") { "?" }
+            val args = (listOf(chatId) + batch).toTypedArray()
+            execSQL("UPDATE messages SET is_read=1 WHERE chat_id=? AND from_me=0 AND id IN ($holes)", args)
+            val own = queryList(
+                "SELECT id FROM messages WHERE chat_id=? AND from_me=1 AND id IN ($holes)", args
+            ) { it.getString(0) }
+            for (msgId in own) deleteMessage(chatId, msgId)
+        }
     }
+
+    fun revokeMessage(chatId: String, msgId: String) = revokeMessages(chatId, listOf(msgId))
 
     fun quotedMessage(chatId: String, msgId: String): QuotedInfo? = queryFirst(
         "SELECT sender_id, from_me, sender_name, text, msg_type FROM messages " +
@@ -1040,7 +1051,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
             "COALESCE(lm.is_read,0) AS last_read," +
             "COALESCE(lm.send_failed,0) AS last_failed," +
             "COALESCE(lm.send_pending,0) AS last_pending," +
-            "c.muted " +
+            "c.muted," +
+            "EXISTS(SELECT 1 FROM revoked_messages v WHERE v.chat_id=lm.chat_id AND v.id=lm.id) AS last_deleted " +
             "FROM chats c LEFT JOIN contacts ct ON ct.id=c.id " +
             "LEFT JOIN messages lm ON lm.rowid=(" +
             "SELECT rowid FROM messages WHERE chat_id=c.id " +
@@ -1057,7 +1069,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
             ) ?: previewLabel(
                 ctx, it.getString(2), it.getString(3), emoji = true,
                 detail = if (it.getString(2) == "audio") it.getString(3) else "",
-            ),
+            ).let { text ->
+                if (it.getInt(13) != 0) ctx.getString(R.string.deleted_preview, text) else text
+            },
             lastTime = it.getLong(5), unread = it.getInt(6), isGroup = it.getInt(7) != 0,
             lastFromMe = it.getInt(8) != 0 && it.getString(4).isNullOrEmpty(),
             lastRead = it.getInt(9) != 0,
@@ -1080,6 +1094,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         "SELECT $rowIdExpr AS row_id, id, sender_id, text, from_me, time_sent, is_read, msg_type, file_id, file_path, " +
             "file_status, file_size, file_done, edited, quoted_id, quoted_text, sender_name, played, forwarded, quoted_type," +
             "latitude, longitude, send_failed, send_pending, caption_locked," +
+            "EXISTS(SELECT 1 FROM revoked_messages v WHERE v.chat_id=$src.chat_id AND v.id=$src.id) AS deleted," +
             "(SELECT GROUP_CONCAT(emoji) FROM reactions r " +
             "WHERE r.chat_id=$src.chat_id AND r.msg_id=$src.id) AS reactions "
 
@@ -1099,7 +1114,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         sendFailed = it.getInt(22) != 0,
         sendPending = it.getInt(23) != 0,
         captionLocked = it.getInt(24) != 0,
-        reactions = it.getString(25) ?: ""
+        deleted = it.getInt(25) != 0,
+        reactions = it.getString(26) ?: ""
     )
 
     fun messagesByIds(chatId: String, ids: Collection<String>): List<MessageRow> {

@@ -740,8 +740,10 @@ class MessageAdapter(
         }
 
         val clock = TimeFormat.clock(msg.timeSent)
-        val timeStr = if (msg.edited)
-            ctx.getString(R.string.edited_time, ctx.getString(R.string.edited), clock) else clock
+        val label = listOfNotNull(
+            R.string.edited.takeIf { msg.edited }, R.string.deleted.takeIf { msg.deleted },
+        ).joinToString(" · ") { ctx.getString(it) }
+        val timeStr = if (label.isEmpty()) clock else ctx.getString(R.string.label_time, label, clock)
         val sticker = msg.msgType == "sticker"
         val overlayTime = msg.msgType == "image" && msg.text.isEmpty()
         val bareSticker = sticker && msg.text.isEmpty() &&

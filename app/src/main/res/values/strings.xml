@@ -64,6 +64,7 @@
     <string name="choose_account">Which account?</string>
     <string name="export_file_name">%1$s chat - %2$s.txt</string>
     <string name="export_edited">&lt;edited&gt;</string>
+    <string name="export_deleted">&lt;deleted&gt;</string>
     <string name="avatar_desc">Profile picture</string>
     <string name="record_voice">Record voice message</string>
     <string name="cancel_recording">Cancel recording</string>
@@ -163,7 +164,9 @@
     <string name="you">You</string>
     <string name="you_proto">You (%1$s)</string>
     <string name="edited">Edited</string>
-    <string name="edited_time">%1$s %2$s</string>
+    <string name="label_time">%1$s %2$s</string>
+    <string name="deleted">Deleted</string>
+    <string name="deleted_preview" translatable="false">🗑 %1$s</string>
     <string name="reply">Reply</string>
     <string name="edit">Edit</string>
     <string name="delete">Delete</string>

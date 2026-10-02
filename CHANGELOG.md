@@ -1,3 +1,9 @@
+# UniChat 0.62.1
+
+### Changed
+
+* **A message deleted by a contact stays in the chat, marked "Deleted"** instead of disappearing. Works on WhatsApp, Telegram and Signal. The text, the latest edit and any media are kept. Your own deleted messages still disappear.
+
 # UniChat 0.61.13
 
 ### Fixed

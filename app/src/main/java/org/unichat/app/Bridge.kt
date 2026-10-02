@@ -2190,16 +2190,18 @@ object Bridge : EventListener {
     }
 
     internal fun ingestMessage(
-        row: MessageRow,
+        incoming: MessageRow,
         notify: Boolean,
         fetchMedia: Boolean,
-        bump: Boolean = !row.edited,
+        bump: Boolean = !incoming.edited,
         afterStore: () -> Unit = {},
     ) {
-        if (row.id.isEmpty()) { Log.w(TAG, "message with empty id for ${row.chatId}"); return }
+        if (incoming.id.isEmpty()) { Log.w(TAG, "message with empty id for ${incoming.chatId}"); return }
+        val revoked = !incoming.fromMe && db.isRevoked(incoming.chatId, incoming.id)
+        val row = if (revoked) incoming.copy(isRead = true) else incoming
         db.upsertMessage(row)
         afterStore()
-        if (bump) {
+        if (bump && !revoked) {
             val kept = if (row.fromMe) db.storedTime(row.chatId, row.id) else null
             db.bumpChat(row.chatId, kept ?: row.timeSent)
         }
