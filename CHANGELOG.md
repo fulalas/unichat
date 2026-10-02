@@ -4,6 +4,16 @@
 
 * **A message deleted by a contact stays in the chat, marked "Deleted"** instead of disappearing. Works on WhatsApp, Telegram and Signal. The text, the latest edit and any media are kept. Your own deleted messages still disappear.
 
+# UniChat 0.61.20
+
+### Fixed
+
+* **WhatsApp edits and deletes that come with older messages are no longer dropped**, and a message deleted for everyone can't come back on a later sync.
+* An older WhatsApp edit arriving late no longer replaces a newer one.
+* A WhatsApp edit no longer reopens a deleted chat or shows a notification.
+* "Sync all messages" no longer stops early.
+* Chat exports now include edits and deletes.
+
 # UniChat 0.61.13
 
 ### Fixed
