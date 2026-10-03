@@ -231,5 +231,7 @@ for abi in "${ABIS[@]}"; do
         -o "$out/libtdjni.so" "$DIR/tdjson/jni/tdjni.c" -L"$out" -ltdjson
     "$STRIP" --strip-unneeded "$out/libtdjni.so"
     echo "   -> $out/libtdjni.so"
+    rm -rf "$EXT/build-$abi"
 done
+rm -rf "$EXT/openssl-$OPENSSL_VER" "$EXT/openssl-$OPENSSL_VER.tar.gz"
 echo "== TDLib build done =="

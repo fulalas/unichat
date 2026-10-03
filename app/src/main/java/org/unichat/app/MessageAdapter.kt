@@ -270,11 +270,11 @@ class MessageAdapter(
                 }
             )
         }
+        val known = bytes?.takeIf { it.second > 0 }
         holder.fileProgress.visibility =
-            if (bytes != null && !downloaded) View.VISIBLE else View.GONE
-        holder.fileSpinner.visibility =
-            if (downloading && bytes == null) View.VISIBLE else View.GONE
-        if (bytes != null) holder.fileProgress.progress = percentOf(bytes)
+            if ((known != null || downloading) && !downloaded) View.VISIBLE else View.GONE
+        holder.fileProgress.isIndeterminate = downloading && known == null
+        holder.fileProgress.progress = known?.let(::percentOf) ?: 0
         holder.fileMeta.text = metaLine(ctx, msg, downloading, bytes)
     }
 
@@ -363,7 +363,6 @@ class MessageAdapter(
         val fileButton: View = view.findViewById(R.id.fileButton)
         val fileIcon: ImageView = view.findViewById(R.id.fileIcon)
         val fileProgress: android.widget.ProgressBar = view.findViewById(R.id.fileProgress)
-        val fileSpinner: android.widget.ProgressBar = view.findViewById(R.id.fileSpinner)
         val fileName: TextView = view.findViewById(R.id.fileName)
         val fileMeta: TextView = view.findViewById(R.id.fileMeta)
         var fileIconRes: Int = 0
