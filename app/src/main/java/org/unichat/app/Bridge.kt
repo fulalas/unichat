@@ -2205,12 +2205,16 @@ object Bridge : EventListener {
             val kept = if (row.fromMe) db.storedTime(row.chatId, row.id) else null
             db.bumpChat(row.chatId, kept ?: row.timeSent)
         }
-        val unheardAudio = row.msgType == "audio" && !row.fromMe && !row.isRead && !revoked
-        if (row.fileId.isNotEmpty() && row.filePath.isEmpty() &&
-            ((fetchMedia && (row.msgType in PICTURE_TYPES || row.msgType == "audio")) ||
-                (unheardAudio && !hasFile(row)))
-        ) {
-            downloadFile(row)
+        val wantsMedia = when (row.msgType) {
+            "audio" -> fetchMedia || (!row.fromMe && !row.isRead)
+            in PICTURE_TYPES -> fetchMedia
+            else -> false
+        }
+        if (wantsMedia && row.fileId.isNotEmpty() && row.filePath.isEmpty()) {
+            val (path, status) = db.fileState(row.chatId, row.id)
+            if (status != 2 || path.isEmpty() || !java.io.File(path).exists()) {
+                downloadFile(row.copy(fileStatus = status))
+            }
         }
         if (notify && !row.edited && !row.fromMe && !row.isRead &&
             row.chatId != activeChatId && !db.isMuted(row.chatId)
@@ -2218,11 +2222,6 @@ object Bridge : EventListener {
             postMessageNotification(row.chatId, row.senderId, row.text, row.msgType, row.timeSent)
         }
         notifyChat(row.chatId)
-    }
-
-    private fun hasFile(row: MessageRow): Boolean {
-        val (path, status) = db.fileState(row.chatId, row.id)
-        return status == 2 && path.isNotEmpty() && java.io.File(path).exists()
     }
 
     internal fun postMessageNotification(
