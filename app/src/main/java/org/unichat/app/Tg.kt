@@ -18,6 +18,7 @@ object Tg {
 
     private const val MEMBER_PAGE = 200
     private const val REACTION_PAGE = 50
+    const val ANON_REACTOR_PREFIX = "tg:r:"
 private const val UNREAD_REACTION_PAGE = 100
 
     const val PREFIX = "tg:"
@@ -25,6 +26,12 @@ private const val UNREAD_REACTION_PAGE = 100
     fun isTgId(id: String): Boolean = id.startsWith(PREFIX)
     private fun chatIdOf(id: String): Long = id.removePrefix(PREFIX).toLongOrNull() ?: 0L
     private fun idFor(raw: Long): String = PREFIX + raw
+
+    private fun senderIdOf(sender: JSONObject?): String = when (sender?.optString("@type")) {
+        "messageSenderUser" -> idFor(sender.optLong("user_id"))
+        "messageSenderChat" -> idFor(sender.optLong("chat_id"))
+        else -> ""
+    }
 
     @Volatile private var clientId: Int = -1
     @Volatile private var appContext: Context? = null
@@ -539,12 +546,7 @@ private const val UNREAD_REACTION_PAGE = 100
         val msgId = msg.getLong("id")
         val fromMe = msg.optBoolean("is_outgoing")
         val timeSent = msg.optLong("date")
-        val sender = msg.optJSONObject("sender_id")
-        val senderId = when (sender?.optString("@type")) {
-            "messageSenderUser" -> idFor(sender.getLong("user_id"))
-            "messageSenderChat" -> idFor(sender.getLong("chat_id"))
-            else -> chatId
-        }
+        val senderId = senderIdOf(msg.optJSONObject("sender_id")).ifEmpty { chatId }
         val isRead =
             if (fromMe) msgId <= (readOutbox[rawChat] ?: 0)
             else msgId <= (readInbox[rawChat] ?: 0)
@@ -771,13 +773,25 @@ private const val UNREAD_REACTION_PAGE = 100
     ): Boolean {
         val arr = info?.optJSONObject("reactions")?.optJSONArray("reactions")
         val wanted = LinkedHashMap<String, String>()
+        val named = LinkedHashMap<String, String>()
         for (i in 0 until (arr?.length() ?: 0)) {
             val r = arr!!.getJSONObject(i)
             val emoji = r.getJSONObject("type").optString("emoji")
             if (emoji.isEmpty()) continue
-            val count = r.optInt("total_count", 1)
-            wanted["tg:r:$emoji"] = if (count > 1) "$emoji$count" else emoji
+            val senders = LinkedHashSet<String>()
+            val recent = r.optJSONArray("recent_sender_ids")
+            for (j in (recent?.length() ?: 0) - 1 downTo 0) {
+                senders.add(senderIdOf(recent!!.optJSONObject(j)))
+            }
+            if (r.optBoolean("is_chosen")) {
+                senders.add(senderIdOf(r.optJSONObject("used_sender_id")).ifEmpty { selfId() })
+            }
+            senders.removeAll { it.isEmpty() || it in named }
+            for (sender in senders) named[sender] = emoji
+            val rest = r.optInt("total_count", 1) - senders.size
+            if (rest > 0) wanted["$ANON_REACTOR_PREFIX$emoji"] = if (rest > 1) "$emoji$rest" else emoji
         }
+        wanted.putAll(named)
         if (Bridge.db.reactionsOf(chatId, msgId).toMap() == wanted) return false
         Bridge.db.clearReactions(chatId, msgId)
         for ((sender, label) in wanted) Bridge.db.upsertReaction(chatId, msgId, sender, label)
@@ -797,12 +811,7 @@ private const val UNREAD_REACTION_PAGE = 100
         for (i in 0 until arr.length()) {
             val r = arr.optJSONObject(i) ?: continue
             val emoji = r.optJSONObject("type")?.optString("emoji").orEmpty()
-            val sender = r.optJSONObject("sender_id") ?: continue
-            val id = when (sender.optString("@type")) {
-                "messageSenderUser" -> idFor(sender.optLong("user_id"))
-                "messageSenderChat" -> idFor(sender.optLong("chat_id"))
-                else -> ""
-            }
+            val id = senderIdOf(r.optJSONObject("sender_id"))
             if (id.isNotEmpty() && emoji.isNotEmpty()) out.add(id to emoji)
         }
         return out

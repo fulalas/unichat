@@ -16,7 +16,9 @@ fun isPhoneId(id: String): Boolean = id.endsWith("@s.whatsapp.net")
 fun phoneLabel(id: String): String =
     if (isPhoneId(id)) "+" + id.substringBefore("@") else id
 
-fun ChatRow.displayLabel(): String =
+fun ChatRow.displayLabel(): String = chatLabel(id, name)
+
+fun chatLabel(id: String, name: String): String =
     if (name == id && id.contains("@")) phoneLabel(id) else name
 
 fun senderLabel(names: Map<String, String>, senderId: String, senderName: String): String =

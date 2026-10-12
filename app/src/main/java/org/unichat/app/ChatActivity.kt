@@ -2272,10 +2272,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun showReactionList(msg: MessageRow) {
         io.execute {
             val reactions = Bridge.reactionsOf(msg)
-            val self = Bridge.selfIdOf(msg.chatId)
             val names = contactNames()
             val who = reactions.map { (senderId, _) ->
-                if (senderId == self) getString(R.string.you) else reactorLabel(names, senderId)
+                Bridge.db.reactorLabel(msg.chatId, names, senderId)
+                    .ifEmpty { getString(R.string.unknown_sender) }
             }
             val lines = reactions.mapIndexed { i, (_, emoji) -> "$emoji   ${who[i]}" }
             runOnUiThread {
@@ -2292,14 +2292,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 }
             }
         }
-    }
-
-    private fun reactorLabel(names: Map<String, String>, senderId: String): String {
-        names[senderId]?.takeIf { it.isNotEmpty() }?.let { return it }
-        Bridge.db.displayName(senderId).takeIf { it.isNotEmpty() && it != senderId }
-            ?.let { return it }
-        return if (Accounts.ofChat(senderId).proto == ProtoPicker.WA) phoneLabel(senderId)
-        else getString(R.string.unknown_sender)
     }
 
     private fun openReactorChat(senderId: String, name: String) {

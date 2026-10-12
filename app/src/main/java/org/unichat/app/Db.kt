@@ -121,16 +121,14 @@ val LABEL_ONLY_TYPES: Map<String, Pair<String, Int>> = mapOf(
 )
 
 fun reactionPreview(
-    ctx: Context, reactions: String?, lastFromMe: Boolean,
-    chatName: String, msgType: String, msgText: String,
+    ctx: Context, emoji: String?, who: String, msgType: String, msgText: String,
 ): String? {
-    if (reactions.isNullOrEmpty()) return null
-    val emoji = reactions.split(',').firstOrNull { it.isNotEmpty() } ?: return null
+    if (emoji.isNullOrEmpty()) return null
+    val shown = emoji.dropLastWhile { it.isDigit() }.ifEmpty { emoji }
     val quoted = previewLabel(ctx, msgType, msgText, emoji = false)
         .replace('\n', ' ').take(40)
-    val who = if (lastFromMe) chatName else ctx.getString(R.string.you)
-    return if (who.isEmpty()) ctx.getString(R.string.reacted_to_noname, emoji, quoted)
-    else ctx.getString(R.string.reacted_to, who, emoji, quoted)
+    return if (who.isEmpty()) ctx.getString(R.string.reacted_to_noname, shown, quoted)
+    else ctx.getString(R.string.reacted_to, who, shown, quoted)
 }
 
 class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
@@ -694,8 +692,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
 
     fun upsertReaction(chatId: String, msgId: String, senderId: String, emoji: String) {
         writableDatabase.execSQL(
-            "INSERT INTO reactions(chat_id, msg_id, sender_id, emoji) VALUES(?,?,?,?) " +
-                "ON CONFLICT(chat_id, msg_id, sender_id) DO UPDATE SET emoji=excluded.emoji",
+            "INSERT OR REPLACE INTO reactions(chat_id, msg_id, sender_id, emoji) VALUES(?,?,?,?)",
             arrayOf(chatId, msgId, senderId, emoji)
         )
     }
@@ -1034,58 +1031,88 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         )
     }
 
-    fun chats(): List<ChatRow> = namePreviewMentions(queryList(
-        "SELECT c.id," +
-            "COALESCE(NULLIF(c.name,''), NULLIF(ct.name,''), c.id) AS display_name," +
-            "COALESCE(lm.msg_type,'') AS last_type," +
-            "COALESCE(lm.text,'') AS last_text," +
-            "(SELECT GROUP_CONCAT(emoji) FROM reactions r " +
-            "WHERE r.chat_id=c.id AND r.msg_id=lm.id) AS last_reactions," +
-            "c.last_time," +
-            "(SELECT COUNT(*) FROM messages WHERE chat_id=c.id AND from_me=0 AND is_read=0) AS unread," +
-            "CASE WHEN c.id LIKE '%@g.us' OR c.id LIKE 'tg:-%' " +
-                "OR (c.id LIKE 'sg:%' AND LENGTH(" +
-                "REPLACE(REPLACE(REPLACE(c.id,'sg:',''),'PNI:',''),'pni:','')) <> 36) " +
-                "THEN 1 ELSE 0 END AS is_group," +
-            "COALESCE(lm.from_me,0) AS last_from_me," +
-            "COALESCE(lm.is_read,0) AS last_read," +
-            "COALESCE(lm.send_failed,0) AS last_failed," +
-            "COALESCE(lm.send_pending,0) AS last_pending," +
-            "c.muted," +
-            "EXISTS(SELECT 1 FROM revoked_messages v WHERE v.chat_id=lm.chat_id AND v.id=lm.id) AS last_deleted " +
-            "FROM chats c LEFT JOIN contacts ct ON ct.id=c.id " +
-            "LEFT JOIN messages lm ON lm.rowid=(" +
-            "SELECT rowid FROM messages WHERE chat_id=c.id " +
-            "ORDER BY time_sent DESC, rowid DESC LIMIT 1) " +
-            "WHERE c.archived=0 AND c.id!='status@broadcast' " +
-            "ORDER BY c.last_time DESC",
-        null
-    ) {
-        ChatRow(
-            id = it.getString(0), name = it.getString(1),
-            lastText = reactionPreview(
-                ctx, it.getString(4), it.getInt(8) != 0,
-                it.getString(1), it.getString(2), it.getString(3),
-            ) ?: previewLabel(
-                ctx, it.getString(2), it.getString(3), emoji = true,
-                detail = if (it.getString(2) == "audio") it.getString(3) else "",
-            ).let { text ->
-                if (it.getInt(13) != 0) ctx.getString(R.string.deleted_preview, text) else text
-            },
-            lastTime = it.getLong(5), unread = it.getInt(6), isGroup = it.getInt(7) != 0,
-            lastFromMe = it.getInt(8) != 0 && it.getString(4).isNullOrEmpty(),
-            lastRead = it.getInt(9) != 0,
-            lastFailed = it.getInt(10) != 0,
-            lastPending = it.getInt(11) != 0,
-            muted = it.getInt(12) != 0
-        )
-    })
+    fun chats(): List<ChatRow> {
+        val names = lazy { contactNames() }
+        return namePreviewMentions(names, queryList(
+            "SELECT c.id," +
+                "COALESCE(NULLIF(c.name,''), NULLIF(ct.name,''), c.id) AS display_name," +
+                "COALESCE(lm.msg_type,'') AS last_type," +
+                "COALESCE(lm.text,'') AS last_text," +
+                "lr.emoji AS last_reaction," +
+                "c.last_time," +
+                "(SELECT COUNT(*) FROM messages WHERE chat_id=c.id AND from_me=0 AND is_read=0) AS unread," +
+                "CASE WHEN c.id LIKE '%@g.us' OR c.id LIKE 'tg:-%' " +
+                    "OR (c.id LIKE 'sg:%' AND LENGTH(" +
+                    "REPLACE(REPLACE(REPLACE(c.id,'sg:',''),'PNI:',''),'pni:','')) <> 36) " +
+                    "THEN 1 ELSE 0 END AS is_group," +
+                "COALESCE(lm.from_me,0) AS last_from_me," +
+                "COALESCE(lm.is_read,0) AS last_read," +
+                "COALESCE(lm.send_failed,0) AS last_failed," +
+                "COALESCE(lm.send_pending,0) AS last_pending," +
+                "c.muted," +
+                "EXISTS(SELECT 1 FROM revoked_messages v WHERE v.chat_id=lm.chat_id AND v.id=lm.id) AS last_deleted," +
+                "lr.sender_id AS last_reactor " +
+                "FROM chats c LEFT JOIN contacts ct ON ct.id=c.id " +
+                "LEFT JOIN messages lm ON lm.rowid=(" +
+                "SELECT rowid FROM messages WHERE chat_id=c.id " +
+                "ORDER BY time_sent DESC, rowid DESC LIMIT 1) " +
+                "LEFT JOIN reactions lr ON lr.rowid=(" +
+                "SELECT rowid FROM reactions WHERE chat_id=c.id AND msg_id=lm.id " +
+                "ORDER BY rowid DESC LIMIT 1) " +
+                "WHERE c.archived=0 AND c.id!='status@broadcast' " +
+                "ORDER BY c.last_time DESC",
+            null
+        ) {
+            val isGroup = it.getInt(7) != 0
+            ChatRow(
+                id = it.getString(0), name = it.getString(1),
+                lastText = reactionPreview(
+                    ctx, it.getString(4),
+                    reactorName(
+                        it.getString(0), chatLabel(it.getString(0), it.getString(1)),
+                        isGroup, it.getString(14), names,
+                    ),
+                    it.getString(2), it.getString(3),
+                ) ?: previewLabel(
+                    ctx, it.getString(2), it.getString(3), emoji = true,
+                    detail = if (it.getString(2) == "audio") it.getString(3) else "",
+                ).let { text ->
+                    if (it.getInt(13) != 0) ctx.getString(R.string.deleted_preview, text) else text
+                },
+                lastTime = it.getLong(5), unread = it.getInt(6), isGroup = isGroup,
+                lastFromMe = it.getInt(8) != 0 && it.getString(4).isNullOrEmpty(),
+                lastRead = it.getInt(9) != 0,
+                lastFailed = it.getInt(10) != 0,
+                lastPending = it.getInt(11) != 0,
+                muted = it.getInt(12) != 0
+            )
+        })
+    }
 
-    private fun namePreviewMentions(rows: List<ChatRow>): List<ChatRow> {
+    private fun reactorName(
+        chatId: String, chatName: String, isGroup: Boolean, senderId: String?,
+        names: Lazy<Map<String, String>>,
+    ): String = when {
+        senderId.isNullOrEmpty() || senderId.startsWith(Tg.ANON_REACTOR_PREFIX) -> ""
+        !isGroup && !isSelf(chatId, senderId) -> chatName
+        else -> reactorLabel(chatId, names.value, senderId)
+    }
+
+    private fun isSelf(chatId: String, senderId: String): Boolean =
+        senderId == Accounts.ofChat(chatId).selfId() || isSelfContact(senderId)
+
+    fun reactorLabel(chatId: String, names: Map<String, String>, senderId: String): String {
+        if (isSelf(chatId, senderId)) return ctx.getString(R.string.you)
+        names[senderId]?.takeIf { it.isNotEmpty() }?.let { return it }
+        return displayName(senderId).takeIf { it != senderId }.orEmpty()
+    }
+
+    private fun namePreviewMentions(
+        names: Lazy<Map<String, String>>, rows: List<ChatRow>,
+    ): List<ChatRow> {
         if (rows.none { hasMention(it.lastText) }) return rows
-        val names = contactNames()
         return rows.map {
-            if (hasMention(it.lastText)) it.copy(lastText = resolveMentions(it.lastText, names))
+            if (hasMention(it.lastText)) it.copy(lastText = resolveMentions(it.lastText, names.value))
             else it
         }
     }
