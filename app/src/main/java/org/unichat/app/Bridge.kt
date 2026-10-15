@@ -1228,6 +1228,11 @@ object Bridge : EventListener {
         return filePath.startsWith(cacheDir.path + "/")
     }
 
+    fun isSending(msg: MessageRow): Boolean {
+        val key = msg.chatId + KEY_SEP + msg.id
+        return key in sendInFlight || key in sendQueued || key in retrying
+    }
+
     fun isSendInFlight(msg: MessageRow): Boolean =
         msg.fromMe && !msg.sendFailed &&
             proto(msg.chatId).consumesStagingInput && isStagingPath(msg.filePath)

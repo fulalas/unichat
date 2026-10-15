@@ -300,7 +300,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             onMessageActions = { msg -> showMessageActions(msg) },
             onReactionsClick = { msg -> showReactionList(msg) },
             onQuoteClick = { msg -> onQuoteTapped(msg) },
-            onRetrySend = { msg -> retrySend(msg) },
+            onRetrySend = { msg -> showFailedActions(msg) },
             onNeedLinkPreview = { url -> requestLinkPreview(url) },
             onNeedFileSize = { msg -> Bridge.requestFileSize(msg) },
             onLinkPreviewClick = { url -> openLink(url) },
@@ -509,6 +509,14 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         else QUOTE_CHARS
         return text.substring(0, end)
     }
+
+    private fun showFailedActions(msg: MessageRow) = showActionDialog(
+        listOf(
+            getString(R.string.resend) to { retrySend(msg) },
+            getString(R.string.delete) to { confirmDelete(listOf(msg)) },
+        ),
+        cancellable = true,
+    )
 
     private fun retrySend(msg: MessageRow) = io.execute {
         if (Bridge.retrySend(msg)) return@execute
@@ -2434,6 +2442,10 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun confirmDelete(msgs: List<MessageRow>, onDone: () -> Unit = {}) {
+        if (msgs.any { Bridge.isSending(it) }) {
+            Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
+            return
+        }
         val options = ArrayList<Pair<String, () -> Unit>>()
         if (msgs.all { Bridge.canDeleteForEveryone(it) }) {
             options.add(getString(R.string.delete_for_everyone) to {
