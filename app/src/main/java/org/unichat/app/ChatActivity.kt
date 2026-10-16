@@ -300,7 +300,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             onMessageActions = { msg -> showMessageActions(msg) },
             onReactionsClick = { msg -> showReactionList(msg) },
             onQuoteClick = { msg -> onQuoteTapped(msg) },
-            onRetrySend = { msg -> showFailedActions(msg) },
+            onRetrySend = { msg -> retrySend(msg) },
+            onFailedTap = { msg -> showFailedActions(msg) },
             onNeedLinkPreview = { url -> requestLinkPreview(url) },
             onNeedFileSize = { msg -> Bridge.requestFileSize(msg) },
             onLinkPreviewClick = { url -> openLink(url) },
@@ -2237,7 +2238,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun saveToDownloads(msg: MessageRow) {
-        if (Bridge.isSendInFlight(msg)) {
+        if (Bridge.stagedFileInUse(msg)) {
             Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
             return
         }
@@ -2441,21 +2442,39 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         contextBar.visibility = android.view.View.GONE
     }
 
+    private fun warnIfSending(msgs: List<MessageRow>): Boolean {
+        if (msgs.none { Bridge.isSending(it) }) return false
+        Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
+        return true
+    }
+
     private fun confirmDelete(msgs: List<MessageRow>, onDone: () -> Unit = {}) {
-        if (msgs.any { Bridge.isSending(it) }) {
-            Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
-            return
+        if (warnIfSending(msgs)) return
+        fun whenUnchanged(action: (List<MessageRow>) -> Unit): () -> Unit = {
+            val chat = chatId
+            io.execute {
+                val fresh = Bridge.db.messagesByIds(chat, msgs.map { it.id })
+                val failed = msgs.associate { it.id to it.sendFailed }
+                runOnUiThread {
+                    if (fresh.size != msgs.size || fresh.any { failed[it.id] != it.sendFailed }) {
+                        Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
+                    } else if (!warnIfSending(fresh)) {
+                        action(fresh)
+                        onDone()
+                    }
+                }
+            }
         }
         val options = ArrayList<Pair<String, () -> Unit>>()
-        if (msgs.all { Bridge.canDeleteForEveryone(it) }) {
-            options.add(getString(R.string.delete_for_everyone) to {
-                for (m in msgs) Bridge.deleteForEveryone(chatId, m.id)
+        if (msgs.all { Bridge.canDeleteForEveryone(it) && !it.sendFailed }) {
+            options.add(getString(R.string.delete_for_everyone) to whenUnchanged { fresh ->
+                for (m in fresh) Bridge.deleteForEveryone(m.chatId, m.id)
             })
         }
-        options.add(getString(R.string.delete_for_me) to {
-            for (m in msgs) Bridge.deleteForMe(chatId, m.id)
+        options.add(getString(R.string.delete_for_me) to whenUnchanged { fresh ->
+            for (m in fresh) Bridge.deleteForMe(m.chatId, m.id, m.sendFailed)
         })
-        showActionDialog(options, R.string.delete_message, cancellable = true, onChosen = onDone)
+        showActionDialog(options, R.string.delete_message, cancellable = true)
     }
 
     private fun shareMessage(msg: MessageRow) {
@@ -2472,7 +2491,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             return
         }
         if (msg.msgType != "" && msg.msgType != "contact") {
-            if (Bridge.isSendInFlight(msg)) {
+            if (Bridge.stagedFileInUse(msg)) {
                 Toast.makeText(this, R.string.still_sending, Toast.LENGTH_SHORT).show()
                 return
             }
@@ -2592,7 +2611,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         var stillSending = false
         for (msg in msgs) {
             if (msg.msgType in LABEL_ONLY_TYPES && msg.text.isBlank()) continue
-            if (msg.msgType in FILE_MEDIA_TYPES && Bridge.isSendInFlight(msg)) {
+            if (msg.msgType in FILE_MEDIA_TYPES && Bridge.stagedFileInUse(msg)) {
                 stillSending = true
                 continue
             }

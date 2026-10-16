@@ -804,7 +804,7 @@ object Bridge : EventListener {
         )
         db.stageOutgoing(row)
         db.bumpChat(chatId, row.timeSent)
-        sendQueued.add(chatId + KEY_SEP + msgId)
+        sendQueued.add(msgKey(chatId, msgId))
         if (armWatchdog) armSendWatchdog(row)
         notifyChat(chatId)
         return row
@@ -815,7 +815,7 @@ object Bridge : EventListener {
     private val watchdogs = ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<*>>()
 
     private fun armSendWatchdog(row: MessageRow) {
-        val key = row.chatId + KEY_SEP + row.id
+        val key = msgKey(row.chatId, row.id)
         val media = row.msgType in NEEDS_LOCAL_FILE
         watchdogs.put(key, retryScheduler.schedule({
             watchdogs.remove(key)
@@ -830,7 +830,7 @@ object Bridge : EventListener {
     }
 
     private fun disarmSendWatchdog(chatId: String, msgId: String) {
-        watchdogs.remove(chatId + KEY_SEP + msgId)?.cancel(false)
+        watchdogs.remove(msgKey(chatId, msgId))?.cancel(false)
     }
 
     private val sendInFlight = ConcurrentHashMap.newKeySet<String>()
@@ -843,13 +843,13 @@ object Bridge : EventListener {
     private const val SEND_ACK_POLL_MS = 1_000L
 
     private fun settleSendAck(chatId: String, msgId: String) {
-        sendAcks[chatId + KEY_SEP + msgId]?.countDown()
+        sendAcks[msgKey(chatId, msgId)]?.countDown()
         settleOrdered(chatId, msgId)
     }
 
     private fun awaitSendAck(chatId: String, msgId: String) {
         if (msgId.isEmpty() || proto(chatId).ackOnSend) return
-        val key = chatId + KEY_SEP + msgId
+        val key = msgKey(chatId, msgId)
         val latch = sendAcks.computeIfAbsent(key) { CountDownLatch(1) }
         try {
             val deadline = System.currentTimeMillis() + SEND_ACK_WAIT_MS
@@ -865,7 +865,7 @@ object Bridge : EventListener {
     }
 
     private fun runSend(row: MessageRow, send: (String) -> String): String {
-        val key = row.chatId + KEY_SEP + row.id
+        val key = msgKey(row.chatId, row.id)
         sendQueued.remove(key)
         if (!proto(row.chatId).connected) {
             onMessageSendFailed(row.chatId, row.id)
@@ -885,7 +885,7 @@ object Bridge : EventListener {
             return ""
         }
         if (resultId != row.id) {
-            if (settledBeforeRekey == row.chatId + KEY_SEP + resultId) {
+            if (settledBeforeRekey == msgKey(row.chatId, resultId)) {
                 settledBeforeRekey = ""
                 forgetRetry(row.chatId, row.id)
                 db.deleteMessage(row.chatId, row.id)
@@ -950,19 +950,24 @@ object Bridge : EventListener {
             }
         }
 
-    fun deleteForEveryone(chatId: String, msgId: String) = protoExecutor(chatId).execute {
-        proto(chatId).deleteForEveryone(chatId, msgId)
+    fun deleteForEveryone(chatId: String, msgId: String) {
+        forgetRetry(chatId, msgId)
+        protoExecutor(chatId).execute { proto(chatId).deleteForEveryone(chatId, msgId) }
     }
 
     fun sendReaction(msg: MessageRow, emoji: String) = protoExecutor(msg.chatId).execute {
         proto(msg.chatId).react(msg, emoji)
     }
 
-    fun deleteForMe(chatId: String, msgId: String) = protoExecutor(chatId).execute {
+    fun deleteForMe(chatId: String, msgId: String, sendFailed: Boolean) {
         forgetRetry(chatId, msgId)
-        proto(chatId).deleteForMe(chatId, msgId)
-        db.deleteMessage(chatId, msgId)
-        notifyChat(chatId)
+        val runner: java.util.concurrent.Executor =
+            if (sendFailed) retryWorker else protoExecutor(chatId)
+        runner.execute {
+            proto(chatId).deleteForMe(chatId, msgId)
+            db.deleteMessage(chatId, msgId)
+            notifyChat(chatId)
+        }
     }
 
     fun deleteChat(chatId: String, deleteMedia: Boolean) = protoExecutor(chatId).execute {
@@ -1119,7 +1124,7 @@ object Bridge : EventListener {
 
     fun retrySend(msg: MessageRow): Boolean {
         if (!canResend(msg)) return false
-        if (sendInFlight.contains(msg.chatId + KEY_SEP + msg.id)) return true
+        if (sendInFlight.contains(msgKey(msg.chatId, msg.id))) return true
         forgetRetry(msg.chatId, msg.id)
         resend(msg.chatId, msg.id)
         return true
@@ -1132,13 +1137,13 @@ object Bridge : EventListener {
     }
 
     private fun resend(chatId: String, msgId: String) {
-        if (!retrying.add(chatId + KEY_SEP + msgId)) return
+        if (!retrying.add(msgKey(chatId, msgId))) return
         retryWorker.execute {
             try {
                 val msg = db.messagesByIds(chatId, listOf(msgId)).firstOrNull() ?: return@execute
                 if (msg.sendPending || !msg.sendFailed) return@execute
                 if (!canResend(msg)) {
-                    retryAttempts.remove(chatId + KEY_SEP + msgId)
+                    retryAttempts.remove(msgKey(chatId, msgId))
                     return@execute
                 }
                 if (isTg(chatId) && !msgId.startsWith(LOCAL_ID) &&
@@ -1154,7 +1159,7 @@ object Bridge : EventListener {
                 val mentions = storedMentions(msg.text) { db.contactName(it) != null }
                 sendMediaBlocking(msg) { p, id -> sendRow(p, chatId, id, msg, quoted, mentions) }
             } finally {
-                retrying.remove(chatId + KEY_SEP + msgId)
+                retrying.remove(msgKey(chatId, msgId))
             }
         }
     }
@@ -1190,7 +1195,7 @@ object Bridge : EventListener {
     private val retryTasks = ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<*>>()
 
     private fun scheduleRetry(chatId: String, msgId: String) {
-        val key = chatId + KEY_SEP + msgId
+        val key = msgKey(chatId, msgId)
         if (retryTasks.containsKey(key)) return
         val attempt = (retryAttempts[key] ?: 0) + 1
         retryAttempts[key] = attempt
@@ -1202,12 +1207,12 @@ object Bridge : EventListener {
     }
 
     private fun cancelRetry(chatId: String, msgId: String) {
-        retryTasks.remove(chatId + KEY_SEP + msgId)?.cancel(false)
+        retryTasks.remove(msgKey(chatId, msgId))?.cancel(false)
     }
 
     private fun forgetRetry(chatId: String, msgId: String) {
         cancelRetry(chatId, msgId)
-        retryAttempts.remove(chatId + KEY_SEP + msgId)
+        retryAttempts.remove(msgKey(chatId, msgId))
     }
 
     private fun forgetChatRetries(chatId: String) {
@@ -1218,9 +1223,9 @@ object Bridge : EventListener {
     }
 
     private fun moveRetryKey(chatId: String, oldId: String, newId: String) {
-        val old = chatId + KEY_SEP + oldId
+        val old = msgKey(chatId, oldId)
         retryTasks.remove(old)?.cancel(false)
-        retryAttempts.remove(old)?.let { retryAttempts[chatId + KEY_SEP + newId] = it }
+        retryAttempts.remove(old)?.let { retryAttempts[msgKey(chatId, newId)] = it }
     }
 
     private fun isStagingPath(filePath: String): Boolean {
@@ -1229,11 +1234,11 @@ object Bridge : EventListener {
     }
 
     fun isSending(msg: MessageRow): Boolean {
-        val key = msg.chatId + KEY_SEP + msg.id
+        val key = msgKey(msg.chatId, msg.id)
         return key in sendInFlight || key in sendQueued || key in retrying
     }
 
-    fun isSendInFlight(msg: MessageRow): Boolean =
+    fun stagedFileInUse(msg: MessageRow): Boolean =
         msg.fromMe && !msg.sendFailed &&
             proto(msg.chatId).consumesStagingInput && isStagingPath(msg.filePath)
 
@@ -1372,6 +1377,8 @@ object Bridge : EventListener {
                 Log.w(TAG, "forward failed for ${row.chatId}", e)
                 markSendFailed(row.chatId, row.id, retry = false)
                 ""
+            } finally {
+                sendQueued.remove(msgKey(row.chatId, row.id))
             }
             if (sentId.isEmpty()) continue
             sent = true
@@ -2018,8 +2025,8 @@ object Bridge : EventListener {
             fileWaits[key]?.countDown()
         }
         for (id in chatIds) {
-            progressWritten.remove(id + KEY_SEP + msgId)
-            progressLatest.remove(id + KEY_SEP + msgId)
+            progressWritten.remove(msgKey(id, msgId))
+            progressLatest.remove(msgKey(id, msgId))
             if (status == 2) {
                 db.setFileDone(id, msgId, 0)
                 appContext?.let { Thumbs.discard(it, id, msgId) }
@@ -2338,15 +2345,15 @@ object Bridge : EventListener {
         settleSendAck(chatId, msgId)
         notifyChatRow(chatId, msgId)
         if (!retry) return
-        if (sendInFlight.contains(chatId + KEY_SEP + msgId)) return
-        val first = retryAttempts[chatId + KEY_SEP + msgId] == null
+        if (sendInFlight.contains(msgKey(chatId, msgId))) return
+        val first = retryAttempts[msgKey(chatId, msgId)] == null
         scheduleRetry(chatId, msgId)
         if (first && chatId != activeChatId) toastUi(R.string.send_failed)
     }
 
     fun onMessageSendOk(chatId: String, msgId: String) {
         if (wiping) return
-        if (!db.hasMessage(chatId, msgId)) settledBeforeRekey = chatId + KEY_SEP + msgId
+        if (!db.hasMessage(chatId, msgId)) settledBeforeRekey = msgKey(chatId, msgId)
         disarmSendWatchdog(chatId, msgId)
         forgetRetry(chatId, msgId)
         db.clearSendMarks(chatId, msgId)
@@ -2382,6 +2389,8 @@ object Bridge : EventListener {
         onChatDeletedRemotely(chatId, deleteMedia)
 
     private const val KEY_SEP = "\u0000"
+
+    private fun msgKey(chatId: String, msgId: String) = chatId + KEY_SEP + msgId
 
     private val stateClearers = ConcurrentHashMap<String, Runnable>()
 
@@ -2479,7 +2488,7 @@ object Bridge : EventListener {
     private const val PROGRESS_WRITE_STEP = 4L shl 20
 
     internal fun postDownloadProgress(chatId: String, msgId: String, done: Long, total: Long) {
-        val key = chatId + KEY_SEP + msgId
+        val key = msgKey(chatId, msgId)
         progressLatest[key] = done
         if (done - (progressWritten[key] ?: 0L) >= PROGRESS_WRITE_STEP) {
             progressWritten[key] = done
@@ -2499,7 +2508,7 @@ object Bridge : EventListener {
     }
 
     private fun flushProgress(chatId: String, msgId: String) {
-        val key = chatId + KEY_SEP + msgId
+        val key = msgKey(chatId, msgId)
         progressWritten.remove(key)
         progressLatest.remove(key)?.let { db.setFileDone(chatId, msgId, it) }
     }

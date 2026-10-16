@@ -40,6 +40,7 @@ class MessageAdapter(
     private val onReactionsClick: (MessageRow) -> Unit,
     private val onQuoteClick: (MessageRow) -> Unit,
     private val onRetrySend: (MessageRow) -> Unit = {},
+    private val onFailedTap: (MessageRow) -> Unit = {},
     private val onNeedLinkPreview: (String) -> Unit = {},
     private val onNeedFileSize: (MessageRow) -> Unit = {},
     private val onLinkPreviewClick: (String) -> Unit = {},
@@ -434,14 +435,14 @@ class MessageAdapter(
         holder.image.clipToOutline = true
 
 
-        fun tappedRow(retryIfFailed: Boolean = true): MessageRow? {
+        fun tappedRow(failedOpensMenu: Boolean = true): MessageRow? {
             val m = holder.current
             if (selectionMode) {
                 m?.let { toggleSelection(it) }
                 return null
             }
-            if (retryIfFailed && m != null && m.sendFailed) {
-                onRetrySend(m)
+            if (failedOpensMenu && m != null && m.sendFailed) {
+                onFailedTap(m)
                 return null
             }
             return m
@@ -455,7 +456,7 @@ class MessageAdapter(
             if (selectionMode) toggleSelection(m) else onRetrySend(m)
         }
         val openActions = View.OnClickListener {
-            tappedRow(retryIfFailed = false)?.let(onMessageActions)
+            tappedRow(failedOpensMenu = false)?.let(onMessageActions)
         }
         val routeByType = View.OnClickListener {
             val m = tappedRow() ?: return@OnClickListener
@@ -519,11 +520,11 @@ class MessageAdapter(
             }
         }
         holder.quotePreview.setOnClickListener {
-            tappedRow(retryIfFailed = false)?.let(onQuoteClick)
+            tappedRow(failedOpensMenu = false)?.let(onQuoteClick)
         }
         holder.quotePreview.setOnLongClickListener(longPress)
         holder.linkPreview.setOnClickListener {
-            tappedRow(retryIfFailed = false) ?: return@setOnClickListener
+            tappedRow(failedOpensMenu = false) ?: return@setOnClickListener
             (holder.linkPreview.tag as? String)?.let(onLinkPreviewClick)
         }
         holder.linkPreview.setOnLongClickListener(longPress)
@@ -561,7 +562,7 @@ class MessageAdapter(
         }
         holder.fileRow.setOnLongClickListener(longPress)
         holder.audioButtonFrame.setOnClickListener {
-            val m = tappedRow(retryIfFailed = !playableWhileFailed(holder))
+            val m = tappedRow(failedOpensMenu = !playableWhileFailed(holder))
                 ?: return@setOnClickListener
             if (Bridge.fileOnDisk(m)) {
                 AudioPlayer.playPause(m.filePath, m.chatId, m.id)
@@ -572,7 +573,7 @@ class MessageAdapter(
         }
         holder.audioButtonFrame.setOnLongClickListener(longPress)
         holder.reactionPill.setOnClickListener {
-            tappedRow(retryIfFailed = false)?.let(onReactionsClick)
+            tappedRow(failedOpensMenu = false)?.let(onReactionsClick)
         }
         holder.reactionPill.setOnLongClickListener(longPress)
         holder.audioSpeed.setOnClickListener { AudioPlayer.cycleSpeed() }
@@ -581,7 +582,7 @@ class MessageAdapter(
             override fun onStartTrackingTouch(sb: SeekBar?) { seekDragging = true }
             override fun onStopTrackingTouch(sb: SeekBar?) {
                 seekDragging = false
-                val m = tappedRow(retryIfFailed = !playableWhileFailed(holder)) ?: return
+                val m = tappedRow(failedOpensMenu = !playableWhileFailed(holder)) ?: return
                 if (AudioPlayer.currentMsgId == m.id) {
                     AudioPlayer.seekTo(sb?.progress ?: 0)
                 } else if (Bridge.fileOnDisk(m)) {

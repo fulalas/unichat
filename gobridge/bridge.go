@@ -1860,7 +1860,8 @@ func ResolveNumber(connId int, phone string) string {
 	if c == nil || phone == "" {
 		return ResolveNumberFailed
 	}
-	found, err := c.getClient().IsOnWhatsApp(context.TODO(), []string{phone})
+	client := c.getClient()
+	found, err := client.IsOnWhatsApp(context.TODO(), []string{phone})
 	if err != nil {
 		c.log(LogWarning, fmt.Sprintf("number lookup error %v", err))
 		return ResolveNumberFailed
@@ -1872,7 +1873,7 @@ func ResolveNumber(connId int, phone string) string {
 		if !r.PhoneNumber.IsEmpty() {
 			return strFromJid(r.PhoneNumber)
 		}
-		return strFromJid(r.JID)
+		return getChatId(client, &r.JID, nil)
 	}
 	return ""
 }
