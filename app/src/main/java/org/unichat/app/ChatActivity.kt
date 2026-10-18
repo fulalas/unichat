@@ -89,7 +89,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private lateinit var contextText: android.widget.TextView
     private var restoredScroll = false
     private var hasNewBelow = false
-    private var pendingVideoOpen: String? = null
     private val quoteJumpReturns = ArrayDeque<String>()
     @Volatile private var loadLimit = LOCAL_PAGE
     private var loadingMoreLocal = false
@@ -133,7 +132,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private var windowBottomDone = false
     private val windowFetching = HashSet<String>()
     private val windowFailed = HashSet<String>()
-    private var pendingWindowOpen: String? = null
     private val windowMedia = java.util.concurrent.Executors.newFixedThreadPool(2)
     private lateinit var toolbarTitle: android.widget.TextView
     private lateinit var toolbarSubtitle: android.widget.TextView
@@ -293,7 +291,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             },
             onImageClick = { msg -> openImageViewer(msg) },
             onDocumentClick = { msg -> openDocument(msg) },
-            onVideoOpen = { msg -> openVideo(msg) },
+            onVideoOpen = { msg -> openDocument(msg) },
             onLocationClick = { msg -> openLocation(msg) },
             onContactClick = { msg -> addContact(msg) },
             onContactMessage = { msg -> messageContact(msg) },
@@ -465,7 +463,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         main.removeCallbacks(searchRefresh)
         main.removeCallbacks(presenceTicker)
         releaseLocationRequests()
-        pendingVideoOpen = null
         if (seekQuotedId != null) clearSeek()
         dragSelect?.stopDrag()
         cancelHold()
@@ -546,7 +543,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 if (unreadJump != null && !restoredScroll && pendingJumpId == null && !hasStored) {
                     pendingJumpId = unreadJump
                 }
-                consumePendingVideo { id -> messages.find { it.id == id } }
                 val atBottom = isAtBottom()
                 val newest = messages.lastOrNull()
                 val newestChanged = newest != null &&
@@ -856,23 +852,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
             val fresh = Bridge.db.messagesByIds(chatId, ids).associateBy { it.id }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                consumePendingVideo { id -> fresh[id] }
                 adapter.refreshRows(fresh)
                 // Download state lives outside MessageRow, so a row whose transfer
                 // stopped diffs as unchanged and would never repaint on its own.
                 for (id in ids) adapter.refreshDownloadState(messageList, id)
             }
-        }
-    }
-
-    private fun consumePendingVideo(lookup: (String) -> MessageRow?) {
-        val id = pendingVideoOpen ?: return
-        val m = lookup(id) ?: return
-        if (m.filePath.isNotEmpty()) {
-            pendingVideoOpen = null
-            openMediaFile(m)
-        } else if (m.fileStatus == 3) {
-            pendingVideoOpen = null
         }
     }
 
@@ -886,7 +870,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun openSearch() {
         searchActive = true
-        pendingVideoOpen = null
         searchBar.visibility = android.view.View.VISIBLE
         searchInput.requestFocus()
         showKeyboard(searchInput)
@@ -947,7 +930,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         hitsLoading = false
         hitWindowLoading = false
         windowFailed.clear()
-        pendingWindowOpen = null
         searchLimit = SEARCH_LOAD_LIMIT
         searchCount.text = ""
         hideKeyboard(searchInput)
@@ -1145,10 +1127,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 val fresh = if (path.isEmpty()) msg.copy(fileStatus = 3)
                     else msg.copy(filePath = path, fileStatus = 2)
                 adapter.refreshRows(mapOf(msg.id to fresh))
-                if (pendingWindowOpen == msg.id) {
-                    pendingWindowOpen = null
-                    if (path.isNotEmpty()) openMediaFile(fresh)
-                }
             }
         }
     }
@@ -2166,15 +2144,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         openMediaFile(msg)
     }
 
-    private fun openVideo(msg: MessageRow) {
-        if (Bridge.fileOnDisk(msg)) {
-            openMediaFile(msg)
-            return
-        }
-        if (!windowMode) pendingVideoOpen = msg.id
-        downloadWithToast(msg)
-    }
-
     private fun openMediaFile(msg: MessageRow) {
         val (uri, mime) = providedFile(File(msg.filePath), "*/*") ?: run {
             Toast.makeText(this, R.string.no_app_for_file, Toast.LENGTH_SHORT).show()
@@ -2189,12 +2158,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private fun downloadWithToast(msg: MessageRow) {
         val running = if (windowMode) msg.id in windowFetching
         else Bridge.isDownloading(msg.chatId, msg.id)
-        if (windowMode) {
-            pendingWindowOpen = msg.id
-            fetchWindowMedia(msg, userInitiated = true)
-        } else {
-            Bridge.downloadFile(msg, userInitiated = true)
-        }
+        if (windowMode) fetchWindowMedia(msg, userInitiated = true)
+        else Bridge.downloadFile(msg, userInitiated = true)
         adapter.refreshDownloadState(messageList, msg.id)
         if (!running) Toast.makeText(this, R.string.downloading, Toast.LENGTH_SHORT).show()
     }
