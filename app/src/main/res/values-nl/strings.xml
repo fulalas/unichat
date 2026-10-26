@@ -183,6 +183,8 @@
     <string name="group_invite_label">Groepsuitnodiging</string>
     <string name="live_location_label">Live locatie</string>
     <string name="call_label">Oproep</string>
+    <string name="left_group_label">Heeft de groep verlaten</string>
+    <string name="removed_members">Heeft %1$s verwijderd</string>
     <string name="sticker_with_emoji">%1$s (sticker)</string>
     <string name="download">Downloaden</string>
     <string name="go_to_message">Naar het bericht</string>

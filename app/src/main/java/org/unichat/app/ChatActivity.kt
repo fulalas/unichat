@@ -2184,6 +2184,11 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         fun add(res: Int, action: () -> Unit) = actions.add(getString(res) to action)
 
+        if (msg.msgType in MEMBER_EVENT_TYPES) {
+            add(R.string.delete) { confirmDelete(listOf(msg)) }
+            showActionDialog(actions)
+            return
+        }
         val labelOnly = msg.msgType in LABEL_ONLY_TYPES && msg.text.isBlank()
 
         add(R.string.reply) { startReply(msg) }
@@ -2575,7 +2580,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val ready = ArrayList<MessageRow>()
         var stillSending = false
         for (msg in msgs) {
-            if (msg.msgType in LABEL_ONLY_TYPES && msg.text.isBlank()) continue
+            if (msg.msgType in LABEL_ONLY_TYPES && msg.text.isBlank() ||
+                msg.msgType in MEMBER_EVENT_TYPES
+            ) continue
             if (msg.msgType in FILE_MEDIA_TYPES && Bridge.stagedFileInUse(msg)) {
                 stillSending = true
                 continue

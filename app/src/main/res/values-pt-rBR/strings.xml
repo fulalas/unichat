@@ -183,6 +183,8 @@
     <string name="group_invite_label">Convite de grupo</string>
     <string name="live_location_label">Localização em tempo real</string>
     <string name="call_label">Chamada</string>
+    <string name="left_group_label">Saiu do grupo</string>
+    <string name="removed_members">Removeu %1$s</string>
     <string name="sticker_with_emoji">%1$s (figurinha)</string>
     <string name="download">Baixar</string>
     <string name="go_to_message">Ir para a mensagem</string>

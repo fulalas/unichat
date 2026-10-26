@@ -619,6 +619,11 @@ private const val UNREAD_REACTION_PAGE = 100
             }
             "messagePoll" -> msgType = "poll"
             "messageChatChangeTitle" -> text = "· " + content.optString("title")
+            "messageChatDeleteMember" -> {
+                val member = idFor(content.optLong("user_id"))
+                if (member == senderId) msgType = "left"
+                else { msgType = "removed"; text = member }
+            }
             else -> text = placeholderFor(content)
         }
 

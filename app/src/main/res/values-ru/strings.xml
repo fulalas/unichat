@@ -183,6 +183,8 @@
     <string name="group_invite_label">Приглашение в группу</string>
     <string name="live_location_label">Трансляция геопозиции</string>
     <string name="call_label">Звонок</string>
+    <string name="left_group_label">Покинул(а) группу</string>
+    <string name="removed_members">Удалил(а) %1$s</string>
     <string name="sticker_with_emoji">%1$s (стикер)</string>
     <string name="download">Скачать</string>
     <string name="go_to_message">Перейти к сообщению</string>

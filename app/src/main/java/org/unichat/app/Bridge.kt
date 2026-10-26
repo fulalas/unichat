@@ -927,6 +927,7 @@ object Bridge : EventListener {
     fun canEditCaption(msg: MessageRow): Boolean = proto(msg.chatId).canEditCaption(msg)
 
     fun canDeleteForEveryone(msg: MessageRow): Boolean = msg.fromMe &&
+        msg.msgType !in MEMBER_EVENT_TYPES &&
         System.currentTimeMillis() / 1000 - msg.timeSent < proto(msg.chatId).revokeWindowSeconds
 
     internal fun toastUi(resId: Int) {
@@ -2210,7 +2211,15 @@ object Bridge : EventListener {
     ) {
         if (incoming.id.isEmpty()) { Log.w(TAG, "message with empty id for ${incoming.chatId}"); return }
         val revoked = !incoming.fromMe && db.isRevoked(incoming.chatId, incoming.id)
-        val row = if (revoked) incoming.copy(isRead = true) else incoming
+        val row = when {
+            incoming.msgType in MEMBER_EVENT_TYPES -> incoming.copy(
+                text = incoming.text.split(',').filter { it.isNotEmpty() }
+                    .joinToString(", ") { db.displayName(it) },
+                isRead = true,
+            )
+            revoked -> incoming.copy(isRead = true)
+            else -> incoming
+        }
         db.upsertMessage(row)
         afterStore()
         if (bump && !revoked) {

@@ -189,6 +189,8 @@
     <string name="group_invite_label">Group invite</string>
     <string name="live_location_label">Live location</string>
     <string name="call_label">Call</string>
+    <string name="left_group_label">Left the group</string>
+    <string name="removed_members">Removed %1$s</string>
     <string name="sticker_with_emoji">%1$s (sticker)</string>
     <string name="download">Download</string>
     <string name="unread_overflow" translatable="false">99+</string>

@@ -2390,7 +2390,41 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 
 	case *events.MediaRetry:
 		handleMediaRetryEvent(c, evt)
+
+	case *events.GroupInfo:
+		handleGroupLeave(c, evt)
 	}
+}
+
+func handleGroupLeave(c *conn, evt *events.GroupInfo) {
+	client := c.getClient()
+	if client == nil || len(evt.Leave) == 0 {
+		return
+	}
+	chatId := getChatId(client, &evt.JID, nil)
+	senderId := ""
+	if evt.Sender != nil {
+		senderId = getUserId(client, &evt.JID, evt.Sender)
+	}
+	leaver := getUserId(client, &evt.JID, &evt.Leave[0])
+	ids := make([]string, 0, len(evt.Leave))
+	for i := range evt.Leave {
+		ids = append(ids, getUserId(client, nil, &evt.Leave[i]))
+	}
+	msgType, text := "removed", strings.Join(ids, ",")
+	if len(ids) == 1 && (senderId == "" || senderId == leaver) {
+		msgType, text, senderId = "left", "", leaver
+	} else if senderId == "" {
+		senderId = chatId
+	}
+	fromMe := false
+	if id := client.Store.ID; id != nil {
+		fromMe = senderId == strFromJid(id.ToNonAD()) || senderId == strFromJid(client.Store.LID.ToNonAD())
+	}
+	timeSent := evt.Timestamp.Unix()
+	msgId := fmt.Sprintf("leave-%d-%s", timeSent, ids[0])
+	c.listener.OnMessage(chatId, msgId, senderId, text, fromMe, timeSent, true, msgType,
+		"", 0, 0, 0, false, false, "", "", "", "", false)
 }
 
 func handleMediaRetryEvent(c *conn, evt *events.MediaRetry) {

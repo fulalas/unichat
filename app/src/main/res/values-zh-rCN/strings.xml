@@ -183,6 +183,8 @@
     <string name="group_invite_label">群组邀请</string>
     <string name="live_location_label">实时位置</string>
     <string name="call_label">通话</string>
+    <string name="left_group_label">已退出群组</string>
+    <string name="removed_members">移除了 %1$s</string>
     <string name="sticker_with_emoji">%1$s（贴纸）</string>
     <string name="download">下载</string>
     <string name="go_to_message">跳到该消息</string>

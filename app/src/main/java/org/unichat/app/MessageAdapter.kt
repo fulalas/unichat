@@ -896,6 +896,7 @@ class MessageAdapter(
             }
             in LABEL_ONLY_TYPES -> holder.text.text =
                 previewLabel(ctx, msg.msgType, "", emoji = true)
+            "removed" -> holder.text.text = previewLabel(ctx, msg.msgType, msg.text, emoji = true)
             else -> {
                 holder.text.text = highlighted(ctx, msg.text)
                 val emojiCount =

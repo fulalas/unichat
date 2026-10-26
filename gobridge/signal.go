@@ -819,6 +819,7 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 			return
 		}
 		if body == "" {
+			c.handleGroupLeave(client, content, chatID, senderID, fromMe, timeSent)
 			return
 		}
 		c.listener.OnMessage(
@@ -839,6 +840,35 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 		}
 		c.listener.OnChatState(chatID, senderID, state)
 	}
+}
+
+func (c *sgConn) handleGroupLeave(
+	client *signalmeow.Client, msg *signalpb.DataMessage, chatID, senderID string, fromMe bool, timeSent int64,
+) {
+	group := msg.GetGroupV2()
+	if len(group.GetGroupChange()) == 0 {
+		return
+	}
+	change, err := client.DecryptGroupChange(context.TODO(), group)
+	if err != nil {
+		c.log(LogWarning, fmt.Sprintf("decrypt group change error %v", err))
+		return
+	}
+	if len(change.DeleteMembers) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(change.DeleteMembers))
+	for _, id := range change.DeleteMembers {
+		ids = append(ids, SgIDPrefix+id.String())
+	}
+	msgType, text := "removed", strings.Join(ids, ",")
+	if len(ids) == 1 && ids[0] == senderID {
+		msgType, text = "left", ""
+	}
+	c.listener.OnMessage(
+		chatID, fmt.Sprintf("%d", msg.GetTimestamp()), senderID, text,
+		fromMe, timeSent, true, msgType, "", 0, 0, 0, false, false, "", "", "", "", false,
+	)
 }
 
 func (c *sgConn) resolveName(client *signalmeow.Client, bare string, chatID string) {

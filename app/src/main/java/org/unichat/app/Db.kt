@@ -91,6 +91,10 @@ fun previewLabel(
         "document" -> labeled("📎", R.string.document_label)
         "contact" -> labeled("👤", R.string.contact_label,
             text.lineSequence().firstOrNull().orEmpty())
+        "removed" -> {
+            val label = ctx.getString(R.string.removed_members, text)
+            if (emoji) "🚪 $label" else label
+        }
         in LABEL_ONLY_TYPES -> {
             val (icon, labelRes) = LABEL_ONLY_TYPES.getValue(msgType)
             val label = ctx.getString(labelRes)
@@ -118,7 +122,10 @@ val LABEL_ONLY_TYPES: Map<String, Pair<String, Int>> = mapOf(
     "groupinvite" to ("👥" to R.string.group_invite_label),
     "livelocation" to ("📍" to R.string.live_location_label),
     "call" to ("📞" to R.string.call_label),
+    "left" to ("🚪" to R.string.left_group_label),
 )
+
+val MEMBER_EVENT_TYPES = setOf("left", "removed")
 
 fun reactionPreview(
     ctx: Context, emoji: String?, who: String, msgType: String, msgText: String,

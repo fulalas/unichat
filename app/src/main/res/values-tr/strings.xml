@@ -183,6 +183,8 @@
     <string name="group_invite_label">Grup daveti</string>
     <string name="live_location_label">Canlı konum</string>
     <string name="call_label">Arama</string>
+    <string name="left_group_label">Gruptan ayrıldı</string>
+    <string name="removed_members">%1$s kişisini çıkardı</string>
     <string name="sticker_with_emoji">%1$s (çıkartma)</string>
     <string name="download">İndir</string>
     <string name="go_to_message">Mesaja git</string>
