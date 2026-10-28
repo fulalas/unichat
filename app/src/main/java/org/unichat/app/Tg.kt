@@ -1553,7 +1553,9 @@ private const val UNREAD_REACTION_PAGE = 100
         val arr = res.optJSONArray("messages") ?: return emptyList()
         val rows = ArrayList<MessageRow>(arr.length())
         for (i in 0 until arr.length()) {
-            val row = parseMessageSafe(arr.getJSONObject(i)) ?: continue
+            val m = arr.getJSONObject(i)
+            if (m.optJSONObject("sending_state") != null) continue
+            val row = parseMessageSafe(m) ?: continue
             val rowId = row.id.toLongOrNull() ?: continue
             if (if (newer) rowId > id else rowId < id) rows.add(row)
         }

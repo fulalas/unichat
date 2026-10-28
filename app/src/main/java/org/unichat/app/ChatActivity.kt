@@ -341,9 +341,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 updateScrollFab()
                 showFloatingDate()
                 maybeLoadOlder()
-                if (windowMode && lm.findLastVisibleItemPosition() >= adapter.itemCount - 6) {
-                    extendWindow(older = false)
-                }
+                if (windowMode && nearWindowBottom()) extendWindow(older = false)
             }
             override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) cancelHold()
@@ -824,7 +822,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 onDeepPage()
             } else if (rowIds != null) {
                 refreshRows(rowIds)
-            } else if (!windowMode) {
+            } else if (windowMode) {
+                onWindowChanged()
+            } else {
                 if (serverSearch) {
                     if (!hitWindowLoading) reload()
                 } else {
@@ -1058,6 +1058,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         hitWindowLoading = true
         searchExec.execute {
             val window = Bridge.searchContext(chatId, id)
+            val newest = newestStoredId()
             val names = contactNames()
             val quoteNames = quoteNamesFor(window, names)
             runOnUiThread {
@@ -1072,6 +1073,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 windowMode = true
                 windowTopDone = false
                 windowBottomDone = false
+                windowNewArrived = false
+                windowNewestSeen = newest
                 adapter.submit(window, names, quoteNames) {
                     scrollToMessage(id, toastIfMissing = false, center = true)
                 }
@@ -1079,7 +1082,45 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
     }
 
-    private fun extendWindow(older: Boolean) {
+    private var windowNewArrived = false
+    private var windowNewestSeen = ""
+
+    private fun nearWindowBottom() = lm.findLastVisibleItemPosition() >= adapter.itemCount - 6
+
+    private fun newestStoredId() = Bridge.db.recentMessages(chatId, 1).firstOrNull()?.id.orEmpty()
+
+    private fun onWindowChanged() {
+        val ids = adapter.messagesSnapshot().map { it.id }
+        val seq = windowSeq
+        io.execute {
+            val fresh = ids.chunked(500).flatMap { Bridge.db.messagesByIds(chatId, it) }
+                .associateBy { it.id }
+            val newest = newestStoredId()
+            runOnUiThread {
+                if (seq != windowSeq || !windowMode || isFinishing || isDestroyed) return@runOnUiThread
+                adapter.refreshRows(fresh)
+                if (newest.isEmpty() || newest == windowNewestSeen) return@runOnUiThread
+                val reachedEnd = adapter.indexOfMessage(windowNewestSeen) >= 0
+                windowNewestSeen = newest
+                windowBottomDone = false
+                if (reachedEnd && nearWindowBottom()) {
+                    if (windowLoading) windowNewArrived = true
+                    else extendWindow(older = false, follow = true)
+                } else {
+                    hasNewBelow = true
+                    updateScrollFab()
+                }
+            }
+        }
+    }
+
+    private fun recheckWindowBottom() {
+        if (!windowMode || !nearWindowBottom()) return
+        windowBottomDone = false
+        extendWindow(older = false, follow = true)
+    }
+
+    private fun extendWindow(older: Boolean, follow: Boolean = false) {
         if (!windowMode || windowLoading) return
         if (if (older) windowTopDone else windowBottomDone) return
         val rows = adapter.messagesSnapshot()
@@ -1102,11 +1143,18 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                 if (seq != windowSeq || !windowMode || isFinishing || isDestroyed) {
                     return@runOnUiThread
                 }
+                val recheck = windowNewArrived
+                windowNewArrived = false
                 if (merged.isEmpty()) {
                     if (older) windowTopDone = true else windowBottomDone = true
+                    if (recheck) messageList.post { recheckWindowBottom() }
                     return@runOnUiThread
                 }
-                adapter.submit(merged, names, quoteNames)
+                val stick = follow && isAtBottom()
+                adapter.submit(merged, names, quoteNames) {
+                    if (stick) messageList.scrollToPosition(adapter.itemCount - 1)
+                    if (recheck) messageList.post { recheckWindowBottom() }
+                }
             }
         }
     }
