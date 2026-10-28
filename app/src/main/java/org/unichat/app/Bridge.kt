@@ -1257,6 +1257,7 @@ object Bridge : EventListener {
             if (dir.lastModified() < cutoff) dir.deleteRecursively()
         }
         java.io.File(ctx.cacheDir, LinkPreview.IMAGE_DIR).deleteRecursively()
+        TgKept.sweep(ctx, db)
         val previewCutoff = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
         LinkPreview.imageDir(ctx).listFiles()?.forEach { f ->
             if (f.lastModified() < previewCutoff) f.delete()

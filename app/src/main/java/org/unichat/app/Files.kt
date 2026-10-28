@@ -99,6 +99,45 @@ object Thumbs {
     }
 }
 
+object TgKept {
+    private fun dir(ctx: Context) = File(ctx.filesDir, "tg/kept")
+
+    fun link(ctx: Context, chatId: String, msgId: String, path: String): String {
+        val dir = dir(ctx)
+        if (path.startsWith(dir.path + "/")) return path
+        val out = File(dir, "${chatId}_${msgId}_${File(path).name}".replace(UNSAFE_FILE_CHARS, "_"))
+        if (sameFile(out.path, path)) return out.path
+        val tmp = File(dir, "${out.name}.${Thread.currentThread().id}.tmp")
+        return try {
+            dir.mkdirs()
+            tmp.delete()
+            android.system.Os.link(path, tmp.path)
+            android.system.Os.rename(tmp.path, out.path)
+            tmp.delete()
+            out.path
+        } catch (_: Exception) {
+            tmp.delete()
+            path
+        }
+    }
+
+    private fun sameFile(a: String, b: String): Boolean = runCatching {
+        val x = android.system.Os.stat(a)
+        val y = android.system.Os.stat(b)
+        x.st_dev == y.st_dev && x.st_ino == y.st_ino
+    }.getOrDefault(false)
+
+    fun sweep(ctx: Context, db: Db) {
+        val inUse = db.tgFilePathsUnder(dir(ctx).path)
+        val cutoff = System.currentTimeMillis() / 1000 - 24 * 60 * 60
+        dir(ctx).listFiles()?.forEach { f ->
+            if (f.path in inUse) return@forEach
+            val changed = runCatching { android.system.Os.lstat(f.path).st_ctime }.getOrNull() ?: return@forEach
+            if (changed < cutoff) f.delete()
+        }
+    }
+}
+
 private val BYTE_UNITS = listOf("B", "KB", "MB", "GB", "TB")
 
 fun formatBytes(bytes: Long): String {

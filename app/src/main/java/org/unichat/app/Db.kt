@@ -649,6 +649,12 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         arrayOf(chatId)
     ) { it.getString(0) }
 
+    fun tgFilePathsUnder(dir: String): Set<String> = queryList(
+        "SELECT file_path FROM messages WHERE chat_id>='tg:' AND chat_id<'tg;' " +
+            "AND file_path!='' AND substr(file_path, 1, ?)=?",
+        arrayOf((dir.length + 1).toString(), "$dir/")
+    ) { it.getString(0) }.toSet()
+
     fun deleteChat(chatId: String) {
         val now = System.currentTimeMillis() / 1000
         val previous = deletedChats.put(chatId, now)

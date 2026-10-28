@@ -669,7 +669,10 @@ private const val UNREAD_REACTION_PAGE = 100
     }
 
     private fun storeMessage(msg: JSONObject, notify: Boolean = false) {
-        val row = parseMessage(msg) ?: return
+        val row = parseMessage(msg)?.let {
+            if (it.fromMe || it.filePath.isEmpty()) it
+            else it.copy(filePath = kept(it.chatId, it.id, it.filePath))
+        } ?: return
         if (row.fromMe && msg.optJSONObject("sending_state")
                 ?.optString("@type") == "messageSendingStatePending" &&
             !Bridge.db.hasMessage(row.chatId, row.id)
@@ -886,7 +889,11 @@ private const val UNREAD_REACTION_PAGE = 100
     private fun downloadRequest(fid: Int) = JSONObject().put("@type", "downloadFile")
         .put("file_id", fid).put("priority", 16).put("synchronous", false)
 
-    private fun fileDone(chatId: String, msgId: String, path: String, status: Int) {
+    private fun kept(chatId: String, msgId: String, path: String): String =
+        appContext?.let { TgKept.link(it, chatId, msgId, path) } ?: path
+
+    private fun fileDone(chatId: String, msgId: String, tdPath: String, status: Int) {
+        val path = if (status == 2 && tdPath.isNotEmpty()) kept(chatId, msgId, tdPath) else tdPath
         Bridge.db.setFileState(chatId, msgId, path, status)
         Bridge.notifyChatRow(chatId, msgId)
         Bridge.onFileTransferDone(chatId, msgId, path, status)
