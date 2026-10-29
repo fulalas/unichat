@@ -93,6 +93,8 @@ type conn struct {
 	historyActive    bool
 	mediaRetries map[string]*pendingMediaRetry
 	contactsSyncing bool
+	newslettersFetched bool
+	newsletterRoles    map[string]types.NewsletterRole
 }
 
 const mediaRetryTimeout = 60 * time.Second
@@ -259,6 +261,7 @@ func Init(dataDir string, listener EventListener) int {
 		state:        "disconnected",
 		timeReads:    make(map[string]time.Time),
 		mediaRetries: make(map[string]*pendingMediaRetry),
+		newsletterRoles: make(map[string]types.NewsletterRole),
 	}
 
 	if err := os.MkdirAll(dataDir+"/avatars", os.ModePerm); err != nil {
@@ -1989,7 +1992,7 @@ func SubscribePresence(connId int, userId string) {
 		return
 	}
 	userJid, err := types.ParseJID(userId)
-	if err != nil || userJid.Server == types.GroupServer {
+	if err != nil || (userJid.Server != types.DefaultUserServer && userJid.Server != types.HiddenUserServer) {
 		return
 	}
 	if err := c.getClient().SubscribePresence(context.TODO(), userJid); err != nil {
@@ -2202,6 +2205,57 @@ func requestContacts(c *conn) {
 	}
 
 	c.listener.OnContactsSynced()
+
+	requestNewsletters(c)
+}
+
+const newsletterFetchTimeout = 20 * time.Second
+
+func requestNewsletters(c *conn) {
+	mx.Lock()
+	fetched := c.newslettersFetched
+	mx.Unlock()
+	if fetched {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), newsletterFetchTimeout)
+	defer cancel()
+	newsletters, err := c.getClient().GetSubscribedNewsletters(ctx)
+	if err != nil {
+		c.log(LogWarning, fmt.Sprintf("get newsletters error %v", err))
+		return
+	}
+	valid := newsletters[:0]
+	roles := make(map[string]types.NewsletterRole)
+	for _, nl := range newsletters {
+		if nl == nil || nl.ID.Server != types.NewsletterServer || nl.ID.User == "" {
+			continue
+		}
+		valid = append(valid, nl)
+		if nl.ViewerMeta != nil {
+			roles[strFromJid(nl.ID)] = nl.ViewerMeta.Role
+		}
+	}
+	mx.Lock()
+	c.newsletterRoles = roles
+	c.newslettersFetched = true
+	mx.Unlock()
+	for _, nl := range valid {
+		if name := nl.ThreadMeta.Name.Text; name != "" {
+			c.listener.OnContact(strFromJid(nl.ID), name, "", false, false, false)
+		}
+	}
+}
+
+func NewsletterCanPost(connId int, chatId string) bool {
+	c := getConn(connId)
+	if c == nil {
+		return false
+	}
+	mx.Lock()
+	role := c.newsletterRoles[chatId]
+	mx.Unlock()
+	return role == types.NewsletterRoleOwner || role == types.NewsletterRoleAdmin
 }
 
 func ResolveChatId(connId int, chatId string) string {
@@ -2251,21 +2305,17 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 	if err != nil {
 		return cached
 	}
-	pic, err := c.getClient().GetProfilePictureInfo(context.TODO(), chatJid,
-		&whatsmeow.GetProfilePictureParams{Preview: preview})
-	if err != nil || pic == nil || len(pic.URL) == 0 {
-		return cached
+	var data []byte
+	if chatJid.Server == types.NewsletterServer {
+		data = newsletterPicture(c, chatJid, preview)
+	} else {
+		pic, err := c.getClient().GetProfilePictureInfo(context.TODO(), chatJid,
+			&whatsmeow.GetProfilePictureParams{Preview: preview})
+		if err == nil && pic != nil {
+			data = downloadAvatar(pic.URL)
+		}
 	}
-	resp, err := avatarHTTP.Get(pic.URL)
-	if err != nil {
-		return cached
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return cached
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAvatarBytes+1))
-	if err != nil || len(data) > maxAvatarBytes {
+	if data == nil {
 		return cached
 	}
 	tmp := fmt.Sprintf("%s.tmp%d", avatarPath, time.Now().UnixNano())
@@ -2281,6 +2331,50 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 }
 
 var avatarHTTP = &http.Client{Timeout: 20 * time.Second}
+
+func downloadAvatar(url string) []byte {
+	if url == "" {
+		return nil
+	}
+	resp, err := avatarHTTP.Get(url)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAvatarBytes+1))
+	if err != nil || len(data) > maxAvatarBytes {
+		return nil
+	}
+	return data
+}
+
+func newsletterPicture(c *conn, jid types.JID, preview bool) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), newsletterFetchTimeout)
+	defer cancel()
+	client := c.getClient()
+	meta, err := client.GetNewsletterInfo(ctx, jid)
+	if err != nil || meta == nil {
+		return nil
+	}
+	pic := &meta.ThreadMeta.Preview
+	if !preview && meta.ThreadMeta.Picture != nil {
+		pic = meta.ThreadMeta.Picture
+	}
+	if pic.URL != "" {
+		return downloadAvatar(pic.URL)
+	}
+	if pic.DirectPath == "" {
+		return nil
+	}
+	data, err := client.DownloadMediaWithOnlyPath(ctx, pic.DirectPath)
+	if err != nil || len(data) > maxAvatarBytes {
+		return nil
+	}
+	return data
+}
 
 const maxAvatarBytes = 8 << 20
 
@@ -2300,6 +2394,9 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
 
 	case *events.Connected:
+		mx.Lock()
+		c.newslettersFetched = false
+		mx.Unlock()
 		c.setState("connected")
 		go func() {
 			if err := c.getClient().SendPresence(context.TODO(), types.PresenceAvailable); err != nil {
@@ -2806,8 +2903,8 @@ type msgContent struct {
 	quotedText string
 	quotedType string
 	forwarded  bool
-	latitude  float64
-	longitude float64
+	latitude   float64
+	longitude  float64
 }
 
 func extractQuote(ci *waE2E.ContextInfo) (id string, text string, msgType string) {

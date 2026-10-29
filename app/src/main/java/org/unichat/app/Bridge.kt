@@ -248,6 +248,7 @@ object Bridge : EventListener {
         fun openChat(chatId: String) {}
         fun closeChat(chatId: String) {}
         fun subscribePresence(userId: String) {}
+        fun canPost(chatId: String): Boolean = true
 
         fun requestInitialHistory(chatId: String)
         fun requestHistoryPage(chatId: String)
@@ -607,6 +608,9 @@ object Bridge : EventListener {
                 Member(parts[0], parts[1], name)
             }.toList()
         }
+
+        override fun canPost(chatId: String): Boolean =
+            !isNewsletterId(chatId) || (connId >= 0 && Wmbridge.newsletterCanPost(connId, chatId))
 
         override fun peerInfo(chatId: String): PeerInfo {
             val phone = if (isPhoneId(chatId)) phoneLabel(chatId)
@@ -1938,6 +1942,8 @@ object Bridge : EventListener {
     class PeerInfo(val phone: String, val nickname: String, val about: String)
 
     fun peerInfo(chatId: String): PeerInfo = proto(chatId).peerInfo(chatId)
+
+    fun canPost(chatId: String): Boolean = proto(chatId).canPost(chatId)
 
     fun getAvatarPath(chatId: String): String =
         proto(chatId).avatarPath(chatId, big = false, cachedOnly = false)

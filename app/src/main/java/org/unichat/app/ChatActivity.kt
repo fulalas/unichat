@@ -62,6 +62,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private val serverSearch get() = Accounts.ofChat(chatId).serverSearch
     private lateinit var messageList: RecyclerView
+    private lateinit var composer: android.view.View
     private lateinit var lm: LinearLayoutManager
     private lateinit var scrollFab: android.view.View
     private lateinit var fabDot: android.view.View
@@ -254,6 +255,8 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
         messageList = findViewById(R.id.messageList)
         input = findViewById(R.id.messageInput)
+        composer = findViewById(R.id.composer)
+        updateComposer()
         attachButton = findViewById(R.id.attachButton)
         actionButton = findViewById(R.id.actionButton)
         recordTimer = findViewById(R.id.recordTimer)
@@ -474,6 +477,12 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onContactsChanged() {
         cachedContactNames = null
+        updateComposer()
+    }
+
+    private fun updateComposer() {
+        composer.visibility =
+            if (Bridge.canPost(chatId)) android.view.View.VISIBLE else android.view.View.GONE
     }
 
     private fun contactNames(): Map<String, String> =

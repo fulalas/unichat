@@ -11,6 +11,8 @@ fun isSgGroupId(id: String): Boolean {
     return bare.length != 36
 }
 
+fun isNewsletterId(id: String): Boolean = id.endsWith("@newsletter")
+
 fun isPhoneId(id: String): Boolean = id.endsWith("@s.whatsapp.net")
 
 fun phoneLabel(id: String): String =

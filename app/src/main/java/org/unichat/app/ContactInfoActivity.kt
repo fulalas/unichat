@@ -116,7 +116,7 @@ class ContactInfoActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private fun loadDetails() {
-        if (isGroup) return
+        if (isGroup || isNewsletterId(chatId)) return
         Io.lookup.execute {
             val info = Bridge.peerInfo(chatId)
             runOnUiThread {
