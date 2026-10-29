@@ -5,6 +5,8 @@ import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.BitmapDrawable
+import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
 import android.os.Handler
 import android.os.Looper
 import android.text.Spannable
@@ -14,6 +16,8 @@ import android.text.style.ForegroundColorSpan
 import android.util.LruCache
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -230,7 +234,7 @@ class MessageAdapter(
             when (msg.msgType) {
                 "document", in VIDEO_TYPES -> applyFileState(holder, msg)
                 "audio" -> applyAudioState(holder, msg)
-                in PICTURE_TYPES -> applyImageState(holder, msg)
+                in FRAMED_TYPES -> applyImageState(holder, msg)
             }
         }
     }
@@ -347,6 +351,9 @@ class MessageAdapter(
         val senderName: TextView = view.findViewById(R.id.senderName)
         val imageFrame: FrameLayout = view.findViewById(R.id.imageFrame)
         val image: ImageView = view.findViewById(R.id.messageImage)
+        val gifView: GifTextureView = view.findViewById(R.id.gifView)
+        val gifBadge: TextView = view.findViewById(R.id.gifBadge)
+        val gif = GifSlot(gifView)
         val imageTime: TextView = view.findViewById(R.id.imageTime)
         val imageSpinner: android.widget.ProgressBar = view.findViewById(R.id.imageSpinner)
         val forwardedLabel: TextView = view.findViewById(R.id.forwardedLabel)
@@ -395,6 +402,23 @@ class MessageAdapter(
     override fun onViewRecycled(holder: Holder) {
         super.onViewRecycled(holder)
         ImageLoader.clearAnimating(holder.image)
+        holder.gif.play("")
+    }
+
+    private var gifsActive = true
+
+    fun setGifsActive(recycler: RecyclerView, active: Boolean) {
+        gifsActive = active
+        for (i in 0 until recycler.childCount) {
+            val holder = recycler.getChildViewHolder(recycler.getChildAt(i)) as? Holder ?: continue
+            holder.current?.let { bindGif(holder, it) }
+        }
+    }
+
+    private fun bindGif(holder: Holder, msg: MessageRow) {
+        val gif = msg.msgType == "gif"
+        holder.gifView.visibility = if (gif) View.VISIBLE else View.GONE
+        holder.gif.play(if (gif && gifsActive && msg.filePath.isNotEmpty()) msg.filePath else "")
     }
 
     private fun applyWidthCaps(holder: Holder) {
@@ -433,6 +457,13 @@ class MessageAdapter(
             }
         }
         holder.image.clipToOutline = true
+        holder.gifView.outlineProvider = holder.image.outlineProvider
+        holder.gifView.clipToOutline = true
+        holder.image.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            val gif = holder.gifView
+            if (gif.visibility != View.VISIBLE) return@addOnLayoutChangeListener
+            if (gif.width != v.width || gif.height != v.height) gif.post { gif.requestLayout() }
+        }
 
 
         fun tappedRow(failedOpensMenu: Boolean = true): MessageRow? {
@@ -513,7 +544,7 @@ class MessageAdapter(
         holder.image.setOnClickListener {
             val m = tappedRow() ?: return@setOnClickListener
             if (Bridge.fileOnDisk(m)) {
-                onImageClick(m)
+                if (m.msgType == "gif") onVideoOpen(m) else onImageClick(m)
             } else {
                 onNeedDownload(m, true)
                 applyImageState(holder, m)
@@ -745,7 +776,7 @@ class MessageAdapter(
         ).joinToString(" · ") { ctx.getString(it) }
         val timeStr = if (label.isEmpty()) clock else ctx.getString(R.string.label_time, label, clock)
         val sticker = msg.msgType == "sticker"
-        val overlayTime = msg.msgType == "image" && msg.text.isEmpty()
+        val overlayTime = (msg.msgType == "image" || msg.msgType == "gif") && msg.text.isEmpty()
         val bareSticker = sticker && msg.text.isEmpty() &&
             msg.quotedId.isEmpty() && msg.quotedText.isEmpty() && !msg.forwarded &&
             !(isGroup && !msg.fromMe)
@@ -785,6 +816,8 @@ class MessageAdapter(
         }
 
         holder.imageFrame.visibility = View.GONE
+        holder.gifBadge.visibility = if (msg.msgType == "gif") View.VISIBLE else View.GONE
+        bindGif(holder, msg)
         if (msg.msgType !in PICTURE_TYPES) ImageLoader.clearAnimating(holder.image)
         holder.audioRow.visibility = View.GONE
         holder.audioMeta.visibility = View.GONE
@@ -795,14 +828,14 @@ class MessageAdapter(
         holder.text.textSize = 15f
         val density = ctx.resources.displayMetrics.density
         val padH: Int; val padV: Int
-        if (msg.msgType in PICTURE_TYPES) {
+        if (msg.msgType in FRAMED_TYPES) {
             val slim = if (bareSticker) 0 else (4 * density).toInt()
             padH = slim; padV = slim
         } else {
             padH = (10 * density).toInt(); padV = (6 * density).toInt()
         }
         holder.bubble.setPadding(padH, padV, padH, padV)
-        val capPad = if (msg.msgType in PICTURE_TYPES) (6 * density).toInt() else 0
+        val capPad = if (msg.msgType in FRAMED_TYPES) (6 * density).toInt() else 0
         holder.text.setPadding(capPad, if (capPad > 0) (2 * density).toInt() else 0, capPad, 0)
 
         holder.forwardedLabel.visibility = if (msg.forwarded) View.VISIBLE else View.GONE
@@ -844,7 +877,7 @@ class MessageAdapter(
         }
 
         when (msg.msgType) {
-            in PICTURE_TYPES -> {
+            in FRAMED_TYPES -> {
                 holder.imageFrame.visibility = View.VISIBLE
                 val bottomMargin = if (overlayTime) 0 else (2 * density).toInt()
                 if (holder.imageFrameBottomMargin != bottomMargin) {
@@ -1148,10 +1181,34 @@ object ImageLoader {
             imageView.setImageResource(R.drawable.image_placeholder)
         }
         val targetPx = if (sticker) 512 else imageView.maxWidth.coerceAtLeast(512)
-        if (waiting.await(path, imageView, sticker)) dispatchDecode(path, targetPx)
+        val video = msg.msgType == "gif" && msg.filePath.isNotEmpty()
+        if (waiting.await(path, imageView, sticker)) dispatchDecode(path, targetPx, video)
     }
 
-    private fun dispatchDecode(path: String, targetPx: Int) {
+    private fun videoFrame(path: String, maxDim: Int): Bitmap? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(path)
+            val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            if (w > maxDim || h > maxDim) {
+                val scale = maxDim.toFloat() / maxOf(w, h)
+                retriever.getScaledFrameAtTime(
+                    0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    (w * scale).toInt().coerceAtLeast(1), (h * scale).toInt().coerceAtLeast(1),
+                )
+            } else {
+                retriever.getFrameAtTime(0)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("ImageLoader", "video frame failed for $path", e)
+            null
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun dispatchDecode(path: String, targetPx: Int, video: Boolean = false) {
         executor.execute {
             var delivering = false
             val queued = waiting.peek(path)
@@ -1161,6 +1218,13 @@ object ImageLoader {
                 if (ready != null) {
                     delivering = true
                     main.post { deliverBitmap(path, ready) }
+                    return@execute
+                }
+                if (video) {
+                    val frame = videoFrame(path, targetPx) ?: return@execute
+                    cache.put(path, frame)
+                    delivering = true
+                    main.post { deliverBitmap(path, frame) }
                     return@execute
                 }
                 val drawable = try {
@@ -1183,7 +1247,7 @@ object ImageLoader {
                 }
             } finally {
                 if (!delivering && waiting.settle(path, queued).isNotEmpty()) {
-                    dispatchDecode(path, targetPx)
+                    dispatchDecode(path, targetPx, video)
                 }
             }
         }
@@ -1246,4 +1310,96 @@ object ImageLoader {
             null
         }
     }
+}
+
+class GifTextureView(context: android.content.Context, attrs: android.util.AttributeSet?) :
+    TextureView(context, attrs) {
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        val image = (parent as? View)?.findViewById<View>(R.id.messageImage)
+        if (image == null) super.onMeasure(widthSpec, heightSpec)
+        else setMeasuredDimension(image.measuredWidth, image.measuredHeight)
+    }
+}
+
+class GifSlot(private val view: TextureView) : TextureView.SurfaceTextureListener {
+    private var path = ""
+    private var player: MediaPlayer? = null
+    private var surface: Surface? = null
+    private var videoW = 0
+    private var videoH = 0
+
+    init {
+        view.surfaceTextureListener = this
+    }
+
+    fun play(newPath: String) {
+        if (newPath == path) return
+        release()
+        path = newPath
+        if (path.isNotEmpty()) view.surfaceTexture?.let { start(it) }
+    }
+
+    private fun start(texture: android.graphics.SurfaceTexture) {
+        val s = Surface(texture)
+        val mp = MediaPlayer()
+        surface = s
+        player = mp
+        try {
+            mp.setSurface(s)
+            mp.setDataSource(path)
+            mp.isLooping = true
+            mp.setVolume(0f, 0f)
+            mp.setOnPreparedListener { it.start() }
+            mp.setOnVideoSizeChangedListener { _, w, h ->
+                videoW = w
+                videoH = h
+                fitVideo()
+            }
+            mp.setOnInfoListener { _, what, _ ->
+                if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) view.alpha = 1f
+                false
+            }
+            mp.setOnErrorListener { _, _, _ ->
+                release()
+                true
+            }
+            mp.prepareAsync()
+        } catch (e: Exception) {
+            android.util.Log.w("GifSlot", "play failed for $path", e)
+            release()
+        }
+    }
+
+    private fun fitVideo() {
+        val vw = view.width.toFloat()
+        val vh = view.height.toFloat()
+        if (videoW <= 0 || videoH <= 0 || vw <= 0f || vh <= 0f) return
+        val scale = minOf(vw / videoW, vh / videoH)
+        val m = android.graphics.Matrix()
+        m.setScale(videoW * scale / vw, videoH * scale / vh, vw / 2, vh / 2)
+        view.setTransform(m)
+    }
+
+    private fun release() {
+        view.alpha = 0f
+        player?.release()
+        player = null
+        surface?.release()
+        surface = null
+    }
+
+    override fun onSurfaceTextureAvailable(texture: android.graphics.SurfaceTexture, w: Int, h: Int) {
+        if (path.isNotEmpty() && player == null) start(texture)
+    }
+
+    override fun onSurfaceTextureDestroyed(texture: android.graphics.SurfaceTexture): Boolean {
+        release()
+        return true
+    }
+
+    override fun onSurfaceTextureSizeChanged(texture: android.graphics.SurfaceTexture, w: Int, h: Int) {
+        fitVideo()
+    }
+
+    override fun onSurfaceTextureUpdated(texture: android.graphics.SurfaceTexture) {}
 }

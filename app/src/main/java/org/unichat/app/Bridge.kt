@@ -107,6 +107,17 @@ object Bridge : EventListener {
     }
 
     @Volatile private var warmingUp = false
+
+    private fun typeWaGifs(ctx: Context) {
+        val gifs = db.waVideoFileIds()
+            .filter { Wmbridge.isGifFileId(it.third) }
+            .map { it.first to it.second }
+        db.setMsgTypes(gifs, "gif")
+        Prefs.setWaGifsTyped(ctx)
+        if (gifs.isEmpty()) return
+        for (chatId in gifs.mapTo(HashSet()) { it.first }) notifyChat(chatId)
+        notifyChatsChanged()
+    }
     private var pendingSwept = false
 
     @Synchronized
@@ -129,6 +140,7 @@ object Bridge : EventListener {
             AudioPlayer.onCompleted = { _, chatId, msgId -> chainNextVoice(chatId, msgId) }
             AudioPlayer.onPlayStarted = { _, chatId, msgId -> markVoicePlayed(chatId, msgId) }
             executor.execute { cleanStaleCache(appContext) }
+            if (!Prefs.waGifsTyped(appContext)) executor.execute { typeWaGifs(appContext) }
         }
         return connId >= 0
     }
@@ -212,6 +224,9 @@ object Bridge : EventListener {
         fun sendVideo(
             chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
             viewOnce: Boolean,
+        ): String
+        fun sendGif(
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
         ): String
         fun sendAudio(
             chatId: String, msgId: String, path: String, seconds: Int, quoted: MessageRow?,
@@ -310,6 +325,11 @@ object Bridge : EventListener {
             viewOnce: Boolean,
         ): String =
             Signal.sendAttachment(chatId, msgId, path, caption, mimeOfPath(path, "video/mp4"))
+        override fun sendGif(
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
+        ): String = Signal.sendAttachment(
+            chatId, msgId, path, caption, mimeOfPath(path, "video/mp4"), gif = true,
+        )
         override fun sendAudio(
             chatId: String, msgId: String, path: String, seconds: Int, quoted: MessageRow?,
             waveform: ByteArray, viewOnce: Boolean,
@@ -428,7 +448,16 @@ object Bridge : EventListener {
         ): String {
             val (qid, qtext, qsender) = quoteArgs(quoted)
             return Wmbridge.sendVideoMessage(
-                connId, chatId, msgId, path, caption, qid, qtext, qsender, viewOnce
+                connId, chatId, msgId, path, caption, qid, qtext, qsender, viewOnce, false
+            )
+        }
+
+        override fun sendGif(
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
+        ): String {
+            val (qid, qtext, qsender) = quoteArgs(quoted)
+            return Wmbridge.sendVideoMessage(
+                connId, chatId, msgId, path, caption, qid, qtext, qsender, false, true
             )
         }
 
@@ -635,6 +664,10 @@ object Bridge : EventListener {
             chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
             viewOnce: Boolean,
         ): String = Tg.sendVideo(chatId, path, caption, quoted?.id ?: "", viewOnce)
+
+        override fun sendGif(
+            chatId: String, msgId: String, path: String, caption: String, quoted: MessageRow?,
+        ): String = Tg.sendGif(chatId, path, caption, quoted?.id ?: "")
 
         override fun sendAudio(
             chatId: String, msgId: String, path: String, seconds: Int, quoted: MessageRow?,
@@ -1175,6 +1208,7 @@ object Bridge : EventListener {
     ): String = when (m.msgType) {
         "image", "sticker" -> p.sendImage(target, msgId, m.filePath, m.text, quoted, false)
         in VIDEO_TYPES -> p.sendVideo(target, msgId, m.filePath, m.text, quoted, false)
+        "gif" -> p.sendGif(target, msgId, m.filePath, m.text, quoted)
         "audio" -> p.sendAudio(
             target, msgId, m.filePath, TimeFormat.parseSeconds(m.text), quoted, ByteArray(0), false
         )
@@ -1192,7 +1226,7 @@ object Bridge : EventListener {
 
     private val retrying = ConcurrentHashMap.newKeySet<String>()
 
-    private val NEEDS_LOCAL_FILE = PICTURE_TYPES + VIDEO_TYPES + setOf("audio", "document")
+    private val NEEDS_LOCAL_FILE = FRAMED_TYPES + VIDEO_TYPES + setOf("audio", "document")
 
     private val RETRY_DELAYS_SECONDS = longArrayOf(2, 4, 8, 16, 32, 64, 64, 64, 64, 64)
     private val retryScheduler = Executors.newSingleThreadScheduledExecutor()
@@ -2261,7 +2295,7 @@ object Bridge : EventListener {
         }
         val wantsMedia = when (row.msgType) {
             "audio" -> fetchMedia || (!row.fromMe && !row.isRead)
-            in PICTURE_TYPES -> fetchMedia
+            in FRAMED_TYPES -> fetchMedia
             else -> false
         }
         if (wantsMedia && row.fileId.isNotEmpty() && row.filePath.isEmpty()) {

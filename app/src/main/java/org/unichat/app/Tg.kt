@@ -575,7 +575,8 @@ private const val UNREAD_REACTION_PAGE = 100
             }
             "messageVideoNote" -> msgType = "videonote"
             "messageAnimation" -> {
-                msgType = "video"
+                val mime = content.getJSONObject("animation").optString("mime_type")
+                msgType = if (mime == "image/gif") "image" else "gif"
                 text = markedText(content.optJSONObject("caption"))
             }
             "messageVoiceNote" -> {
@@ -694,7 +695,8 @@ private const val UNREAD_REACTION_PAGE = 100
             }
             applyReactions(row.chatId, row.id, msg.optJSONObject("interaction_info"), preview = false)
             if (row.played) Bridge.db.setPlayed(row.chatId, row.id)
-            if (row.msgType == "videonote") {
+            val animation = msg.optJSONObject("content")?.optString("@type") == "messageAnimation"
+            if (row.msgType == "videonote" || animation) {
                 Bridge.db.setMsgType(row.chatId, row.id, row.msgType)
             }
             if (row.filePath.isEmpty()) storeThumb(row.chatId, row.id, msg)
@@ -710,7 +712,8 @@ private const val UNREAD_REACTION_PAGE = 100
 
     private fun storeThumb(chatId: String, msgId: String, msg: JSONObject) {
         val content = msg.optJSONObject("content") ?: return
-        val mini = (content.optJSONObject("photo") ?: content.optJSONObject("sticker"))
+        val mini = (content.optJSONObject("photo") ?: content.optJSONObject("sticker")
+            ?: content.optJSONObject("animation"))
             ?.optJSONObject("minithumbnail") ?: return
         val encoded = mini.optString("data")
         if (encoded.isEmpty()) return
@@ -1017,7 +1020,8 @@ private const val UNREAD_REACTION_PAGE = 100
     private fun typeOf(contentType: String): String = when (contentType) {
         "messagePhoto" -> "image"
         "messageSticker" -> "sticker"
-        "messageVideo", "messageAnimation" -> "video"
+        "messageVideo" -> "video"
+        "messageAnimation" -> "gif"
         "messageVideoNote" -> "videonote"
         "messageVoiceNote" -> "audio"
         "messageAudio", "messageDocument" -> "document"
@@ -1149,6 +1153,18 @@ private const val UNREAD_REACTION_PAGE = 100
                     .put("caption", formattedText(caption)),
                 chatId, viewOnce,
             ),
+            quotedId,
+        )
+
+    fun sendGif(chatId: String, path: String, caption: String, quotedId: String = ""): String =
+        sendMessage(
+            chatId,
+            JSONObject().put("@type", "inputMessageAnimation")
+                .put(
+                    "animation",
+                    JSONObject().put("@type", "inputAnimation").put("animation", inputLocalFile(path))
+                )
+                .put("caption", formattedText(caption)),
             quotedId,
         )
 

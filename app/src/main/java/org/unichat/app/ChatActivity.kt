@@ -31,7 +31,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         private const val DEEP_IDLE_ROUNDS = 3
         private const val LOCAL_PAGE = 500
         private const val RECORD_WAKE_LOCK_MS = 30 * 60 * 1000L
-        private val FILE_MEDIA_TYPES = PICTURE_TYPES + VIDEO_TYPES + setOf("audio", "document")
+        private val FILE_MEDIA_TYPES = FRAMED_TYPES + VIDEO_TYPES + setOf("audio", "document")
         private const val QUOTE_CHARS = 300
         private const val STATE_PICK_VIEW_ONCE = "pickViewOnce"
         private const val MENTION_ROWS = 5
@@ -430,6 +430,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         updateSubtitle()
         if (searchActive) Bridge.markChatRead(chatId) else reload(markRead = true)
         adapter.refreshAudioRows(messageList)
+        adapter.setGifsActive(messageList, true)
         if (AudioPlayer.currentPath != null) main.post(audioTicker)
     }
 
@@ -459,6 +460,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         captureRecordingAsPending()
         releaseRecordWakeLock()
         main.removeCallbacks(audioTicker)
+        adapter.setGifsActive(messageList, false)
         main.removeCallbacks(searchDebounce)
         main.removeCallbacks(searchRefresh)
         main.removeCallbacks(presenceTicker)
@@ -2296,7 +2298,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         }
         val prefix = when {
             msg.msgType in PICTURE_TYPES -> "IMG"
-            msg.msgType in VIDEO_TYPES -> "VID"
+            msg.msgType in VIDEO_TYPES || msg.msgType == "gif" -> "VID"
             else -> "AUD"
         }
         val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)

@@ -280,8 +280,8 @@ object Signal : EventListener {
 
     fun sendAttachment(
         chatId: String, msgId: String, path: String, caption: String, mime: String,
-        voiceNote: Boolean = false,
-    ): String = Wmbridge.signalSendAttachment(chatId, msgId, path, caption, mime, voiceNote)
+        voiceNote: Boolean = false, gif: Boolean = false,
+    ): String = Wmbridge.signalSendAttachment(chatId, msgId, path, caption, mime, voiceNote, gif)
 
     fun sendContact(chatId: String, msgId: String, name: String, numbers: List<String>): String =
         Wmbridge.signalSendContact(chatId, msgId, name, numbers.joinToString(","))

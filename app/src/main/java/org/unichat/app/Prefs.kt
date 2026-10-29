@@ -15,6 +15,7 @@ object Prefs {
     private const val KEY_SG_DISCOVERABLE = "sg_discoverable"
     private const val KEY_SG_READ_RECEIPTS = "sg_read_receipts"
     private const val KEY_SG_CONTACTS_RESTORED = "sg_contacts_restored"
+    private const val KEY_WA_GIFS_TYPED = "wa_gifs_typed"
 
     const val FONT_MIN = 0.8f
     const val FONT_MAX = 1.6f
@@ -96,6 +97,10 @@ object Prefs {
 
     fun setSgContactsRestored(ctx: Context, done: Boolean) =
         prefs(ctx).edit().putBoolean(KEY_SG_CONTACTS_RESTORED, done).apply()
+
+    fun waGifsTyped(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_WA_GIFS_TYPED, false)
+
+    fun setWaGifsTyped(ctx: Context) = prefs(ctx).edit().putBoolean(KEY_WA_GIFS_TYPED, true).apply()
 
     fun tgLinked(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_TG_LINKED, false)
 

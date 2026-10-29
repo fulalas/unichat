@@ -782,7 +782,7 @@ func (c *sgConn) handleChatEvent(evt *events.ChatEvent) {
 		}
 		if atts := content.GetAttachments(); len(atts) > 0 {
 			for i, att := range atts {
-				kind := sgAttachmentKind(att.GetContentType(), att.GetFlags()&uint32(signalpb.AttachmentPointer_VOICE_MESSAGE) != 0)
+				kind := sgAttachmentKind(att.GetContentType(), att.GetFlags())
 				caption := ""
 				id := msgID
 				if i == 0 {
@@ -1191,12 +1191,14 @@ func sgEchoOwn(c *sgConn, chatId, msgID, text, msgType, fileID string, fileSize 
 	c.listener.OnChat(chatId, "", 0, false, timeSent)
 }
 
-func sgAttachmentKind(mime string, voiceNote bool) string {
+func sgAttachmentKind(mime string, flags uint32) string {
 	switch {
-	case voiceNote, strings.HasPrefix(mime, "audio/"):
+	case flags&uint32(signalpb.AttachmentPointer_VOICE_MESSAGE) != 0, strings.HasPrefix(mime, "audio/"):
 		return "audio"
 	case strings.HasPrefix(mime, "image/"):
 		return "image"
+	case strings.HasPrefix(mime, "video/") && flags&uint32(signalpb.AttachmentPointer_GIF) != 0:
+		return "gif"
 	case strings.HasPrefix(mime, "video/"):
 		return "video"
 	default:
@@ -1228,7 +1230,7 @@ func sgParseFileID(fileID string) (*signalpb.AttachmentPointer, error) {
 const sgMaxAttachmentBytes = 100 << 20
 
 func SignalSendAttachment(
-	chatId string, msgId string, path string, caption string, mime string, voiceNote bool,
+	chatId string, msgId string, path string, caption string, mime string, voiceNote bool, gif bool,
 ) string {
 	c, client, _ := sgActive()
 	if client == nil {
@@ -1262,6 +1264,9 @@ func SignalSendAttachment(
 	if voiceNote {
 		flags := uint32(signalpb.AttachmentPointer_VOICE_MESSAGE)
 		ptr.Flags = &flags
+	} else if gif {
+		flags := uint32(signalpb.AttachmentPointer_GIF)
+		ptr.Flags = &flags
 	}
 
 	dm := &signalpb.DataMessage{
@@ -1271,7 +1276,7 @@ func SignalSendAttachment(
 	if caption != "" {
 		dm.Body = proto.String(caption)
 	}
-	kind := sgAttachmentKind(mime, voiceNote)
+	kind := sgAttachmentKind(mime, ptr.GetFlags())
 	label := caption
 	if kind == "document" && label == "" {
 		label = filepath.Base(path)

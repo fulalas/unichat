@@ -1132,7 +1132,23 @@ func SendImageMessage(connId int, chatId string, msgId string, filePath string, 
 		})
 }
 
-func SendVideoMessage(connId int, chatId string, msgId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string, viewOnce bool) string {
+func IsGifFileId(fileId string) bool {
+	kind, encoded, found := strings.Cut(fileId, ":")
+	if !found || kind != "vid" {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return false
+	}
+	var m waE2E.VideoMessage
+	if err := proto.Unmarshal(raw, &m); err != nil {
+		return false
+	}
+	return m.GetGifPlayback()
+}
+
+func SendVideoMessage(connId int, chatId string, msgId string, filePath string, caption string, quotedId string, quotedText string, quotedSender string, viewOnce bool, gif bool) string {
 	c := getConn(connId)
 	if c == nil {
 		return ""
@@ -1157,6 +1173,9 @@ func SendVideoMessage(connId int, chatId string, msgId string, filePath string, 
 			}
 			if viewOnce {
 				videoMessage.ViewOnce = proto.Bool(true)
+			}
+			if gif {
+				videoMessage.GifPlayback = proto.Bool(true)
 			}
 			videoMessage.ContextInfo = buildQuoteContext(quotedId, quotedText, quotedSender)
 			out := &waE2E.Message{VideoMessage: &videoMessage}
@@ -3024,6 +3043,9 @@ func getMessageContent(msg *waE2E.Message, ownSend bool) (msgContent, bool) {
 		m := fromContext(vid.GetContextInfo())
 		m.text, m.msgType, m.fileId = vid.GetCaption(), "video", encodeFileId("vid", vid)
 		m.fileSize = int64(vid.GetFileLength())
+		if vid.GetGifPlayback() {
+			m.msgType, m.thumb = "gif", vid.GetJPEGThumbnail()
+		}
 		return m, true
 	}
 	if ptv := msg.GetPtvMessage(); ptv != nil {

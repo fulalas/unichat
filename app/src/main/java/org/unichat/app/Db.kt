@@ -79,6 +79,7 @@ fun previewLabel(
         "image" -> labeled("📷", R.string.photo_label)
         "sticker" -> labeled("🩹", R.string.sticker_label)
         in VIDEO_TYPES -> labeled("🎥", R.string.video_label)
+        "gif" -> labeled("🎞️", R.string.gif_label)
         "location" -> {
             val base = labeled("📍", R.string.location_label)
             if (detail.isEmpty()) base else "$base: $detail"
@@ -108,7 +109,9 @@ val PICTURE_TYPES = setOf("image", "sticker")
 
 val VIDEO_TYPES = setOf("video", "videonote")
 
-val CAPTION_TYPES = setOf("image", "video")
+val FRAMED_TYPES = PICTURE_TYPES + "gif"
+
+val CAPTION_TYPES = setOf("image", "video", "gif")
 
 const val UNDECRYPTABLE_TYPE = "undecryptable"
 
@@ -915,6 +918,22 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
             "WHERE c.phone=? AND c.id LIKE ? LIMIT 1",
         arrayOf(phone, "$prefix%")
     ) { it.getString(0) }
+
+    fun waVideoFileIds(): List<Triple<String, String, String>> = queryList(
+        "SELECT chat_id, id, file_id FROM messages WHERE msg_type='video' AND file_id LIKE 'vid:%'",
+        null,
+    ) { Triple(it.getString(0), it.getString(1), it.getString(2)) }
+
+    fun setMsgTypes(rows: List<Pair<String, String>>, msgType: String) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for ((chatId, msgId) in rows) setMsgType(chatId, msgId, msgType)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     fun setMsgType(chatId: String, msgId: String, msgType: String) {
         writableDatabase.execSQL(

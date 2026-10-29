@@ -249,6 +249,29 @@
                 android:scaleType="fitCenter"
                 android:contentDescription="@null" />
 
+            <org.unichat.app.GifTextureView
+                android:id="@+id/gifView"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:alpha="0"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/gifBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top|start"
+                android:layout_margin="6dp"
+                android:background="@drawable/image_time_bg"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:paddingTop="1dp"
+                android:paddingBottom="1dp"
+                android:text="@string/gif_label"
+                android:textColor="#FFFFFFFF"
+                android:textSize="11sp"
+                android:visibility="gone" />
+
             <ProgressBar
                 android:id="@+id/imageSpinner"
                 android:layout_width="32dp"

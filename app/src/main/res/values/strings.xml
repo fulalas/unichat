@@ -175,6 +175,7 @@
     <string name="photo_label">Photo</string>
     <string name="sticker_label">Sticker</string>
     <string name="video_label">Video</string>
+    <string name="gif_label" translatable="false">GIF</string>
     <string name="view_once_label">View once (open on your other device)</string>
     <string name="undecryptable_label">Waiting for this message</string>
     <string name="document_label">File</string>
