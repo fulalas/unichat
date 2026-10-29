@@ -153,7 +153,6 @@ class ChatListAdapter(
         holder.itemView.foreground = if (chat.id in selection) selectedTint(accent) else null
         holder.onlineDot.visibility = if (chat.online) View.VISIBLE else View.GONE
         val real = !PhoneBook.isPhoneEntry(chat.id)
-        if (real && !chat.isGroup) Bridge.subscribePresence(chat.id)
         if (real) AvatarLoader.load(chat.id, name, holder.avatar, AvatarLoader.dp(holder.avatar, 44))
         else holder.avatar.setImageBitmap(
             AvatarLoader.initials(name, AvatarLoader.dp(holder.avatar, 44))

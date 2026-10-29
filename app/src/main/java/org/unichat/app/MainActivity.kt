@@ -99,6 +99,8 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         syncWatchedChats()
         refreshDayIfChanged()
         scheduleMidnightRefresh()
+        mainHandler.removeCallbacks(presenceTicker)
+        mainHandler.post(presenceTicker)
     }
 
     override fun onStop() {
@@ -106,6 +108,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         started = false
         dragSelect?.stopDrag()
         syncWatchedChats()
+        mainHandler.removeCallbacks(presenceTicker)
         chatList.removeCallbacks(midnightRefresh)
         chatList.removeCallbacks(bgReloadRelease)
         bgReloadCooldown = false
@@ -218,7 +221,8 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             val last = lm.findLastVisibleItemPosition() + 2
             for (pos in first..last) {
                 val row = adapter.rowAt(pos) ?: continue
-                if (!row.isGroup && Tg.isTgId(row.id)) wanted.add(row.id)
+                if (row.isGroup || PhoneBook.isPhoneEntry(row.id)) continue
+                if (Tg.isTgId(row.id)) wanted.add(row.id) else Bridge.subscribePresence(row.id)
             }
         }
         for (id in watched - wanted) Bridge.watchChatActions(id, false)
@@ -242,6 +246,13 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
     }
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private val presenceTicker = object : Runnable {
+        override fun run() {
+            syncWatchedChats()
+            mainHandler.postDelayed(this, Bridge.PRESENCE_TICK_MS)
+        }
+    }
     private val filterDebounce = Runnable { applyFilter() }
 
     private fun applyFilter() {

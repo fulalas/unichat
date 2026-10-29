@@ -1986,6 +1986,24 @@ func MarkVoicePlayed(connId int, chatId string, senderId string, msgId string) {
 	markReceipt(c, chatId, senderId, msgId, time.Now(), types.ReceiptTypePlayed)
 }
 
+func SetOnline(connId int, online bool) {
+	c := getConn(connId)
+	if c == nil {
+		return
+	}
+	client := c.getClient()
+	if client == nil || !client.IsConnected() || client.Store.ID == nil || client.Store.PushName == "" {
+		return
+	}
+	presence := types.PresenceUnavailable
+	if online {
+		presence = types.PresenceAvailable
+	}
+	if err := client.SendPresence(context.TODO(), presence); err != nil {
+		c.log(LogWarning, fmt.Sprintf("send presence error %v", err))
+	}
+}
+
 func SubscribePresence(connId int, userId string) {
 	c := getConn(connId)
 	if c == nil {
@@ -2398,11 +2416,6 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 		c.newslettersFetched = false
 		mx.Unlock()
 		c.setState("connected")
-		go func() {
-			if err := c.getClient().SendPresence(context.TODO(), types.PresenceAvailable); err != nil {
-				c.log(LogWarning, fmt.Sprintf("send presence error %v", err))
-			}
-		}()
 
 	case *events.Disconnected:
 		c.setState("disconnected")

@@ -1442,7 +1442,8 @@ object Bridge : EventListener {
 
     private val presenceSubscribed = ConcurrentHashMap<String, Long>()
 
-    private const val PRESENCE_MEMO_MS = 25_000L
+    const val PRESENCE_TICK_MS = 30_000L
+    private const val PRESENCE_MEMO_MS = PRESENCE_TICK_MS - 5_000L
 
     fun subscribePresence(userId: String) {
         val now = android.os.SystemClock.elapsedRealtime()
@@ -1450,6 +1451,28 @@ object Bridge : EventListener {
         if (last != null && now - last < PRESENCE_MEMO_MS) return
         presenceSubscribed[userId] = now
         proto(userId).subscribePresence(userId)
+    }
+
+    @Volatile private var uiVisible = false
+
+    private val onlineTicker = object : Runnable {
+        override fun run() {
+            sendOnline()
+            main.postDelayed(this, PRESENCE_TICK_MS)
+        }
+    }
+
+    fun setUiVisible(visible: Boolean) {
+        uiVisible = visible
+        main.removeCallbacks(onlineTicker)
+        Tg.setOnline(visible)
+        if (visible) main.post(onlineTicker) else sendOnline()
+    }
+
+    private fun sendOnline() {
+        if (state != "connected") return
+        val on = uiVisible
+        executor.execute { Wmbridge.setOnline(connId, on) }
     }
 
     private val userRequestedDownloads = CopyOnWriteArraySet<String>()
@@ -2116,6 +2139,7 @@ object Bridge : EventListener {
         if (state == "connected" && !wasConnected) {
             reconcileMutes()
             presenceSubscribed.clear()
+            sendOnline()
         }
         notifyAccountState(ProtoPicker.WA, state)
     }
@@ -2230,6 +2254,7 @@ object Bridge : EventListener {
         }
         db.upsertMessage(row)
         afterStore()
+        if (notify && !row.fromMe && !row.edited) clearChatActor(row.chatId, row.senderId)
         if (bump && !revoked) {
             val kept = if (row.fromMe) db.storedTime(row.chatId, row.id) else null
             db.bumpChat(row.chatId, kept ?: row.timeSent)
@@ -2451,6 +2476,22 @@ object Bridge : EventListener {
                 main.postDelayed(clearer, 15000)
             }
             recomputeChatState(chatId)
+        }
+    }
+
+    private fun clearChatActor(chatId: String, userId: String) {
+        if (!chatStates.containsKey(chatId)) return
+        val group = isGroupId(chatId)
+        main.post {
+            val actors = chatActors[chatId] ?: return@post
+            val gone = if (group) listOf(userId) else actors.keys.toList()
+            var changed = false
+            for (id in gone) {
+                if (actors.remove(id) == null) continue
+                stateClearers.remove(chatId + KEY_SEP + id)?.let { main.removeCallbacks(it) }
+                changed = true
+            }
+            if (changed) recomputeChatState(chatId)
         }
     }
 

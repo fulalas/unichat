@@ -192,6 +192,7 @@ private const val UNREAD_REACTION_PAGE = 100
                     if (!ready) {
                         ready = true
                         for ((chatId, n) in openCounts) repeat(n) { sendOpenChat(chatId) }
+                        if (online) sendOnline()
                     }
                 }
                 Bridge.notifyTgAuth("ready", "")
@@ -422,7 +423,7 @@ private const val UNREAD_REACTION_PAGE = 100
                 applyUserStatus(idFor(obj.getLong("user_id")), obj.optJSONObject("status"))
             "updateChatAction" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
-                val uid = obj.getJSONObject("sender_id").optLong("user_id")
+                val sender = senderIdOf(obj.optJSONObject("sender_id")).ifEmpty { chatId }
                 val action = obj.getJSONObject("action").optString("@type")
                 val st = when (action) {
                     "chatActionTyping" -> "typing"
@@ -430,7 +431,7 @@ private const val UNREAD_REACTION_PAGE = 100
                     "chatActionCancel" -> "paused"
                     else -> return
                 }
-                Bridge.onChatState(chatId, idFor(uid), st)
+                Bridge.onChatState(chatId, sender, st)
             }
             "updateMessageContentOpened" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
@@ -1364,6 +1365,19 @@ private const val UNREAD_REACTION_PAGE = 100
             send(JSONObject().put("@type", "closeChat").put("chat_id", chatIdOf(chatId)))
         }
     }
+
+    @Volatile private var online = false
+
+    fun setOnline(on: Boolean) = executor.execute {
+        if (online == on) return@execute
+        online = on
+        if (ready) sendOnline()
+    }
+
+    private fun sendOnline() = send(
+        JSONObject().put("@type", "setOption").put("name", "online")
+            .put("value", JSONObject().put("@type", "optionValueBoolean").put("value", online))
+    )
 
     private fun sendOpenChat(chatId: String) =
         send(JSONObject().put("@type", "openChat").put("chat_id", chatIdOf(chatId)))

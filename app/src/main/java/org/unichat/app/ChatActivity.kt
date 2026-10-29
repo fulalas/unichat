@@ -46,7 +46,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         private const val HOLD_MAX_MS = 5000L
         private const val SETTLE_QUIET_MS = 400L
         private const val WINDOW_ALBUM_SPAN = 60
-        private const val PRESENCE_RESUBSCRIBE_MS = 30_000L
         private const val FOCUS_RECHECK_MS = 400L
         private const val PREVIEW_PROBE_DELAY_MS = 700L
         private val scrollStates =
@@ -1525,7 +1524,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     private val presenceTicker = object : Runnable {
         override fun run() {
             Bridge.subscribePresence(chatId)
-            main.postDelayed(this, PRESENCE_RESUBSCRIBE_MS)
+            main.postDelayed(this, Bridge.PRESENCE_TICK_MS)
         }
     }
 
