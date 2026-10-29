@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.text.Editable
 import android.text.TextWatcher
+import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -65,6 +66,14 @@ fun Activity.showTargetPicker(
 
     list.setOnItemClickListener { _, row, position, _ ->
         send.isEnabled = adapter.toggle(position, row)
+    }
+
+    fun sendChosen() {
+        if (send.isEnabled) send.performClick()
+    }
+    search.setOnEditorActionListener { _, _, event ->
+        if (event == null || event.action == KeyEvent.ACTION_UP) sendChosen()
+        true
     }
 
     search.addTextChangedListener(object : TextWatcher {
