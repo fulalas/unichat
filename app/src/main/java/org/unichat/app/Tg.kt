@@ -373,9 +373,12 @@ private const val UNREAD_REACTION_PAGE = 100
             }
             "updateMessageSendFailed" -> {
                 val msg = obj.getJSONObject("message")
-                Bridge.onMessageSendFailed(
-                    idFor(msg.getLong("chat_id")), obj.getLong("old_message_id").toString()
-                )
+                val error = obj.optJSONObject("error")
+                Log.w(TAG, "send failed: $error")
+                val chatId = idFor(msg.getLong("chat_id"))
+                val oldId = obj.getLong("old_message_id").toString()
+                if (isRejectedPhoto(msg, error)) Bridge.onPhotoRejected(chatId, oldId)
+                else Bridge.onMessageSendFailed(chatId, oldId)
             }
             "updateDeleteMessages" -> {
                 if (obj.optBoolean("is_permanent")) {
@@ -1084,6 +1087,14 @@ private const val UNREAD_REACTION_PAGE = 100
     private fun inputLocalFile(path: String) =
         JSONObject().put("@type", "inputFileLocal").put("path", path)
 
+    private fun isRejectedPhoto(msg: JSONObject, error: JSONObject?): Boolean {
+        if (msg.optJSONObject("content")?.optString("@type") != "messagePhoto") return false
+        if (msg.optJSONObject("self_destruct_type") != null) return false
+        if (error?.optInt("code") != 400) return false
+        val reason = error.optString("message")
+        return reason.startsWith("PHOTO_") || reason == "IMAGE_PROCESS_FAILED"
+    }
+
     fun sendText(
         chatId: String, text: String, quotedId: String = "",
         mentions: List<Mention> = emptyList(),
@@ -1157,7 +1168,10 @@ private const val UNREAD_REACTION_PAGE = 100
             quotedId,
         )
 
-    fun sendDocument(chatId: String, path: String, fileName: String = "", quotedId: String = ""): String {
+    fun sendDocument(
+        chatId: String, path: String, fileName: String = "", quotedId: String = "",
+        caption: String = "",
+    ): String {
         val src = java.io.File(path)
         val safe = safeDisplayFileName(fileName.ifEmpty { src.name })
         val sendPath = if (safe == src.name) path else namedCopy(src, safe) ?: path
@@ -1167,7 +1181,8 @@ private const val UNREAD_REACTION_PAGE = 100
                 .put(
                     "document",
                     JSONObject().put("@type", "inputDocument").put("document", inputLocalFile(sendPath))
-                ),
+                )
+                .put("caption", formattedText(caption)),
             quotedId,
         )
     }

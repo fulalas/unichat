@@ -923,6 +923,14 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         )
     }
 
+    fun setFailedAsDocument(chatId: String, msgId: String, name: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET msg_type='document', text=?, send_failed=1, send_pending=0, " +
+                "time_pinned=1 WHERE chat_id=? AND id=?",
+            arrayOf(name, chatId, msgId)
+        )
+    }
+
     fun albumFileIds(chatId: String, msgId: String): List<String> = queryList(
         "SELECT id, file_id FROM messages WHERE chat_id=? AND id LIKE ? AND file_id!=''",
         arrayOf(chatId, "$msgId-%")

@@ -219,7 +219,7 @@ object Bridge : EventListener {
         ): String
         fun sendDocument(
             chatId: String, msgId: String, path: String, name: String, mime: String,
-            quoted: MessageRow?,
+            quoted: MessageRow?, caption: String = "",
         ): String
         fun sendLocation(chatId: String, msgId: String, latitude: Double, longitude: Double): String
         fun sendContact(chatId: String, msgId: String, name: String, numbers: List<String>): String
@@ -318,7 +318,7 @@ object Bridge : EventListener {
         )
         override fun sendDocument(
             chatId: String, msgId: String, path: String, name: String, mime: String,
-            quoted: MessageRow?,
+            quoted: MessageRow?, caption: String,
         ): String = Signal.sendAttachment(
             chatId, msgId, path, "", mime.ifEmpty { "application/octet-stream" }
         )
@@ -445,7 +445,7 @@ object Bridge : EventListener {
 
         override fun sendDocument(
             chatId: String, msgId: String, path: String, name: String, mime: String,
-            quoted: MessageRow?,
+            quoted: MessageRow?, caption: String,
         ): String {
             val (qid, qtext, qsender) = quoteArgs(quoted)
             return Wmbridge.sendDocumentMessage(
@@ -643,8 +643,8 @@ object Bridge : EventListener {
 
         override fun sendDocument(
             chatId: String, msgId: String, path: String, name: String, mime: String,
-            quoted: MessageRow?,
-        ): String = Tg.sendDocument(chatId, path, name, quoted?.id ?: "")
+            quoted: MessageRow?, caption: String,
+        ): String = Tg.sendDocument(chatId, path, name, quoted?.id ?: "", caption)
 
         override fun sendLocation(
             chatId: String, msgId: String, latitude: Double, longitude: Double,
@@ -1179,7 +1179,8 @@ object Bridge : EventListener {
             target, msgId, m.filePath, TimeFormat.parseSeconds(m.text), quoted, ByteArray(0), false
         )
         "document" -> p.sendDocument(
-            target, msgId, m.filePath, m.text, mimeOfPath(m.filePath), quoted
+            target, msgId, m.filePath, m.text, mimeOfPath(m.filePath), quoted,
+            rejectedPhotoCaptions[m.filePath] ?: "",
         )
         "location" -> p.sendLocation(target, msgId, m.latitude, m.longitude)
         "contact" -> {
@@ -2353,6 +2354,27 @@ object Bridge : EventListener {
 
     override fun onMessageSendFailed(chatId: String, msgId: String) =
         markSendFailed(chatId, msgId, retry = true)
+
+    fun onPhotoRejected(chatId: String, msgId: String) {
+        if (wiping) return
+        val row = db.messagesByIds(chatId, listOf(msgId)).firstOrNull()
+        if (row?.msgType != "image") {
+            onMessageSendFailed(chatId, msgId)
+            return
+        }
+        disarmSendWatchdog(chatId, msgId)
+        forgetRetry(chatId, msgId)
+        if (row.text.isNotEmpty()) rejectedPhotoCaptions[row.filePath] = row.text
+        db.setFailedAsDocument(
+            chatId, msgId, java.io.File(row.filePath).name.replace(STAGING_PREFIX, "")
+        )
+        settleSendAck(chatId, msgId)
+        resend(chatId, msgId)
+    }
+
+    private val rejectedPhotoCaptions = ConcurrentHashMap<String, String>()
+
+    private val STAGING_PREFIX = Regex("^(attach_\\d+_\\d+_\\d+_|share_\\d+_\\d+_\\d+_\\d+_)")
 
     private fun markSendFailed(chatId: String, msgId: String, retry: Boolean) {
         if (wiping) return

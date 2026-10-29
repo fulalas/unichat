@@ -1200,6 +1200,9 @@ object ImageLoader {
                 th = imageView.maxHeight
                 tw = th * w / h
             }
+            val density = imageView.resources.displayMetrics.density
+            tw = tw.coerceAtLeast((120 * density).toInt())
+            th = th.coerceAtLeast((72 * density).toInt())
         }
         if (lp.width != tw || lp.height != th) {
             lp.width = tw
