@@ -1,3 +1,29 @@
+# UniChat 0.67.1
+
+### Added
+
+* **GIFs play inside the chat**, looping and muted, with a GIF label. Works on WhatsApp, Telegram and Signal. They are forwarded as GIFs, not videos.
+* **WhatsApp channels show their names and pictures.** The message box is hidden where you can't post.
+* **Group chats show when someone leaves or is removed.** These lines don't notify or mark the chat unread.
+* Failed messages can be deleted.
+* Pressing Enter in the forward screen sends to the selected chats.
+
+### Changed
+
+* Voice messages download as soon as they arrive.
+* Typing and recording status shows more reliably, and clears as soon as the message arrives.
+* Telegram media is kept when the sender deletes the message.
+* Very wide or tall Telegram photos are sent as files when Telegram rejects them.
+* Videos and files no longer open on their own after downloading.
+
+### Fixed
+
+* The chat list shows who really reacted instead of "You" for everyone.
+* New messages now show while viewing a Telegram search result.
+* Media no longer downloads again and again.
+* Deleting and resending failed messages works properly.
+* The download spinner no longer overlaps the cancel icon.
+
 # UniChat 0.62.1
 
 ### Changed
