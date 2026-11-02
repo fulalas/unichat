@@ -220,6 +220,13 @@
     <string name="delete_chats_title">%1$d sohbet silinsin mi?</string>
     <string name="delete_chat_media">İndirilen medyayı da sil</string>
     <string name="delete_chat">Sohbeti sil</string>
+    <string name="leave_chat">Ayrıl</string>
+    <string name="unfollow_channel">Takibi bırak</string>
+    <string name="leave_chat_title">%1$s grubundan ayrılınsın mı?</string>
+    <string name="unfollow_title">%1$s takibi bırakılsın mı?</string>
+    <string name="leave_chats_title">%1$d sohbetten ayrılınsın mı?</string>
+    <string name="leave_also_delete">Sohbeti de sil</string>
+    <string name="leave_chat_failed">Ayrılınamadı — bağlantını kontrol et</string>
     <string name="delete_for_everyone">Herkes için sil</string>
     <string name="delete_for_me">Benden sil</string>
     <string name="online">çevrimiçi</string>

@@ -228,6 +228,13 @@
     <string name="delete_chats_title">Delete %1$d chats?</string>
     <string name="delete_chat_media">Also delete downloaded media</string>
     <string name="delete_chat">Delete chat</string>
+    <string name="leave_chat">Leave</string>
+    <string name="unfollow_channel">Unfollow</string>
+    <string name="leave_chat_title">Leave %1$s?</string>
+    <string name="unfollow_title">Unfollow %1$s?</string>
+    <string name="leave_chats_title">Leave %1$d chats?</string>
+    <string name="leave_also_delete">Also delete the chat</string>
+    <string name="leave_chat_failed">Could not leave — check your connection</string>
     <string name="delete_chat_failed">Deleted here only — the other devices could not be told</string>
     <string name="delete_for_everyone">Delete for everyone</string>
     <string name="delete_for_me">Delete for me</string>

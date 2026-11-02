@@ -220,6 +220,13 @@
     <string name="delete_chats_title">%1$d chats verwijderen?</string>
     <string name="delete_chat_media">Ook gedownloade media verwijderen</string>
     <string name="delete_chat">Chat verwijderen</string>
+    <string name="leave_chat">Verlaten</string>
+    <string name="unfollow_channel">Ontvolgen</string>
+    <string name="leave_chat_title">%1$s verlaten?</string>
+    <string name="unfollow_title">%1$s ontvolgen?</string>
+    <string name="leave_chats_title">%1$d chats verlaten?</string>
+    <string name="leave_also_delete">Chat ook verwijderen</string>
+    <string name="leave_chat_failed">Verlaten mislukt — controleer je verbinding</string>
     <string name="delete_for_everyone">Voor iedereen verwijderen</string>
     <string name="delete_for_me">Voor mij verwijderen</string>
     <string name="online">online</string>

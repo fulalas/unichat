@@ -220,6 +220,13 @@
     <string name="delete_chats_title">Eliminare %1$d chat?</string>
     <string name="delete_chat_media">Elimina anche i media scaricati</string>
     <string name="delete_chat">Elimina chat</string>
+    <string name="leave_chat">Esci</string>
+    <string name="unfollow_channel">Non seguire più</string>
+    <string name="leave_chat_title">Uscire da %1$s?</string>
+    <string name="unfollow_title">Non seguire più %1$s?</string>
+    <string name="leave_chats_title">Uscire da %1$d chat?</string>
+    <string name="leave_also_delete">Elimina anche la chat</string>
+    <string name="leave_chat_failed">Impossibile uscire — controlla la connessione</string>
     <string name="delete_for_everyone">Elimina per tutti</string>
     <string name="delete_for_me">Elimina per me</string>
     <string name="online">online</string>

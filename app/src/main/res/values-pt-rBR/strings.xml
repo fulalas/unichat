@@ -220,6 +220,13 @@
     <string name="delete_chats_title">Apagar %1$d conversas?</string>
     <string name="delete_chat_media">Apagar também as mídias baixadas</string>
     <string name="delete_chat">Apagar conversa</string>
+    <string name="leave_chat">Sair</string>
+    <string name="unfollow_channel">Deixar de seguir</string>
+    <string name="leave_chat_title">Sair de %1$s?</string>
+    <string name="unfollow_title">Deixar de seguir %1$s?</string>
+    <string name="leave_chats_title">Sair de %1$d conversas?</string>
+    <string name="leave_also_delete">Apagar também a conversa</string>
+    <string name="leave_chat_failed">Não foi possível sair — verifique a conexão</string>
     <string name="delete_for_everyone">Apagar para todos</string>
     <string name="delete_for_me">Apagar para mim</string>
     <string name="online">online</string>

@@ -258,6 +258,9 @@ object Signal : EventListener {
         }
     }
 
+    fun leaveGroup(chatId: String, done: (Boolean) -> Unit) =
+        ops.execute { done(linked && Wmbridge.signalLeaveGroup(chatId)) }
+
     fun edit(chatId: String, msgId: String, newText: String, fileId: String): Boolean {
         val (body, styles) = styled(newText)
         val fileIds =

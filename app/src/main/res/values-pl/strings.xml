@@ -220,6 +220,13 @@
     <string name="delete_chats_title">Usunąć %1$d czatów?</string>
     <string name="delete_chat_media">Usuń też pobrane multimedia</string>
     <string name="delete_chat">Usuń czat</string>
+    <string name="leave_chat">Opuść</string>
+    <string name="unfollow_channel">Przestań obserwować</string>
+    <string name="leave_chat_title">Opuścić %1$s?</string>
+    <string name="unfollow_title">Przestać obserwować %1$s?</string>
+    <string name="leave_chats_title">Opuścić czaty (%1$d)?</string>
+    <string name="leave_also_delete">Usuń też czat</string>
+    <string name="leave_chat_failed">Nie udało się opuścić — sprawdź połączenie</string>
     <string name="delete_for_everyone">Usuń u wszystkich</string>
     <string name="delete_for_me">Usuń u mnie</string>
     <string name="online">online</string>

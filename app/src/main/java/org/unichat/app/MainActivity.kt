@@ -29,6 +29,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
         private const val M_MUTE = 10
         private const val M_DELETE = 11
         private const val M_OPEN_OTHER = 12
+        private const val M_LEAVE = 13
     }
 
     private lateinit var chatList: RecyclerView
@@ -478,6 +479,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
             }
             menu.add(0, M_OPEN_OTHER, 2, R.string.open_on_other_account)
+            menu.add(0, M_LEAVE, 3, R.string.leave_chat)
             return true
         }
 
@@ -489,6 +491,10 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                 setIcon(if (unmuting) null else getDrawable(R.drawable.ic_mute))
             }
             menu.findItem(M_OPEN_OTHER)?.isVisible = chats.size == 1
+            menu.findItem(M_LEAVE)?.apply {
+                isVisible = chats.all { Bridge.canLeave(it.id) }
+                if (isVisible) setTitle(leaveLabel(chats.map { it.id }))
+            }
             return true
         }
 
@@ -502,6 +508,7 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
                     mode.finish()
                 }
                 M_DELETE -> showDeleteChatDialog(chats)
+                M_LEAVE -> leaveChatDialog(this@MainActivity, chats.map { it.id }) { actionMode?.finish() }.show()
                 M_OPEN_OTHER -> { openOnOtherAccount(chats[0]); mode.finish() }
             }
             return true

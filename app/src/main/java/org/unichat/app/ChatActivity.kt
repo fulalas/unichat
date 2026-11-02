@@ -826,6 +826,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onMessagesChanged(chatId: String, rowIds: Set<String>?) {
         if (chatId != this.chatId) return
+        if (rowIds == null) updateComposer()
         if (searchActive || windowMode) {
             Bridge.markChatRead(chatId)
             if (deepening && rowIds == null) {
@@ -1430,6 +1431,9 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         val popup = android.widget.PopupMenu(this, anchor)
         if (Accounts.ofChat(chatId).historySync) popup.menu.add(0, 1, 0, R.string.sync_all)
         popup.menu.add(0, 2, 1, R.string.export_chat)
+        if (Bridge.canLeave(chatId)) {
+            popup.menu.add(0, 3, 2, leaveLabel(listOf(chatId)))
+        }
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> {
@@ -1439,10 +1443,15 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
                     true
                 }
                 2 -> { startChatExport(); true }
+                3 -> { confirmLeave(); true }
                 else -> false
             }
         }
         showPopup(popup)
+    }
+
+    private fun confirmLeave() {
+        leaveChatDialog(this, listOf(chatId)) { deleted -> if (deleted) finish() }.show().tracked()
     }
 
     private fun startChatExport() {

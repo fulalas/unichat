@@ -220,6 +220,13 @@
     <string name="delete_chats_title">Удалить %1$d чатов?</string>
     <string name="delete_chat_media">Удалить и скачанные файлы</string>
     <string name="delete_chat">Удалить чат</string>
+    <string name="leave_chat">Выйти</string>
+    <string name="unfollow_channel">Отписаться</string>
+    <string name="leave_chat_title">Выйти из %1$s?</string>
+    <string name="unfollow_title">Отписаться от %1$s?</string>
+    <string name="leave_chats_title">Выйти из чатов (%1$d)?</string>
+    <string name="leave_also_delete">Также удалить чат</string>
+    <string name="leave_chat_failed">Не удалось выйти — проверьте подключение</string>
     <string name="delete_for_everyone">Удалить у всех</string>
     <string name="delete_for_me">Удалить у меня</string>
     <string name="online">в сети</string>

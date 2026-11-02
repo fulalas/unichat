@@ -220,6 +220,13 @@
     <string name="delete_chats_title">删除 %1$d 个聊天？</string>
     <string name="delete_chat_media">同时删除已下载的媒体文件</string>
     <string name="delete_chat">删除聊天</string>
+    <string name="leave_chat">退出</string>
+    <string name="unfollow_channel">取消关注</string>
+    <string name="leave_chat_title">退出 %1$s？</string>
+    <string name="unfollow_title">取消关注 %1$s？</string>
+    <string name="leave_chats_title">退出 %1$d 个聊天？</string>
+    <string name="leave_also_delete">同时删除聊天</string>
+    <string name="leave_chat_failed">无法退出，请检查网络连接</string>
     <string name="delete_for_everyone">为所有人删除</string>
     <string name="delete_for_me">仅为我删除</string>
     <string name="online">在线</string>

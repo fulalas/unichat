@@ -1468,6 +1468,45 @@ func SignalDeleteChat(chatId string, recent string) bool {
 	return true
 }
 
+func sgLeaveChange(
+	ctx context.Context, client *signalmeow.Client, device *sgstore.Device, gid types.GroupIdentifier,
+) *signalmeow.GroupChange {
+	self := device.ACI
+	group, _, err := client.RetrieveGroupByID(ctx, gid, 0)
+	if err != nil {
+		return &signalmeow.GroupChange{DeleteMembers: []*uuid.UUID{&self}}
+	}
+	for _, p := range group.PendingMembers {
+		if id := p.ServiceID; id == device.ACIServiceID() || id == device.PNIServiceID() {
+			return &signalmeow.GroupChange{DeletePendingMembers: []*libsignalgo.ServiceID{&id}}
+		}
+	}
+	for _, r := range group.RequestingMembers {
+		if r.ACI == self {
+			return &signalmeow.GroupChange{DeleteRequestingMembers: []*uuid.UUID{&self}}
+		}
+	}
+	return &signalmeow.GroupChange{DeleteMembers: []*uuid.UUID{&self}}
+}
+
+func SignalLeaveGroup(chatId string) bool {
+	c, client, device := sgActive()
+	if client == nil || device == nil {
+		return false
+	}
+	gid, ok := sgAsGroup(sgBareID(chatId))
+	if !ok {
+		return false
+	}
+	ctx := context.TODO()
+	change := sgLeaveChange(ctx, client, device, gid)
+	if _, err := client.UpdateGroup(ctx, change, gid); err != nil {
+		c.log(LogWarning, fmt.Sprintf("leave group error %v", err))
+		return false
+	}
+	return true
+}
+
 func SignalEdit(chatId string, msgId string, newText string, styles string, fileIds string, preview *Preview) bool {
 	c, client, _ := sgActive()
 	if client == nil {

@@ -141,7 +141,7 @@ fun reactionPreview(
     else ctx.getString(R.string.reacted_to, who, shown, quoted)
 }
 
-class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
+class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
 
     private val ctx: Context = context.applicationContext
 
@@ -157,6 +157,10 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         private const val CREATE_DELETED_CHATS =
             "CREATE TABLE IF NOT EXISTS deleted_chats(" +
                 "id TEXT PRIMARY KEY, deleted_at INTEGER NOT NULL)"
+
+        private const val CREATE_LEFT_CHATS =
+            "CREATE TABLE IF NOT EXISTS left_chats(" +
+                "id TEXT PRIMARY KEY, left_at INTEGER NOT NULL)"
 
         private const val CREATE_REACTIONS =
             "CREATE TABLE reactions(" +
@@ -273,6 +277,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         db.execSQL(CREATE_QUOTED_INDEX)
         db.execSQL(CREATE_REACTIONS)
         db.execSQL(CREATE_DELETED_CHATS)
+        db.execSQL(CREATE_LEFT_CHATS)
         db.execSQL(CREATE_REVOKED_MESSAGES)
         db.execSQL(CREATE_UNPLAYED_AUDIO_INDEX)
         db.execSQL(CREATE_PLACEHOLDER_INDEX)
@@ -446,6 +451,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
             db.addColumnIfMissing("messages", "edit_time", "INTEGER NOT NULL DEFAULT 0")
             db.execSQL(CREATE_REVOKED_MESSAGES)
         }
+        if (oldVersion < 43) {
+            db.execSQL(CREATE_LEFT_CHATS)
+        }
     }
 
     private fun <T> queryList(sql: String, args: Array<String>?, map: (Cursor) -> T): List<T> {
@@ -471,12 +479,45 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         )
     }
 
-    private val deletedChats: MutableMap<String, Long> by lazy {
-        val m = java.util.concurrent.ConcurrentHashMap<String, Long>()
-        queryList("SELECT id, deleted_at FROM deleted_chats", null) {
-            it.getString(0) to it.getLong(1)
-        }.forEach { m[it.first] = it.second }
-        m
+    private fun loadTimes(sql: String): MutableMap<String, Long> =
+        queryList(sql, null) { it.getString(0) to it.getLong(1) }
+            .toMap(java.util.concurrent.ConcurrentHashMap())
+
+    private val deletedChats by lazy { loadTimes("SELECT id, deleted_at FROM deleted_chats") }
+
+    private val leftChats by lazy { loadTimes("SELECT id, left_at FROM left_chats") }
+
+    fun markLeft(chatId: String, at: Long = System.currentTimeMillis() / 1000) {
+        leftChats[chatId] = at
+        writableDatabase.execSQL(
+            "INSERT INTO left_chats(id, left_at) VALUES(?,?) " +
+                "ON CONFLICT(id) DO UPDATE SET left_at=excluded.left_at",
+            arrayOf(chatId, at)
+        )
+    }
+
+    fun hasLeft(chatId: String): Boolean = leftChats.containsKey(chatId)
+
+    private fun isSelfLeaving(m: MessageRow): Boolean = when (m.msgType) {
+        "left" -> m.fromMe
+        "removed" -> m.text.split(',').any { isSelfContact(it) }
+        else -> false
+    }
+
+    private fun trackMembership(m: MessageRow) {
+        if (!isSelfLeaving(m)) return clearLeftIfRejoined(m)
+        val newerIncoming = queryFirst(
+            "SELECT 1 FROM messages WHERE chat_id=? AND from_me=0 AND time_sent>? LIMIT 1",
+            arrayOf(m.chatId, m.timeSent.toString())
+        ) { true } ?: false
+        if (!newerIncoming && (leftChats[m.chatId] ?: 0L) < m.timeSent) markLeft(m.chatId, m.timeSent)
+    }
+
+    private fun clearLeftIfRejoined(m: MessageRow) {
+        val leftAt = leftChats[m.chatId] ?: return
+        if (m.timeSent <= leftAt) return
+        leftChats.remove(m.chatId)
+        writableDatabase.execSQL("DELETE FROM left_chats WHERE id=?", arrayOf(m.chatId))
     }
 
     private fun suppressed(chatId: String, atTime: Long): Boolean {
@@ -550,6 +591,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
     fun upsertMessage(m: MessageRow) {
         if (suppressed(m.chatId, if (m.edited) 0 else m.timeSent)) return
         if (m.fromMe && isRevoked(m.chatId, m.id)) return
+        trackMembership(m)
         val fromOriginal = "(edited=1 AND excluded.edited=0)"
         val keepText = "excluded.text='' OR $fromOriginal OR " +
             "(excluded.edited=1 AND excluded.edit_time<edit_time)"
@@ -829,6 +871,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 42) {
         execSQL("DELETE FROM chats WHERE ${predicate("id")}")
         execSQL("DELETE FROM contacts WHERE ${predicate("id")}")
         execSQL("DELETE FROM deleted_chats WHERE ${predicate("id")}")
+        execSQL("DELETE FROM left_chats WHERE ${predicate("id")}")
+        leftChats.keys.retainAll(queryList("SELECT id FROM left_chats", null) { it.getString(0) }.toSet())
         execSQL("DELETE FROM revoked_messages WHERE ${predicate("chat_id")}")
         execSQL("DELETE FROM scroll WHERE ${predicate("chat_id")}")
     }

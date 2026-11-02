@@ -254,6 +254,7 @@ object Bridge : EventListener {
         fun deleteForEveryone(chatId: String, msgId: String)
         fun deleteForMe(chatId: String, msgId: String)
         fun deleteChat(chatId: String, deleteMedia: Boolean, recent: List<MessageRow>)
+        fun leaveChat(chatId: String, done: (Boolean) -> Unit)
         fun react(msg: MessageRow, emoji: String)
 
         fun setMuted(chatId: String, muted: Boolean)
@@ -375,6 +376,7 @@ object Bridge : EventListener {
 
         override fun deleteChat(chatId: String, deleteMedia: Boolean, recent: List<MessageRow>) =
             Signal.deleteChat(chatId, recent)
+        override fun leaveChat(chatId: String, done: (Boolean) -> Unit) = Signal.leaveGroup(chatId, done)
         override fun react(msg: MessageRow, emoji: String) = Signal.react(msg, emoji)
 
         override fun setMuted(chatId: String, muted: Boolean) {
@@ -539,6 +541,9 @@ object Bridge : EventListener {
                 toastUi(R.string.delete_chat_failed)
             }
         }
+
+        override fun leaveChat(chatId: String, done: (Boolean) -> Unit) =
+            done(connId >= 0 && Wmbridge.leaveChat(connId, chatId))
 
         override fun react(msg: MessageRow, emoji: String) {
             if (!Wmbridge.sendReaction(connId, msg.chatId, msg.id, msg.senderId, msg.fromMe, emoji)) {
@@ -707,6 +712,8 @@ object Bridge : EventListener {
         override fun deleteChat(chatId: String, deleteMedia: Boolean, recent: List<MessageRow>) {
             Tg.deleteChatAsync(chatId)
         }
+
+        override fun leaveChat(chatId: String, done: (Boolean) -> Unit) = Tg.leaveChatAsync(chatId, done)
 
         override fun react(msg: MessageRow, emoji: String) {
             Tg.sendReaction(msg.chatId, msg.id, emoji)
@@ -1012,6 +1019,20 @@ object Bridge : EventListener {
         val recent = db.recentMessages(chatId, 5)
         proto(chatId).deleteChat(chatId, deleteMedia, recent)
         executor.execute { forgetChat(chatId, deleteMedia) }
+    }
+
+    fun canLeave(chatId: String): Boolean =
+        (isGroupId(chatId) || isNewsletterId(chatId)) && !db.hasLeft(chatId)
+
+    fun leaveChat(chatId: String, delete: Boolean, deleteMedia: Boolean) = protoExecutor(chatId).execute {
+        proto(chatId).leaveChat(chatId) { ok ->
+            if (!ok) {
+                toastUi(R.string.leave_chat_failed)
+            } else {
+                db.markLeft(chatId)
+                if (delete) deleteChat(chatId, deleteMedia) else notifyChat(chatId)
+            }
+        }
     }
 
     fun onChatDeletedRemotely(chatId: String, deleteMedia: Boolean) = executor.execute {
@@ -2001,7 +2022,7 @@ object Bridge : EventListener {
 
     fun peerInfo(chatId: String): PeerInfo = proto(chatId).peerInfo(chatId)
 
-    fun canPost(chatId: String): Boolean = proto(chatId).canPost(chatId)
+    fun canPost(chatId: String): Boolean = !db.hasLeft(chatId) && proto(chatId).canPost(chatId)
 
     fun getAvatarPath(chatId: String): String =
         proto(chatId).avatarPath(chatId, big = false, cachedOnly = false)

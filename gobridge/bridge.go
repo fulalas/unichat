@@ -2151,6 +2151,28 @@ func DeleteChat(
 	return true
 }
 
+func LeaveChat(connId int, chatId string) bool {
+	c := getConn(connId)
+	if c == nil {
+		return false
+	}
+	jid, err := types.ParseJID(chatId)
+	if err != nil {
+		return false
+	}
+	ctx := context.TODO()
+	if jid.Server == types.NewsletterServer {
+		err = c.getClient().UnfollowNewsletter(ctx, jid)
+	} else {
+		err = c.getClient().LeaveGroup(ctx, jid)
+	}
+	if err != nil {
+		c.log(LogWarning, fmt.Sprintf("leave chat error %v", err))
+		return false
+	}
+	return true
+}
+
 func contactName(info types.ContactInfo) string {
 	if info.FullName != "" {
 		return info.FullName

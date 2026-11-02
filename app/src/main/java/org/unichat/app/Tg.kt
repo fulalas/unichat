@@ -1308,6 +1308,13 @@ private const val UNREAD_REACTION_PAGE = 100
         if (!deleteChat(chatId)) Bridge.toastUi(R.string.delete_chat_failed)
     }
 
+    fun leaveChatAsync(chatId: String, done: (Boolean) -> Unit) = pager.execute {
+        done(leaveChat(chatIdOf(chatId)))
+    }
+
+    private fun leaveChat(raw: Long): Boolean =
+        request(JSONObject().put("@type", "leaveChat").put("chat_id", raw)) != null
+
     private fun deleteChat(chatId: String): Boolean {
         val raw = chatIdOf(chatId)
         val chat = request(JSONObject().put("@type", "getChat").put("chat_id", raw))
@@ -1315,11 +1322,11 @@ private const val UNREAD_REACTION_PAGE = 100
             Log.w(TAG, "delete chat: getChat failed")
             return false
         }
-        if (!chat.optBoolean("can_be_deleted_only_for_self") &&
-            !chat.optBoolean("can_be_deleted_for_all_users")
-        ) {
-            request(JSONObject().put("@type", "leaveChat").put("chat_id", raw)) ?: return false
-        }
+        if (!Bridge.db.hasLeft(chatId) &&
+            !chat.optBoolean("can_be_deleted_only_for_self") &&
+            !chat.optBoolean("can_be_deleted_for_all_users") &&
+            !leaveChat(raw)
+        ) return false
         return request(
             JSONObject().put("@type", "deleteChatHistory").put("chat_id", raw)
                 .put("remove_from_chat_list", true).put("revoke", false)
