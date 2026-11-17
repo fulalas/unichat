@@ -2506,6 +2506,10 @@ object Bridge : EventListener {
     override fun onChatDeleted(chatId: String, deleteMedia: Boolean) =
         onChatDeletedRemotely(chatId, deleteMedia)
 
+    override fun onAvatarChanged(chatId: String) {
+        if (!wiping) AvatarLoader.refresh(chatId)
+    }
+
     private const val KEY_SEP = "\u0000"
 
     private fun msgKey(chatId: String, msgId: String) = chatId + KEY_SEP + msgId

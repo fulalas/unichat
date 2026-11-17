@@ -154,8 +154,6 @@ class ChatListAdapter(
         holder.onlineDot.visibility = if (chat.online) View.VISIBLE else View.GONE
         val real = !PhoneBook.isPhoneEntry(chat.id)
         if (real) AvatarLoader.load(chat.id, name, holder.avatar, AvatarLoader.dp(holder.avatar, 44))
-        else holder.avatar.setImageBitmap(
-            AvatarLoader.initials(name, AvatarLoader.dp(holder.avatar, 44))
-        )
+        else AvatarLoader.showInitials(name, holder.avatar, AvatarLoader.dp(holder.avatar, 44))
     }
 }

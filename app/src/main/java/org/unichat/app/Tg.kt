@@ -326,8 +326,7 @@ private const val UNREAD_REACTION_PAGE = 100
             "updateChatPhoto" -> {
                 val chatId = idFor(obj.getLong("chat_id"))
                 avatarPaths.remove(chatId)
-                AvatarLoader.invalidate(chatId)
-                Bridge.notifyChatsChanged()
+                AvatarLoader.refresh(chatId)
             }
             "updateChatTitle" -> {
                 Bridge.db.renameChat(idFor(obj.getLong("chat_id")), obj.optString("title"))

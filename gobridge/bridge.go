@@ -56,6 +56,7 @@ type EventListener interface {
 	OnMessageSendFailed(chatId string, msgId string)
 	OnMute(chatId string, muted bool)
 	OnChatDeleted(chatId string, deleteMedia bool)
+	OnAvatarChanged(chatId string)
 	OnChatState(chatId string, userId string, state string)
 	OnPresence(userId string, isOnline bool, lastSeen int64)
 	OnSyncProgress(progress int)
@@ -1967,8 +1968,7 @@ func SetProfilePicture(connId int, jpegPath string) bool {
 		return false
 	}
 	selfId := strFromJid(self)
-	os.Remove(avatarFilePath(c, selfId, true))
-	os.Remove(avatarFilePath(c, selfId, false))
+	removeAvatarFiles(c, selfId)
 	return true
 }
 
@@ -2364,14 +2364,36 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 	if err != nil {
 		return cached
 	}
+	start := time.Now()
 	var data []byte
+	picId := ""
 	if chatJid.Server == types.NewsletterServer {
 		data = newsletterPicture(c, chatJid, preview)
 	} else {
+		existing := ""
+		if cached != "" {
+			if b, err := os.ReadFile(avatarPath + ".id"); err == nil {
+				existing = string(b)
+			}
+		}
 		pic, err := c.getClient().GetProfilePictureInfo(context.TODO(), chatJid,
-			&whatsmeow.GetProfilePictureParams{Preview: preview})
-		if err == nil && pic != nil {
+			&whatsmeow.GetProfilePictureParams{Preview: preview, ExistingID: existing})
+		switch {
+		case errors.Is(err, whatsmeow.ErrProfilePictureNotSet),
+			errors.Is(err, whatsmeow.ErrProfilePictureUnauthorized):
+			os.Remove(avatarPath)
+			os.Remove(avatarPath + ".id")
+			return ""
+		case err != nil:
+		case pic == nil:
+			if existing != "" {
+				os.Chtimes(avatarPath, start, start)
+				markIfChangedSince(avatarPath, start)
+			}
+			return cached
+		default:
 			data = downloadAvatar(pic.URL)
+			picId = pic.ID
 		}
 	}
 	if data == nil {
@@ -2386,7 +2408,21 @@ func fetchAvatar(connId int, chatId string, preview bool) string {
 		os.Remove(tmp)
 		return cached
 	}
+	if picId != "" {
+		os.WriteFile(avatarPath+".id", []byte(picId), 0600)
+	} else {
+		os.Remove(avatarPath + ".id")
+	}
+	markIfChangedSince(avatarPath, start)
 	return avatarPath
+}
+
+var avatarChangedAt sync.Map
+
+func markIfChangedSince(avatarPath string, start time.Time) {
+	if t, ok := avatarChangedAt.Load(avatarPath); ok && !t.(time.Time).Before(start) {
+		os.Chtimes(avatarPath, time.Unix(0, 0), time.Unix(0, 0))
+	}
 }
 
 var avatarHTTP = &http.Client{Timeout: 20 * time.Second}
@@ -2544,6 +2580,43 @@ func handleEvent(connId int, c *conn, rawEvt interface{}) {
 
 	case *events.GroupInfo:
 		handleGroupLeave(c, evt)
+
+	case *events.Picture:
+		handlePictureChange(c, evt)
+	}
+}
+
+func handlePictureChange(c *conn, evt *events.Picture) {
+	client := c.getClient()
+	if client == nil {
+		return
+	}
+	chatId := getChatId(client, &evt.JID, nil)
+	ids := []string{chatId}
+	if raw := strFromJid(evt.JID); raw != chatId {
+		ids = append(ids, raw)
+	}
+	now := time.Now()
+	for _, id := range ids {
+		for _, preview := range []bool{true, false} {
+			path := avatarFilePath(c, id, preview)
+			avatarChangedAt.Store(path, now)
+			if evt.Remove {
+				os.Remove(path)
+				os.Remove(path + ".id")
+			} else {
+				os.Chtimes(path, time.Unix(0, 0), time.Unix(0, 0))
+			}
+		}
+		c.listener.OnAvatarChanged(id)
+	}
+}
+
+func removeAvatarFiles(c *conn, chatId string) {
+	for _, preview := range []bool{true, false} {
+		path := avatarFilePath(c, chatId, preview)
+		os.Remove(path)
+		os.Remove(path + ".id")
 	}
 }
 

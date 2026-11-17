@@ -439,6 +439,7 @@ object Signal : EventListener {
         Bridge.onChatDeletedRemotely(chatId, deleteMedia)
 
     override fun onMute(chatId: String, muted: Boolean) {}
+    override fun onAvatarChanged(chatId: String) {}
     override fun onPresence(userId: String, isOnline: Boolean, lastSeen: Long) {}
     override fun onSyncProgress(progress: Long) {}
     override fun onChatHistoryDelivered(
