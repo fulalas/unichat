@@ -2,6 +2,7 @@
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
+ARGS=("$@")
 APK_ONLY=0
 INSTALL=1
 for arg in "$@"; do
@@ -37,6 +38,7 @@ adb_device_serial() {
 ENV_FILE="$DIR/../toolchain/env.sh"
 [ -n "$UNICHAT_ENV" ] && [ -f "$UNICHAT_ENV" ] && ENV_FILE="$UNICHAT_ENV"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
+export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
 TOOLCHAIN="$(mkdir -p "$(dirname "$ENV_FILE")" && cd "$(dirname "$ENV_FILE")" && pwd)"
 
 WHATSMEOW_REPO="https://github.com/tulir/whatsmeow.git"
@@ -54,7 +56,7 @@ update_due() {
 mark_checked() { mkdir -p "$(dirname "$UPDATE_STAMP")"; date +%s > "$UPDATE_STAMP"; }
 
 VERSIONS="$DIR/versions.properties"
-VERSIONS_PREV=""
+VERSIONS_GOOD="$DIR/versions.properties.good"
 version_of() { sed -n "s#^$1=##p" "$VERSIONS" | tail -1; }
 
 maven_latest() {
@@ -74,13 +76,15 @@ resolve_versions() {
         rm -rf "$ANDROID_HOME/cmdline-tools/latest"
         mv "$ANDROID_HOME/cmdline-tools/latest-2" "$ANDROID_HOME/cmdline-tools/latest"
     fi
-    list=$(android sdk list --all 2>/dev/null)
+    list=$(android sdk list --all 2>/dev/null) || true
     out=$(mktemp)
     {
         echo "gradle=$(curl -fsSL https://services.gradle.org/versions/current 2>/dev/null |
             sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p')"
         echo "agp=$(maven_latest com.android.tools.build:gradle)"
         echo "kotlin=$(maven_latest org.jetbrains.kotlin:kotlin-gradle-plugin)"
+        echo "protoc=$(curl -fsSL https://api.github.com/repos/protocolbuffers/protobuf/releases/latest 2>/dev/null |
+            sed -n 's/.*"tag_name": *"v\([0-9.]*\)".*/\1/p')"
         echo "ndk=$(printf '%s\n' "$list" | grep -oE '^\s*ndk/[0-9.]+\s' | sed 's#.*/##; s/\s*$//' | sort -V | tail -1)"
         echo "compileSdk=$(printf '%s\n' "$list" | grep -oE '^\s*platforms/android-[0-9]+' | sed 's/.*-//' | sort -n | tail -1)"
         for coord in $(grep -oE "lib\('[^']+'\)" "$DIR/app/build.gradle" | sed "s/lib('\(.*\)')/\1/"); do
@@ -93,15 +97,11 @@ resolve_versions() {
         echo "   WARNING: could not resolve every version; keeping the previous set" >&2
         return
     fi
-    if [ -f "$VERSIONS" ] && ! cmp -s "$out" "$VERSIONS"; then
-        VERSIONS_PREV=$(mktemp)
-        cp "$VERSIONS" "$VERSIONS_PREV"
-    fi
     mv "$out" "$VERSIONS"
 }
 
 install_versions() {
-    local gradle ndk
+    local gradle ndk protoc
     gradle=$(version_of gradle)
     ndk=$(version_of ndk)
     if [ ! -d "$ANDROID_HOME/ndk/$ndk" ]; then
@@ -117,13 +117,27 @@ install_versions() {
         rm -f "$TOOLCHAIN/gradle-$gradle.zip.part"
     fi
     GRADLE="$TOOLCHAIN/gradle-$gradle/bin/gradle"
+    protoc=$(version_of protoc)
+    if [ "$(cat "$TOOLCHAIN/protoc/.version" 2>/dev/null)" != "$protoc" ]; then
+        echo "== Installing protoc $protoc =="
+        rm -rf "$TOOLCHAIN/protoc.new"
+        mkdir -p "$TOOLCHAIN/protoc.new"
+        curl -fsSL -o "$TOOLCHAIN/protoc.zip.part" \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v$protoc/protoc-$protoc-linux-x86_64.zip"
+        unzip -q "$TOOLCHAIN/protoc.zip.part" -d "$TOOLCHAIN/protoc.new"
+        rm -f "$TOOLCHAIN/protoc.zip.part"
+        echo "$protoc" > "$TOOLCHAIN/protoc.new/.version"
+        rm -rf "$TOOLCHAIN/protoc"
+        mv "$TOOLCHAIN/protoc.new" "$TOOLCHAIN/protoc"
+    fi
+    export PATH="$TOOLCHAIN/protoc/bin:$PATH"
 }
 
 prune_old_tools() {
     local d sdk
     sdk=$(version_of compileSdk)
-    for d in "$TOOLCHAIN"/gradle-*; do
-        [ "$d" = "$TOOLCHAIN/gradle-$(version_of gradle)" ] || rm -rf "$d"
+    for d in "$TOOLCHAIN"/gradle-[0-9]*; do
+        [ -x "$d/bin/gradle" ] && [ "$d" != "$TOOLCHAIN/gradle-$(version_of gradle)" ] && rm -rf "$d"
     done
     for d in "$ANDROID_HOME"/ndk/*; do
         [ "$d" = "$ANDROID_NDK_HOME" ] || rm -rf "$d"
@@ -133,7 +147,19 @@ prune_old_tools() {
     done
 }
 
-if [ ! -f "$VERSIONS" ] || { [ "$APK_ONLY" != 1 ] && update_due; }; then
+retry_with_good_versions() {
+    local rc=$?
+    [ "$rc" = 0 ] && return
+    if [ -n "$UNICHAT_RETRY" ] || [ ! -f "$VERSIONS_GOOD" ] || cmp -s "$VERSIONS" "$VERSIONS_GOOD"; then
+        exit "$rc"
+    fi
+    echo "== Build failed with the new versions; retrying with the last working ones ==" >&2
+    cp "$VERSIONS_GOOD" "$VERSIONS"
+    UNICHAT_RETRY=1 exec "$0" "${ARGS[@]}"
+}
+trap retry_with_good_versions EXIT
+
+if [ -z "$UNICHAT_RETRY" ] && { [ ! -f "$VERSIONS" ] || { [ "$APK_ONLY" != 1 ] && update_due; }; }; then
     resolve_versions
 fi
 install_versions
@@ -191,6 +217,7 @@ refresh_go_deps() {
         return
     fi
     rm -rf "$bak"
+    rm -f "$gb/go.mod" "$gb/go.sum"
     echo "Go dependencies could not be resolved" >&2
     exit 1
 }
@@ -409,7 +436,7 @@ elif [ "$APK_ONLY" != 1 ] && update_due; then
     TD_LATEST=$(git ls-remote https://github.com/tdlib/td.git refs/heads/master 2>/dev/null | cut -f1)
     OSSL_LATEST=$(latest_tag https://github.com/openssl/openssl.git openssl-)
     OSSL_LATEST="${OSSL_LATEST#openssl-}"
-    OSSL_BUILT=$(sed 's/-android.*//' "$DIR/tdjson/ext/openssl-${TD_ABIS[0]}/.build-key" 2>/dev/null)
+    OSSL_BUILT=$(sed 's/-android.*//' "$DIR/tdjson/ext/openssl-${TD_ABIS[0]}/.build-key" 2>/dev/null || true)
     if [ -n "$TD_LATEST" ] && [ "$TD_LATEST" != "$(cat "$DIR/tdjson/td/.td-commit" 2>/dev/null)" ]; then
         echo "== TDLib: upstream master moved to ${TD_LATEST:0:12}; rebuilding =="
         TD_REBUILD=1
@@ -419,26 +446,23 @@ elif [ "$APK_ONLY" != 1 ] && update_due; then
         TD_REBUILD=1
     fi
     if [ "$TD_REBUILD" = 1 ]; then
+        TD_UPDATE_ONLY=1
         TD_MISSING=("${TD_ABIS[@]}")
         [ -n "$TD_LATEST" ] && export TD_COMMIT="$TD_LATEST"
         [ -n "$OSSL_LATEST" ] && export OPENSSL_VER="$OSSL_LATEST"
     fi
 fi
-if [ "$TD_REBUILD" = 1 ]; then
-    "$DIR/build-tdlib.sh" "${TD_MISSING[@]}"
+if [ "$TD_REBUILD" = 1 ] && ! "$DIR/build-tdlib.sh" "${TD_MISSING[@]}"; then
+    [ "$TD_UPDATE_ONLY" = 1 ] || exit 1
+    echo "   WARNING: TDLib update failed; keeping the TDLib already built" >&2
 fi
 
 [ "$APK_ONLY" != 1 ] && mark_checked
 
 echo "== Building release APK =="
 cd "$DIR"
-if ! "$GRADLE" assembleRelease --no-daemon; then
-    [ -n "$VERSIONS_PREV" ] || exit 1
-    echo "== Build failed with the new versions; retrying with the previous ones ==" >&2
-    mv "$VERSIONS_PREV" "$VERSIONS"
-    install_versions
-    "$GRADLE" assembleRelease --no-daemon
-fi
+"$GRADLE" assembleRelease --no-daemon
+cp "$VERSIONS" "$VERSIONS_GOOD"
 prune_old_tools
 
 VERSION=$(sed -n "s/^[[:space:]]*versionName[[:space:]]*=\{0,1\}[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" \

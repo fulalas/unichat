@@ -290,7 +290,7 @@ object AudioPlayer {
         ownsAudioMode = false
         audioManager?.let {
             it.mode = AudioManager.MODE_NORMAL
-            it.isSpeakerphoneOn = false
+            speakerOff(it)
         }
     }
 
@@ -308,9 +308,18 @@ object AudioPlayer {
         if (commMode) {
             am.mode = AudioManager.MODE_IN_COMMUNICATION
             ownsAudioMode = true
-            am.isSpeakerphoneOn = false
+            speakerOff(am)
         } else {
             releaseAudioMode()
+        }
+    }
+
+    private fun speakerOff(am: AudioManager) {
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            am.clearCommunicationDevice()
+        } else {
+            @Suppress("DEPRECATION")
+            am.isSpeakerphoneOn = false
         }
     }
 

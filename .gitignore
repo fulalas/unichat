@@ -25,6 +25,7 @@ gobridge/ext/libsignal/
 
 # Tool and library versions resolved by build.sh
 versions.properties
+versions.properties.good
 
 # Machine-specific SDK location
 local.properties

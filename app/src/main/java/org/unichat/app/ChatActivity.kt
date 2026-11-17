@@ -2026,7 +2026,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         var last: android.location.Location? = null
         for (p in providers) {
             val loc = try { lm.getLastKnownLocation(p) } catch (e: Exception) { null }
-            if (loc != null && (last == null || loc.time > last!!.time)) last = loc
+            if (loc != null && (last == null || loc.time > last.time)) last = loc
         }
         val fresh = last
         if (fresh != null && System.currentTimeMillis() - fresh.time < 30_000) {
@@ -2454,7 +2454,7 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
 
     private fun showKeyboard(target: android.view.View = input) {
         val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
-        imm.showSoftInput(target, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        imm.showSoftInput(target, 0)
     }
 
     private fun hideKeyboard(target: android.view.View = input) {

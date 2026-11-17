@@ -107,7 +107,7 @@ object TgKept {
         if (path.startsWith(dir.path + "/")) return path
         val out = File(dir, "${chatId}_${msgId}_${File(path).name}".replace(UNSAFE_FILE_CHARS, "_"))
         if (sameFile(out.path, path)) return out.path
-        val tmp = File(dir, "${out.name}.${Thread.currentThread().id}.tmp")
+        val tmp = File(dir, "${out.name}.${android.os.Process.myTid()}.tmp")
         return try {
             dir.mkdirs()
             tmp.delete()
