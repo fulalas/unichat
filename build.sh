@@ -83,6 +83,8 @@ resolve_versions() {
             sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p')"
         echo "agp=$(maven_latest com.android.tools.build:gradle)"
         echo "kotlin=$(maven_latest org.jetbrains.kotlin:kotlin-gradle-plugin)"
+        echo "jdk=$(curl -fsSL https://api.adoptium.net/v3/info/available_releases 2>/dev/null | tr -d '\n ' |
+            sed -n 's/.*"most_recent_feature_release":\([0-9]*\).*/\1/p')"
         echo "protoc=$(curl -fsSL https://api.github.com/repos/protocolbuffers/protobuf/releases/latest 2>/dev/null |
             sed -n 's/.*"tag_name": *"v\([0-9.]*\)".*/\1/p')"
         echo "ndk=$(printf '%s\n' "$list" | grep -oE '^\s*ndk/[0-9.]+\s' | sed 's#.*/##; s/\s*$//' | sort -V | tail -1)"
@@ -101,7 +103,20 @@ resolve_versions() {
 }
 
 install_versions() {
-    local gradle ndk protoc
+    local gradle ndk protoc jdk
+    jdk=$(version_of jdk)
+    if [ -n "$jdk" ]; then
+        if [ ! -x "$TOOLCHAIN/jdk-$jdk/bin/java" ]; then
+            echo "== Installing JDK $jdk =="
+            rm -rf "$TOOLCHAIN/jdk-$jdk.new"
+            mkdir -p "$TOOLCHAIN/jdk-$jdk.new"
+            curl -fsSL "https://api.adoptium.net/v3/binary/latest/$jdk/ga/linux/x64/jdk/hotspot/normal/eclipse" |
+                tar -xz -C "$TOOLCHAIN/jdk-$jdk.new" --strip-components=1
+            mv "$TOOLCHAIN/jdk-$jdk.new" "$TOOLCHAIN/jdk-$jdk"
+        fi
+        export JAVA_HOME="$TOOLCHAIN/jdk-$jdk"
+        export PATH="$JAVA_HOME/bin:$PATH"
+    fi
     gradle=$(version_of gradle)
     ndk=$(version_of ndk)
     if [ ! -d "$ANDROID_HOME/ndk/$ndk" ]; then
@@ -138,6 +153,9 @@ prune_old_tools() {
     sdk=$(version_of compileSdk)
     for d in "$TOOLCHAIN"/gradle-[0-9]*; do
         [ -x "$d/bin/gradle" ] && [ "$d" != "$TOOLCHAIN/gradle-$(version_of gradle)" ] && rm -rf "$d"
+    done
+    for d in "$TOOLCHAIN"/jdk "$TOOLCHAIN"/jdk-[0-9]*; do
+        [ -x "$d/bin/java" ] && [ "$d" != "$JAVA_HOME" ] && rm -rf "$d"
     done
     for d in "$ANDROID_HOME"/ndk/*; do
         [ "$d" = "$ANDROID_NDK_HOME" ] || rm -rf "$d"

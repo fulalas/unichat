@@ -212,6 +212,15 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         chatId = intent.getStringExtra("chatId") ?: run { finish(); return }
+        onBack {
+            when {
+                !::adapter.isInitialized -> return@onBack false
+                adapter.selectionMode -> adapter.clearSelection()
+                searchBar.visibility == android.view.View.VISIBLE -> closeSearch()
+                else -> return@onBack false
+            }
+            true
+        }
         pickViewOnce = savedInstanceState?.getBoolean(STATE_PICK_VIEW_ONCE) == true
         applyProtocolTheme(Accounts.ofChat(chatId))
         setContentView(R.layout.activity_chat)
@@ -398,15 +407,6 @@ class ChatActivity : BaseActivity(), Bridge.UiListener {
         updateActionButton()
 
         Bridge.requestInitialHistory(chatId)
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        when {
-            adapter.selectionMode -> adapter.clearSelection()
-            searchBar.visibility == android.view.View.VISIBLE -> closeSearch()
-            else -> @Suppress("DEPRECATION") super.onBackPressed()
-        }
     }
 
     override fun onStart() {

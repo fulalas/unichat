@@ -2,6 +2,10 @@ plugins {
     id 'com.android.application'
 }
 
+def kotlinMaxJava = org.jetbrains.kotlin.gradle.dsl.JvmTarget.values()*.target
+    .findAll { it ==~ /\d+/ }.collect { it as int }.max()
+def javaLevel = JavaVersion.toVersion(Math.min(JavaVersion.current().majorVersion as int, kotlinMaxJava))
+
 def lib = { String coord -> "$coord:${gradle.versions.getProperty(coord.replace(':', '/'))}" }
 
 def tgProps = new Properties()
@@ -56,9 +60,9 @@ android {
 
         applicationId = "org.unichat.app"
         minSdk = 29
-        targetSdk = 35
-        versionCode = 412
-        versionName = "0.69.2"
+        targetSdk = gradle.versions.compileSdk as int
+        versionCode = 413
+        versionName = "0.70.0"
         // Without this, appcompat/material drag in ~70 locales UniChat has no
         // strings for, so an unlisted system language showed translated stock
         // dialog buttons next to an untranslated app.
@@ -103,8 +107,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = javaLevel
+        targetCompatibility = javaLevel
     }
 }
 

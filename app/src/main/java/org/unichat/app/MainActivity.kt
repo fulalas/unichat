@@ -41,6 +41,11 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBack {
+            if (!::adapter.isInitialized || !adapter.selectionMode) return@onBack false
+            adapter.clearSelection()
+            true
+        }
 
         if (!Bridge.init(this) || !Bridge.hasAnySession()) {
             startActivity(Intent(this, LoginActivity::class.java))
@@ -518,12 +523,6 @@ class MainActivity : BaseActivity(), Bridge.UiListener {
             actionMode = null
             adapter.clearSelection()
         }
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (adapter.selectionMode) adapter.clearSelection()
-        else @Suppress("DEPRECATION") super.onBackPressed()
     }
 
     private fun openOnOtherAccount(chat: ChatRow) {
