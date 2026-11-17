@@ -10,7 +10,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 # against a newer API than minSdk installs fine and then dies at Bridge.init,
 # and a second copy of the number only stays right until someone bumps one of
 # them. build.sh reads it the same way for the gomobile bind.
-API=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*\([0-9]*\).*/\1/p' \
+API=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*=\{0,1\}[[:space:]]*\([0-9]*\).*/\1/p' \
     "$DIR/app/build.gradle" | head -1)
 : "${API:?could not read minSdk from app/build.gradle}"
 ABI=arm64-v8a

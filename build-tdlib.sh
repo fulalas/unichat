@@ -20,7 +20,7 @@ fi
 # against a newer API than minSdk installs fine and then dies at Bridge.init,
 # and this script's caches key on the TDLib commit alone, so a stale copy of the
 # number here would never rebuild anything. build.sh reads it the same way.
-API=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*\([0-9]*\).*/\1/p' \
+API=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*=\{0,1\}[[:space:]]*\([0-9]*\).*/\1/p' \
     "$DIR/app/build.gradle" | head -1)
 : "${API:?could not read minSdk from app/build.gradle}"
 JOBS=$(nproc)
@@ -44,8 +44,8 @@ TD_STAMP="$TD_SRC/.td-commit"
 # TDLib tracks upstream's tip, like whatsmeow, rather than a hash written down
 # here: a pinned commit only ever moved when someone remembered to edit it, and
 # it had to be kept in step with a git submodule that a downloaded zip does not
-# carry at all. build.sh polls weekly and only calls this script when the tip
-# has actually moved.
+# carry at all. build.sh polls every UNICHAT_UPDATE_DAYS days and only calls
+# this script when the tip has actually moved.
 command -v git >/dev/null || { echo "TDLib: git is required to fetch it" >&2; exit 1; }
 TD_WANT="${TD_COMMIT:-}"
 [ -n "$TD_WANT" ] || TD_WANT=$(git ls-remote "$TD_URL" "refs/heads/$TD_BRANCH" 2>/dev/null | cut -f1)
@@ -101,7 +101,10 @@ if ! command -v gperf >/dev/null && [ ! -x "$EXT/hosttools/bin/gperf" ]; then
 fi
 export PATH="$EXT/hosttools/bin:$PATH"
 
-OPENSSL_VER=3.3.2
+[ -n "$OPENSSL_VER" ] || OPENSSL_VER=$(git ls-remote --tags --refs https://github.com/openssl/openssl.git 'openssl-*' 2>/dev/null |
+    sed 's#.*refs/tags/openssl-##' | grep -E '^[0-9]+(\.[0-9]+)*$' | sort -V | tail -1)
+[ -n "$OPENSSL_VER" ] || OPENSSL_VER=$(cat "$EXT"/openssl-*/.build-key 2>/dev/null | sed 's/-android.*//' | sort -V | tail -1)
+[ -n "$OPENSSL_VER" ] || { echo "OpenSSL: upstream unreachable and nothing built yet" >&2; exit 1; }
 openssl_target() {
     case "$1" in
         arm64-v8a) echo android-arm64 ;;

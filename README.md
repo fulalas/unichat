@@ -130,7 +130,7 @@ compiles TDLib, OpenSSL and libsignal from source — but only once; after that
 the results are cached. Every build is a release build and drops the APK in the
 repo root as `unichat-<version>.apk`.
 
-**Third-party libraries are checked once a week** and picked up automatically.
+**Everything is updated to its latest version every 7 days** (`UNICHAT_UPDATE_DAYS`): libraries, Gradle, the Android SDK/NDK and the Go toolchain. No version is pinned in the repo.
 
 **A build installs automatically** when a device is attached.
 

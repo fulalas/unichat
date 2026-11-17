@@ -475,7 +475,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
             "INSERT INTO contacts(id, name, phone, is_self, is_group, is_saved) VALUES(?,?,?,?,?,?) " +
                 "ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone," +
                 "is_self=excluded.is_self, is_group=excluded.is_group, is_saved=excluded.is_saved",
-            arrayOf(id, name, phone, if (isSelf) 1 else 0, if (isGroup) 1 else 0, if (isSaved) 1 else 0)
+            arrayOf<Any?>(id, name, phone, if (isSelf) 1 else 0, if (isGroup) 1 else 0, if (isSaved) 1 else 0)
         )
     }
 
@@ -492,7 +492,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
         writableDatabase.execSQL(
             "INSERT INTO left_chats(id, left_at) VALUES(?,?) " +
                 "ON CONFLICT(id) DO UPDATE SET left_at=excluded.left_at",
-            arrayOf(chatId, at)
+            arrayOf<Any?>(chatId, at)
         )
     }
 
@@ -537,7 +537,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
                 "ON CONFLICT(id) DO UPDATE SET " +
                 "name=CASE WHEN excluded.name!='' THEN excluded.name ELSE name END," +
                 "archived=excluded.archived, last_time=max(last_time, excluded.last_time)",
-            arrayOf(id, name, if (archived) 1 else 0, lastTime)
+            arrayOf<Any?>(id, name, if (archived) 1 else 0, lastTime)
         )
     }
 
@@ -584,7 +584,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
         writableDatabase.execSQL(
             "INSERT INTO chats(id, last_time) VALUES(?,?) " +
                 "ON CONFLICT(id) DO UPDATE SET last_time=max(last_time, excluded.last_time)",
-            arrayOf(id, lastTime)
+            arrayOf<Any?>(id, lastTime)
         )
     }
 
@@ -617,7 +617,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
                 "file_size=CASE WHEN excluded.file_size>0 THEN excluded.file_size ELSE file_size END," +
                 "latitude=CASE WHEN excluded.latitude!=0 THEN excluded.latitude ELSE latitude END," +
                 "longitude=CASE WHEN excluded.longitude!=0 THEN excluded.longitude ELSE longitude END",
-            arrayOf(
+            arrayOf<Any?>(
                 m.chatId, m.id, m.senderId, m.text, if (m.fromMe) 1 else 0, m.timeSent,
                 if (m.isRead) 1 else 0, m.msgType, m.fileId, m.fileSize, if (m.edited) 1 else 0,
                 m.editTime, m.quotedId, m.quotedText, m.quotedType, m.senderName,
@@ -667,7 +667,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
         ) { it.getLong(0) } ?: 0
         if (newest > 0) execSQL(
             "UPDATE chats SET last_time=? WHERE id=? AND last_time>?",
-            arrayOf(newest, chatId, newest)
+            arrayOf<Any?>(newest, chatId, newest)
         )
         val parent = msgId.substringBeforeLast('-', "")
         if (parent.toLongOrNull() != null && msgId.substringAfterLast('-').toIntOrNull() != null) {
@@ -712,7 +712,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
                 execSQL(
                     "INSERT INTO deleted_chats(id, deleted_at) VALUES(?,?) " +
                         "ON CONFLICT(id) DO UPDATE SET deleted_at=excluded.deleted_at",
-                    arrayOf(chatId, now)
+                    arrayOf<Any?>(chatId, now)
                 )
             }
         } catch (e: Exception) {
@@ -733,7 +733,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
     fun setArchived(chatId: String, archived: Boolean) {
         writableDatabase.execSQL(
             "UPDATE chats SET archived=? WHERE id=?",
-            arrayOf(if (archived) 1 else 0, chatId)
+            arrayOf<Any?>(if (archived) 1 else 0, chatId)
         )
     }
 
@@ -784,7 +784,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
         writableDatabase.execSQL(
             "INSERT INTO scroll(chat_id, msg_id, offset) VALUES(?,?,?) " +
                 "ON CONFLICT(chat_id) DO UPDATE SET msg_id=excluded.msg_id, offset=excluded.offset",
-            arrayOf(chatId, msgId, offset)
+            arrayOf<Any?>(chatId, msgId, offset)
         )
     }
 
@@ -899,14 +899,14 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
     fun setFileDone(chatId: String, msgId: String, done: Long) {
         writableDatabase.execSQL(
             "UPDATE messages SET file_done=? WHERE chat_id=? AND id=?",
-            arrayOf(done, chatId, msgId)
+            arrayOf<Any?>(done, chatId, msgId)
         )
     }
 
     fun setFileSize(chatId: String, msgId: String, size: Long) {
         writableDatabase.execSQL(
             "UPDATE messages SET file_size=? WHERE chat_id=? AND id=? AND file_size=0",
-            arrayOf(size, chatId, msgId)
+            arrayOf<Any?>(size, chatId, msgId)
         )
     }
 
@@ -1026,7 +1026,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
                     "msg_type, file_id, file_path, file_status, file_size, quoted_id, quoted_text, quoted_type, " +
                     "latitude, longitude, send_pending, time_pinned) " +
                     "VALUES(?,?,?,?,1,?,0,?,'',?,?,?,?,?,?,?,?,1,1)",
-                arrayOf(
+                arrayOf<Any?>(
                     m.chatId, m.id, m.senderId, m.text, m.timeSent, m.msgType, m.filePath,
                     m.fileStatus, m.fileSize, m.quotedId, m.quotedText, m.quotedType,
                     m.latitude, m.longitude
@@ -1394,7 +1394,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, "unichat.db", null, 43) {
                 "site=excluded.site, title=excluded.title, description=excluded.description," +
                 "image_path=excluded.image_path, image_url=excluded.image_url," +
                 "status=excluded.status, fetched_at=excluded.fetched_at",
-            arrayOf(
+            arrayOf<Any?>(
                 row.url, row.site, row.title, row.description, row.imagePath, row.imageUrl,
                 if (row.hasPreview) 1 else 2, System.currentTimeMillis() / 1000
             )

@@ -1,7 +1,8 @@
 plugins {
     id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
 }
+
+def lib = { String coord -> "$coord:${gradle.versions.getProperty(coord.replace(':', '/'))}" }
 
 def tgProps = new Properties()
 def tgFile = rootProject.file('telegram.properties')
@@ -42,22 +43,22 @@ if (!file('libs/wmbridge.aar').exists()) {
 }
 
 android {
-    namespace 'org.unichat.app'
-    compileSdk 35
+    namespace = 'org.unichat.app'
+    compileSdk = gradle.versions.compileSdk as int
 
     buildFeatures {
-        buildConfig true
+        buildConfig = true
     }
 
     defaultConfig {
         buildConfigField "int", "TG_API_ID", tgApiId.toString()
         buildConfigField "String", "TG_API_HASH", "\"${tgApiHash}\""
 
-        applicationId "org.unichat.app"
-        minSdk 29
-        targetSdk 35
-        versionCode 408
-        versionName "0.68.6"
+        applicationId = "org.unichat.app"
+        minSdk = 29
+        targetSdk = 35
+        versionCode = 411
+        versionName = "0.69.1"
         // Without this, appcompat/material drag in ~70 locales UniChat has no
         // strings for, so an unlisted system language showed translated stock
         // dialog buttons next to an untranslated app.
@@ -76,19 +77,19 @@ android {
         // Fixed key stored in the repo so every build (on any machine) can
         // update the installed app in place without re-pairing WhatsApp.
         release {
-            storeFile file('../keystore/unichat.keystore')
-            storePassword 'wmchat'
-            keyAlias 'wmchat'
-            keyPassword 'wmchat'
+            storeFile = file('../keystore/unichat.keystore')
+            storePassword = 'wmchat'
+            keyAlias = 'wmchat'
+            keyPassword = 'wmchat'
         }
     }
 
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources true
+            minifyEnabled = true
+            shrinkResources = true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.release
+            signingConfig = signingConfigs.release
         }
     }
 
@@ -102,19 +103,16 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = '17'
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 }
 
 dependencies {
     implementation files('libs/wmbridge.aar')
-    implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'androidx.recyclerview:recyclerview:1.3.2'
-    implementation 'androidx.viewpager2:viewpager2:1.1.0'
-    implementation 'com.google.zxing:core:3.5.3'
-    implementation 'androidx.media3:media3-exoplayer:1.4.1'
+    implementation lib('androidx.appcompat:appcompat')
+    implementation lib('androidx.recyclerview:recyclerview')
+    implementation lib('androidx.viewpager2:viewpager2')
+    implementation lib('com.google.zxing:core')
+    implementation lib('androidx.media3:media3-exoplayer')
 }

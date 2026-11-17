@@ -6,11 +6,13 @@
 build/
 app/build/
 
-# Generated Go bridge (built by build.sh)
+# Generated Go bridge and its dependency list (built by build.sh)
+gobridge/go.mod
+gobridge/go.sum
 app/libs/wmbridge.aar
 app/libs/wmbridge-sources.jar
 
-# whatsmeow sources fetched by build.sh (pinned, not vendored)
+# whatsmeow sources fetched by build.sh (tracks upstream main)
 gobridge/ext/whatsmeow/
 
 # signalmeow sources fetched by build.sh, and the libsignal_ffi.a that
@@ -21,13 +23,16 @@ gobridge/ext/libsignal/
 # Final APK dropped in the repo root by build.sh
 /unichat-*.apk
 
+# Tool and library versions resolved by build.sh
+versions.properties
+
 # Machine-specific SDK location
 local.properties
 telegram.properties
 tdjson/ext/
 app/src/main/jniLibs/
 
-# weekly upstream-poll stamp
+# upstream-poll stamp
 gobridge/ext/.upstream-checked
 
 # TDLib sources, fetched by build-tdlib.sh (tracks upstream master)

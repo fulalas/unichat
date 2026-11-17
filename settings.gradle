@@ -1,4 +1,16 @@
 pluginManagement {
+    def versions = new Properties()
+    def versionsFile = new File(settingsDir, 'versions.properties')
+    if (!versionsFile.exists()) {
+        throw new GradleException("versions.properties not found; run ./build.sh to resolve the latest versions")
+    }
+    versionsFile.withInputStream { versions.load(it) }
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id == 'com.android.application') useVersion(versions.agp)
+            if (requested.id.id == 'org.jetbrains.kotlin.android') useVersion(versions.kotlin)
+        }
+    }
     repositories {
         google()
         mavenCentral()
@@ -12,5 +24,8 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
+gradle.ext.versions = new Properties()
+file('versions.properties').withInputStream { gradle.versions.load(it) }
+
 rootProject.name = "unichat"
 include ':app'

@@ -34,44 +34,115 @@ adb_device_serial() {
     "$adb" devices 2>/dev/null | awk 'NR>1 && $2=="device"{print $1}' | head -1
 }
 
-if [ -n "$UNICHAT_ENV" ] && [ -f "$UNICHAT_ENV" ]; then
-    source "$UNICHAT_ENV"
-elif [ -f "$DIR/../toolchain/env.sh" ]; then
-    source "$DIR/../toolchain/env.sh"
-fi
+ENV_FILE="$DIR/../toolchain/env.sh"
+[ -n "$UNICHAT_ENV" ] && [ -f "$UNICHAT_ENV" ] && ENV_FILE="$UNICHAT_ENV"
+[ -f "$ENV_FILE" ] && source "$ENV_FILE"
+TOOLCHAIN="$(mkdir -p "$(dirname "$ENV_FILE")" && cd "$(dirname "$ENV_FILE")" && pwd)"
 
-GRADLE="${GRADLE:-gradle}"
-
-# whatsmeow is not vendored; build.sh tracks the tip of upstream main, fetching
-# it into gobridge/ext/whatsmeow (mapped via a replace directive in go.mod) and
-# applying a small local patch on top. The checked-out SHA is stamped in the
-# (gitignored) tree so a refetch happens only when upstream main has moved;
-# delete gobridge/ext/whatsmeow to force one.
 WHATSMEOW_REPO="https://github.com/tulir/whatsmeow.git"
 WHATSMEOW_BRANCH="main"
-
-# signalmeow (Signal) rides in the same way, but pinned to a tag rather than
-# tracking main: pkg/libsignalgo is hand-written cgo against one libsignal ABI,
-# and build-libsignal.sh reads the required libsignal version out of the
-# checkout. Moving this pin means rebuilding libsignal_ffi.a, which the stamp in
-# gobridge/ext/libsignal handles automatically.
 SIGNALMEOW_REPO="https://github.com/mautrix/signal.git"
-SIGNALMEOW_TAG="v0.2609.0"
 
-# Upstream is polled once a week, not once a build: whatsmeow used to hit the
-# network on every run while signalmeow and TDLib sat on their pins forever, so
-# the two libraries carrying the Signal protocol drifted behind while only
-# WhatsApp stayed current. ISO year-week, so the window rolls over on a Monday
-# rather than 7 days after whenever the last build happened to be.
+UPDATE_DAYS="${UNICHAT_UPDATE_DAYS:-7}"
 UPDATE_STAMP="$DIR/gobridge/ext/.upstream-checked"
-week_due() { [ "$(cat "$UPDATE_STAMP" 2>/dev/null)" != "$(date +%G-W%V)" ]; }
-mark_checked() { mkdir -p "$(dirname "$UPDATE_STAMP")"; date +%G-W%V > "$UPDATE_STAMP"; }
+update_due() {
+    local last
+    last=$(cat "$UPDATE_STAMP" 2>/dev/null)
+    [[ "$last" =~ ^[0-9]+$ ]] || return 0
+    [ $(( $(date +%s) - last )) -ge $(( UPDATE_DAYS * 86400 )) ]
+}
+mark_checked() { mkdir -p "$(dirname "$UPDATE_STAMP")"; date +%s > "$UPDATE_STAMP"; }
+
+VERSIONS="$DIR/versions.properties"
+VERSIONS_PREV=""
+version_of() { sed -n "s#^$1=##p" "$VERSIONS" | tail -1; }
+
+maven_latest() {
+    local g="${1%%:*}" a="${1##*:}" repo v
+    for repo in https://dl.google.com/android/maven2 https://repo1.maven.org/maven2; do
+        v=$(curl -fsSL "$repo/${g//.//}/$a/maven-metadata.xml" 2>/dev/null |
+            grep -oE '<version>[0-9]+(\.[0-9]+)*</version>' | sed 's/<[^>]*>//g' | sort -V | tail -1)
+        [ -n "$v" ] && { echo "$v"; return; }
+    done
+}
+
+resolve_versions() {
+    local out list coord
+    echo "== Resolving the latest Gradle, Android SDK and library versions =="
+    yes | sdkmanager --install "cmdline-tools;latest" >/dev/null 2>&1 || true
+    if [ -d "$ANDROID_HOME/cmdline-tools/latest-2" ]; then
+        rm -rf "$ANDROID_HOME/cmdline-tools/latest"
+        mv "$ANDROID_HOME/cmdline-tools/latest-2" "$ANDROID_HOME/cmdline-tools/latest"
+    fi
+    list=$(android sdk list --all 2>/dev/null)
+    out=$(mktemp)
+    {
+        echo "gradle=$(curl -fsSL https://services.gradle.org/versions/current 2>/dev/null |
+            sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p')"
+        echo "agp=$(maven_latest com.android.tools.build:gradle)"
+        echo "kotlin=$(maven_latest org.jetbrains.kotlin:kotlin-gradle-plugin)"
+        echo "ndk=$(printf '%s\n' "$list" | grep -oE '^\s*ndk/[0-9.]+\s' | sed 's#.*/##; s/\s*$//' | sort -V | tail -1)"
+        echo "compileSdk=$(printf '%s\n' "$list" | grep -oE '^\s*platforms/android-[0-9]+' | sed 's/.*-//' | sort -n | tail -1)"
+        for coord in $(grep -oE "lib\('[^']+'\)" "$DIR/app/build.gradle" | sed "s/lib('\(.*\)')/\1/"); do
+            echo "${coord/:/\/}=$(maven_latest "$coord")"
+        done
+    } > "$out"
+    if grep -q '=$' "$out"; then
+        rm -f "$out"
+        [ -f "$VERSIONS" ] || { echo "could not resolve tool and library versions (offline?)" >&2; exit 1; }
+        echo "   WARNING: could not resolve every version; keeping the previous set" >&2
+        return
+    fi
+    if [ -f "$VERSIONS" ] && ! cmp -s "$out" "$VERSIONS"; then
+        VERSIONS_PREV=$(mktemp)
+        cp "$VERSIONS" "$VERSIONS_PREV"
+    fi
+    mv "$out" "$VERSIONS"
+}
+
+install_versions() {
+    local gradle ndk
+    gradle=$(version_of gradle)
+    ndk=$(version_of ndk)
+    if [ ! -d "$ANDROID_HOME/ndk/$ndk" ]; then
+        echo "== Installing Android NDK $ndk =="
+        yes | android sdk install "ndk/$ndk" >/dev/null
+    fi
+    export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ndk"
+    if [ ! -x "$TOOLCHAIN/gradle-$gradle/bin/gradle" ]; then
+        echo "== Installing Gradle $gradle =="
+        curl -fsSL -o "$TOOLCHAIN/gradle-$gradle.zip.part" \
+            "https://services.gradle.org/distributions/gradle-$gradle-bin.zip"
+        unzip -q -o "$TOOLCHAIN/gradle-$gradle.zip.part" -d "$TOOLCHAIN"
+        rm -f "$TOOLCHAIN/gradle-$gradle.zip.part"
+    fi
+    GRADLE="$TOOLCHAIN/gradle-$gradle/bin/gradle"
+}
+
+prune_old_tools() {
+    local d sdk
+    sdk=$(version_of compileSdk)
+    for d in "$TOOLCHAIN"/gradle-*; do
+        [ "$d" = "$TOOLCHAIN/gradle-$(version_of gradle)" ] || rm -rf "$d"
+    done
+    for d in "$ANDROID_HOME"/ndk/*; do
+        [ "$d" = "$ANDROID_NDK_HOME" ] || rm -rf "$d"
+    done
+    for d in "$ANDROID_HOME"/platforms/*; do
+        case "${d##*/}" in android-"$sdk"|android-"$sdk".*) ;; *) rm -rf "$d" ;; esac
+    done
+}
+
+if [ ! -f "$VERSIONS" ] || { [ "$APK_ONLY" != 1 ] && update_due; }; then
+    resolve_versions
+fi
+install_versions
 
 # Plain version tags only: signalmeow also publishes -rc and helper tags, and
 # sort -V happily ranks those above the release we want.
 latest_tag() {
-    git ls-remote --tags --refs "$1" 2>/dev/null |
-        sed 's#.*refs/tags/##' | grep -E '^v[0-9]+(\.[0-9]+)*$' | sort -V | tail -1
+    git ls-remote --tags --refs "$1" "$2*" 2>/dev/null |
+        sed "s#.*refs/tags/$2##" | grep -E '^[0-9]+(\.[0-9]+)*$' | sort -V | tail -1 | sed "s#^#$2#"
 }
 
 newer_tag() {
@@ -90,113 +161,78 @@ swap_in_checkout() {
     mv "$staging" "$dest"
 }
 
-# go.mod replaces both modules with the trees under gobridge/ext, so tidy only
-# resolves them once the tree is in place. Upstream may also have added module
-# requirements; reconciling go.sum here beats failing the build with "missing
-# go.sum entry" on every later run.
-tidy_gobridge() {
-    ( cd "$DIR/gobridge" && go mod tidy ) || { echo "$1" >&2; exit 1; }
-}
-
-stage_signalmeow() {
-    local tag="$1" staging="$2" patch="$3"
-    rm -rf "$staging"
-    if ! git clone -q --depth 1 --branch "$tag" "$SIGNALMEOW_REPO" "$staging"; then
-        rm -rf "$staging"
-        echo "signalmeow: fetch of $tag failed" >&2
-        return 1
+refresh_go_deps() {
+    local gb="$DIR/gobridge" upgrade=0 bak
+    if [ ! -f "$gb/go.mod" ] || update_due; then
+        upgrade=1
+    elif [ ! "$gb/ext/whatsmeow/.wm-commit" -nt "$gb/go.mod" ] &&
+         [ ! "$gb/ext/signal/.sg-tag" -nt "$gb/go.mod" ]; then
+        return
     fi
-    # Unlike whatsmeow's, this patch is not optional: it is what makes the cgo
-    # link flags Android-correct (the NDK has no libstdc++), so an unpatched tree
-    # fails at link, not at runtime. Fail loudly instead of building it.
-    if ! git -C "$staging" apply "$patch"; then
-        rm -rf "$staging"
-        echo "signalmeow: signal-local.patch did not apply against $tag" >&2
-        return 1
+    echo "== Resolving Go dependencies =="
+    bak=$(mktemp -d)
+    cp "$gb/go.mod" "$gb/go.sum" "$bak/" 2>/dev/null || true
+    if ( cd "$gb" &&
+         { [ -f go.mod ] || {
+             go mod init unichat/gobridge 2>/dev/null &&
+             go mod edit -require=go.mau.fi/whatsmeow@v0.0.0 -replace=go.mau.fi/whatsmeow=./ext/whatsmeow \
+                         -require=go.mau.fi/mautrix-signal@v0.0.0 -replace=go.mau.fi/mautrix-signal=./ext/signal &&
+             go get -tool golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind; }; } &&
+         { [ "$upgrade" = 0 ] || go get -u ./... tool go@latest; } &&
+         go mod tidy && touch go.mod &&
+         go install golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind ); then
+        rm -rf "$bak"
+        return
     fi
-}
-
-install_signalmeow() {
-    local tag="$1" staging="$2" dest="$3"
-    swap_in_checkout "$staging" "$dest"
-    # Re-assert the replace before tidying. Without it tidy happily resolves
-    # mautrix-signal to the published release in the module cache instead of
-    # this patched checkout — the build still succeeds, so the only symptom is
-    # the unpatched cgo flags coming back and the app dying at startup on a
-    # missing libc++_shared.so. Cost an afternoon once; not relying on go.mod
-    # keeping the line.
-    ( cd "$DIR/gobridge" &&
-      go mod edit -require=go.mau.fi/mautrix-signal@v0.0.0 \
-                  -replace=go.mau.fi/mautrix-signal=./ext/signal ) || {
-        echo "signalmeow: go mod edit failed for $tag" >&2
-        exit 1
-    }
-    ( cd "$DIR/gobridge" && go mod tidy ) || {
-        echo "signalmeow: go mod tidy failed after updating to $tag" >&2
-        return 1
-    }
+    if [ -f "$bak/go.mod" ]; then
+        echo "   WARNING: could not resolve Go dependencies; keeping the previous set" >&2
+        cp "$bak"/go.* "$gb/"
+        rm -rf "$bak"
+        return
+    fi
+    rm -rf "$bak"
+    echo "Go dependencies could not be resolved" >&2
+    exit 1
 }
 
 ensure_signalmeow() {
     local dest="$DIR/gobridge/ext/signal"
     local stamp="$dest/.sg-tag"
     local patch="$DIR/gobridge/ext/signal-local.patch"
-    local pinned="$SIGNALMEOW_TAG" have known
+    local have tag
     have=$(cat "$stamp" 2>/dev/null || true)
-    # Never go backwards. The adopted tag was only ever held in this variable, so
-    # the next build of the same week re-read the pin, saw the stamp disagree,
-    # and re-cloned the OLDER tag — an upgrade on Monday, a silent downgrade on
-    # Tuesday, every week. Taking the newer of the two also lets a pin someone
-    # moves forward beat a stamp written before the bump, which otherwise pinned
-    # the tree to a version the bridge no longer compiles against.
-    known=$(newer_tag "$have" "$pinned")
-    SIGNALMEOW_TAG="$known"
-    if week_due; then
-        local newest
-        newest=$(latest_tag "$SIGNALMEOW_REPO")
-        newest=$(newer_tag "$newest" "$known")
-        if [ "$newest" != "$SIGNALMEOW_TAG" ]; then
-            echo "== signalmeow: upstream has $newest (was $SIGNALMEOW_TAG) =="
-            SIGNALMEOW_TAG="$newest"
-        fi
+    [ -d "$dest" ] || have=""
+    tag="$have"
+    if [ -z "$have" ] || update_due; then
+        tag=$(newer_tag "$(latest_tag "$SIGNALMEOW_REPO" v)" "$have")
     fi
-    if [ -d "$dest" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$SIGNALMEOW_TAG" ]; then
-        echo "== signalmeow up to date @ $SIGNALMEOW_TAG =="
+    if [ -z "$tag" ]; then
+        echo "signalmeow: upstream unreachable and nothing fetched yet" >&2
+        exit 1
+    fi
+    if [ "$tag" = "$have" ]; then
+        echo "== signalmeow up to date @ $tag =="
         return
     fi
-    echo "== Fetching signalmeow @ $SIGNALMEOW_TAG =="
+    echo "== Fetching signalmeow @ $tag =="
     local staging="$dest.new"
-    if stage_signalmeow "$SIGNALMEOW_TAG" "$staging" "$patch" &&
-       install_signalmeow "$SIGNALMEOW_TAG" "$staging" "$dest"; then
-        echo "$SIGNALMEOW_TAG" > "$stamp"
+    rm -rf "$staging"
+    if ! git clone -q --depth 1 --branch "$tag" "$SIGNALMEOW_REPO" "$staging"; then
+        echo "signalmeow: fetch of $tag failed" >&2
+    elif ! git -C "$staging" apply "$patch"; then
+        echo "signalmeow: signal-local.patch did not apply against $tag" >&2
+    else
+        swap_in_checkout "$staging" "$dest"
+        echo "$tag" > "$stamp"
         return
     fi
-    # Only fatal for a tag someone chose. An automatic weekly bump landing on a
-    # release the patch predates, or one that restructures packages the bridge
-    # imports, would otherwise kill every build until someone fixed it by hand —
-    # the calendar must not break the build.
-    if [ "$SIGNALMEOW_TAG" = "$known" ]; then
-        echo "   refresh gobridge/ext/signal-local.patch or move the pin; the Go bridge cannot build without a usable checkout" >&2
-        exit 1
-    fi
-    # Keep a working stamped checkout: resetting to the hardcoded pin here
-    # discarded a newer adopted tag and re-cloned the OLDER one — the same silent
-    # downgrade the stamp exists to prevent. install_signalmeow has already
-    # deleted $dest by the time it can fail, so re-reading the stamp to find the
-    # last good tag does not work; $known was captured before any of that.
-    if [ "$(cat "$stamp" 2>/dev/null || true)" = "$known" ] && [ -d "$dest" ]; then
-        echo "   keeping $known; adopt $SIGNALMEOW_TAG by hand once the bridge builds against it" >&2
-        SIGNALMEOW_TAG="$known"
+    rm -rf "$staging"
+    if [ -n "$have" ]; then
+        echo "   keeping $have; refresh gobridge/ext/signal-local.patch for $tag" >&2
         return
     fi
-    echo "   falling back to $known; adopt $SIGNALMEOW_TAG by hand once the bridge builds against it" >&2
-    if ! stage_signalmeow "$known" "$staging" "$patch" ||
-       ! install_signalmeow "$known" "$staging" "$dest"; then
-        echo "signalmeow: $known no longer works either" >&2
-        exit 1
-    fi
-    SIGNALMEOW_TAG="$known"
-    echo "$known" > "$stamp"
+    echo "   refresh gobridge/ext/signal-local.patch; the Go bridge cannot build without a usable checkout" >&2
+    exit 1
 }
 
 ensure_whatsmeow() {
@@ -204,7 +240,7 @@ ensure_whatsmeow() {
     local stamp="$dest/.wm-commit"
     local patch="$DIR/gobridge/ext/whatsmeow-local.patch"
     local lsout latest
-    if [ -d "$dest" ] && ! week_due; then
+    if [ -d "$dest" ] && ! update_due; then
         echo "== whatsmeow up to date @ $(cut -c1-12 "$stamp" 2>/dev/null) =="
         return
     fi
@@ -266,17 +302,13 @@ ensure_whatsmeow() {
         fi
     fi
     swap_in_checkout "$staging" "$dest"
-    tidy_gobridge "whatsmeow: go mod tidy failed after updating to ${latest:0:12}"
-    # Stamp LAST: the stamp is what makes later runs skip this function entirely.
-    # Writing it before tidy had succeeded marked a half-updated checkout as good
-    # forever — a single transient tidy failure then left every later build dying
-    # with "missing go.sum entry" until someone deleted the tree by hand.
     echo "$latest" > "$stamp"
 }
 
 if [ "$APK_ONLY" != 1 ]; then
     ensure_whatsmeow
     ensure_signalmeow
+    refresh_go_deps
     NDK_LLVM="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64"
     # Must run after ensure_signalmeow: it reads the required libsignal version
     # out of the signalmeow checkout.
@@ -296,7 +328,7 @@ if [ "$APK_ONLY" != 1 ]; then
     # -androidapi must match minSdk in app/build.gradle, and the target list must
     # match its abiFilters — an APK whose native lib needs a newer API than
     # minSdk installs fine and then dies with UnsatisfiedLinkError at Bridge.init.
-    MIN_SDK=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*\([0-9]*\).*/\1/p' \
+    MIN_SDK=$(sed -n 's/^[[:space:]]*minSdk[[:space:]]*=\{0,1\}[[:space:]]*\([0-9]*\).*/\1/p' \
         "$DIR/app/build.gradle" | head -1)
     : "${MIN_SDK:?could not read minSdk from app/build.gradle}"
     mkdir -p "$DIR/app/libs"
@@ -369,20 +401,27 @@ for abi in "${TD_ABIS[@]}"; do
         fi
     done
 done
-# The tip is resolved here and handed down, so the weekly stamp governs TDLib
-# the same way it governs the other two — build-tdlib.sh would otherwise poll
-# again on its own.
 TD_REBUILD=0
 if [ ${#TD_MISSING[@]} -gt 0 ]; then
     echo "== TDLib libs missing for ${TD_MISSING[*]} =="
     TD_REBUILD=1
-elif [ "$APK_ONLY" != 1 ] && week_due; then
+elif [ "$APK_ONLY" != 1 ] && update_due; then
     TD_LATEST=$(git ls-remote https://github.com/tdlib/td.git refs/heads/master 2>/dev/null | cut -f1)
+    OSSL_LATEST=$(latest_tag https://github.com/openssl/openssl.git openssl-)
+    OSSL_LATEST="${OSSL_LATEST#openssl-}"
+    OSSL_BUILT=$(sed 's/-android.*//' "$DIR/tdjson/ext/openssl-${TD_ABIS[0]}/.build-key" 2>/dev/null)
     if [ -n "$TD_LATEST" ] && [ "$TD_LATEST" != "$(cat "$DIR/tdjson/td/.td-commit" 2>/dev/null)" ]; then
         echo "== TDLib: upstream master moved to ${TD_LATEST:0:12}; rebuilding =="
-        TD_MISSING=("${TD_ABIS[@]}")
         TD_REBUILD=1
-        export TD_COMMIT="$TD_LATEST"
+    fi
+    if [ -n "$OSSL_LATEST" ] && [ "$OSSL_LATEST" != "$OSSL_BUILT" ]; then
+        echo "== OpenSSL: $OSSL_LATEST released (built with ${OSSL_BUILT:-none}); rebuilding TDLib =="
+        TD_REBUILD=1
+    fi
+    if [ "$TD_REBUILD" = 1 ]; then
+        TD_MISSING=("${TD_ABIS[@]}")
+        [ -n "$TD_LATEST" ] && export TD_COMMIT="$TD_LATEST"
+        [ -n "$OSSL_LATEST" ] && export OPENSSL_VER="$OSSL_LATEST"
     fi
 fi
 if [ "$TD_REBUILD" = 1 ]; then
@@ -393,9 +432,16 @@ fi
 
 echo "== Building release APK =="
 cd "$DIR"
-"$GRADLE" assembleRelease --no-daemon
+if ! "$GRADLE" assembleRelease --no-daemon; then
+    [ -n "$VERSIONS_PREV" ] || exit 1
+    echo "== Build failed with the new versions; retrying with the previous ones ==" >&2
+    mv "$VERSIONS_PREV" "$VERSIONS"
+    install_versions
+    "$GRADLE" assembleRelease --no-daemon
+fi
+prune_old_tools
 
-VERSION=$(sed -n "s/^[[:space:]]*versionName[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" \
+VERSION=$(sed -n "s/^[[:space:]]*versionName[[:space:]]*=\{0,1\}[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" \
     "$DIR/app/build.gradle" | head -1)
 if [ -z "$VERSION" ]; then
     echo "error: could not read versionName from app/build.gradle" >&2
